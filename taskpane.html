@@ -504,51 +504,116 @@
     padding: 4px 10px 9px;
   }
 
-  /* ---- Top Auto-Saved Material Card ---- */
-  .autosave-card {
-    background: #F4FBF7;
-    border: 1px solid #B7DEC6;
-    border-left: 3px solid var(--brand);
-    border-radius: var(--radius);
-    padding: 10px 11px;
-    margin-bottom: 10px;
+  /* ---- Aesthetic Auto-Collapsing Change Notification & Session History ---- */
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
   }
-  .autosave-hdr {
+  @keyframes toastShrink {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
+  @keyframes btnPop {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .change-toast {
+    position: relative;
+    overflow: hidden;
+    background: #FFFFFF;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
+    padding: 11px 12px 13px;
+    margin-bottom: 10px;
+    box-shadow: 0 6px 18px rgba(20, 42, 30, 0.09), 0 1px 2px rgba(20, 42, 30, 0.04);
+    animation: toastIn 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .change-toast.closing {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+  .change-toast.kind-added { border-color: #B7DEC6; }
+  .change-toast.kind-modified { border-color: #BFDBFE; }
+  .change-toast.kind-removed { border-color: #FECACA; }
+
+  .toast-top {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    margin-bottom: 6px;
+    gap: 9px;
+    margin-bottom: 8px;
   }
-  .autosave-title {
-    font-size: 10.5px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .04em;
+  .toast-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: #E8F5EE;
     color: var(--ok);
   }
-  .autosave-meta {
-    font-size: 10.5px;
+  .change-toast.kind-modified .toast-icon { background: #EFF6FF; color: #1D4ED8; }
+  .change-toast.kind-removed .toast-icon { background: #FEF2F2; color: var(--danger); }
+
+  .toast-head {
+    flex: 1;
+    min-width: 0;
+  }
+  .toast-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  .toast-sub {
+    font-size: 11px;
     color: var(--muted);
-    margin-left: auto;
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
-  .autosave-item {
-    background: #fff;
-    border: 1px solid #DCEBE1;
-    border-radius: var(--radius-sm);
+  .toast-close {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .toast-close:hover { background: #F1F5F3; color: var(--text); }
+
+  .toast-items {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .toast-item {
+    background: #F8FAF9;
+    border: 1px solid #E5ECE8;
+    border-radius: 8px;
     padding: 7px 9px;
-    margin-top: 6px;
-    transition: border-color .12s;
+    transition: border-color 0.14s, background 0.14s;
   }
-  .autosave-item.clickable { cursor: pointer; }
-  .autosave-item.clickable:hover { border-color: var(--brand); }
-  .autosave-item-top {
+  .toast-item.clickable { cursor: pointer; }
+  .toast-item.clickable:hover { border-color: var(--brand); background: #F3FAF6; }
+  .toast-item-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 6px;
   }
-  .autosave-name {
+  .toast-name {
     font-size: 12.5px;
     font-weight: 600;
     color: var(--text);
@@ -556,26 +621,173 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .autosave-tag {
-    font-size: 10.5px;
-    font-weight: 600;
+  .toast-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1.5px 6px;
+    border-radius: 5px;
+    letter-spacing: 0.02em;
     white-space: nowrap;
     flex-shrink: 0;
   }
-  .autosave-tag.added { color: var(--ok); }
-  .autosave-tag.edited { color: #1F5E9C; }
-  .autosave-tag.removed { color: var(--err); }
-  .autosave-info {
-    font-size: 11.5px;
-    color: var(--muted);
-    margin-top: 3px;
-    line-height: 1.4;
-  }
-  .autosave-diff {
+  .toast-badge.added { background: #E8F5EE; color: #157347; }
+  .toast-badge.modified { background: #EFF6FF; color: #1D4ED8; }
+  .toast-badge.removed { background: #FEF2F2; color: #B42318; }
+  .toast-info {
     font-size: 11px;
-    color: var(--text);
-    margin-top: 3px;
+    color: var(--muted);
+    margin-top: 2px;
+    line-height: 1.38;
   }
+  .toast-diff {
+    font-size: 11px;
+    color: #26332C;
+    margin-top: 2px;
+  }
+  .toast-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 7px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+  .toast-bar-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: #EEF2EF;
+  }
+  .toast-bar {
+    height: 100%;
+    width: 100%;
+    transform-origin: left center;
+    background: linear-gradient(90deg, #1D6F42, #34A86B);
+    animation: toastShrink 5.5s linear forwards;
+  }
+  .change-toast.kind-modified .toast-bar { background: linear-gradient(90deg, #1D4ED8, #60A5FA); }
+  .change-toast.kind-removed .toast-bar { background: linear-gradient(90deg, #B42318, #F87171); }
+  .change-toast:hover .toast-bar { animation-play-state: paused; }
+
+  /* Compact Session Changes Button & Expandable History Panel */
+  .session-wrap {
+    margin-bottom: 10px;
+    animation: btnPop 0.2s ease;
+  }
+  .session-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: #FFFFFF;
+    border: 1px solid #D3E3D9;
+    border-radius: 9px;
+    text-align: left;
+    box-shadow: 0 1px 2px rgba(16, 24, 20, 0.03);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .session-btn:hover {
+    border-color: var(--brand);
+    background: #F9FCFA;
+  }
+  .session-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .session-dot.modified { background: #2563EB; }
+  .session-dot.removed { background: var(--danger); }
+  .session-btn-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .session-count {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--brand);
+    background: var(--brand-soft);
+    border: 1px solid var(--brand-border);
+    border-radius: 5px;
+    padding: 0 5px;
+    line-height: 1.5;
+    flex-shrink: 0;
+  }
+  .session-preview {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .session-caret {
+    color: var(--muted);
+    font-size: 11px;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  .session-btn[aria-expanded="true"] .session-caret { transform: rotate(90deg); }
+
+  .session-panel {
+    margin-top: 6px;
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(16, 24, 20, 0.06);
+  }
+  .session-panel-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    background: #F7FAF8;
+    border-bottom: 1px solid #EAEFED;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .session-panel-list {
+    max-height: 210px;
+    overflow: auto;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .session-row {
+    background: #FAFDFB;
+    border: 1px solid #E8EFEA;
+    border-radius: 7px;
+    padding: 6px 8px;
+    transition: border-color 0.13s;
+  }
+  .session-row.clickable { cursor: pointer; }
+  .session-row.clickable:hover { border-color: var(--brand); background: #F3FAF6; }
+  .session-row-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .session-row-time {
+    font-size: 10px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+  }
+
   #mat-list .mrow.recent {
     background: #F4FBF7;
   }
@@ -586,7 +798,7 @@
     margin-left: 4px;
     flex-shrink: 0;
   }
-  #mat-list .mtag.edited { color: #1F5E9C; }
+  #mat-list .mtag.modified { color: #1D4ED8; }
 
   /* ---- Log Output ---- */
   .log {
@@ -772,14 +984,40 @@
 
     <!-- ===================== MATERIALS ===================== -->
     <section id="page-mat" hidden>
-      <!-- Top Auto-Saved Material Card (visible as soon as a change is auto-saved from Master sheet or form) -->
-      <div id="mat-autosave-card" class="autosave-card" hidden>
-        <div class="autosave-hdr">
-          <span class="autosave-title">Last Auto-Saved</span>
-          <span id="mat-autosave-meta" class="autosave-meta"></span>
-          <button type="button" id="mat-autosave-dismiss" class="link-btn" title="Hide this notice">Clear</button>
+      <!-- Aesthetic Auto-Collapsing Change Notification (displays fully for 5.5s, then collapses into compact Session Changes button) -->
+      <div id="mat-change-toast" class="change-toast" hidden>
+        <div class="toast-top">
+          <span id="mat-toast-icon" class="toast-icon" aria-hidden="true"></span>
+          <div class="toast-head">
+            <div id="mat-toast-title" class="toast-title">Change Saved</div>
+            <div id="mat-toast-sub" class="toast-sub"></div>
+          </div>
+          <button type="button" id="mat-toast-close" class="toast-close" title="Collapse to session log" aria-label="Collapse notification">&times;</button>
         </div>
-        <div id="mat-autosave-body"></div>
+        <div id="mat-toast-items" class="toast-items"></div>
+        <div class="toast-foot">
+          <span id="mat-toast-where"></span>
+          <span id="mat-toast-hint"></span>
+        </div>
+        <div class="toast-bar-track"><div id="mat-toast-bar" class="toast-bar"></div></div>
+      </div>
+
+      <!-- Compact Session Changes Button + Expandable History List -->
+      <div id="mat-session-wrap" class="session-wrap" hidden>
+        <button type="button" id="mat-changes-btn" class="session-btn" aria-expanded="false" aria-controls="mat-changes-panel">
+          <span id="mat-session-dot" class="session-dot"></span>
+          <span class="session-btn-label">Session changes</span>
+          <span id="mat-session-count" class="session-count">0</span>
+          <span id="mat-session-preview" class="session-preview"></span>
+          <span class="session-caret" aria-hidden="true">&#9656;</span>
+        </button>
+        <div id="mat-changes-panel" class="session-panel" hidden>
+          <div class="session-panel-hdr">
+            <span>Changes this session</span>
+            <button type="button" id="mat-session-clear" class="link-btn">Clear</button>
+          </div>
+          <div id="mat-changes-list" class="session-panel-list"></div>
+        </div>
       </div>
 
       <!-- Main Panel 1: Search & Browse Master List -->
@@ -831,7 +1069,7 @@
         <details class="drawer inner-drawer" id="m-more">
           <summary>
             <span class="sum-left"><span>More options</span></span>
-            <span id="m-more-meta" class="sum-meta">Category, cost, remarks</span>
+            <span id="m-more-meta" class="sum-meta">Category, remarks</span>
             <span class="sum-caret" aria-hidden="true">&#9656;</span>
           </summary>
           <div class="drawer-body">
@@ -839,10 +1077,6 @@
               <span>Category (optional)</span>
               <input type="text" id="m-cat" list="m-cats" placeholder="e.g. Structural Beams" autocomplete="off">
               <datalist id="m-cats"></datalist>
-            </label>
-            <label class="field">
-              <span>Unit cost (optional)</span>
-              <input type="text" id="m-cost" inputmode="decimal" placeholder="e.g. 95.00" autocomplete="off">
             </label>
             <label class="field">
               <span>Remarks (optional)</span>
@@ -1011,10 +1245,10 @@
     </section>
   </main>
 
-  <script src="convert.js?v=12"></script>
-  <script src="tools.js?v=12"></script>
-  <script src="template-data.js?v=12"></script>
-  <script src="sync.js?v=12"></script>
-  <script src="taskpane.js?v=12"></script>
+  <script src="convert.js?v=13"></script>
+  <script src="tools.js?v=13"></script>
+  <script src="template-data.js?v=13"></script>
+  <script src="sync.js?v=13"></script>
+  <script src="taskpane.js?v=13"></script>
 </body>
 </html>

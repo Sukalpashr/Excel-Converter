@@ -147,7 +147,7 @@ function showTab(name, opts) {
     refreshMaterials();
     refreshLocalFileStatus();
     refreshSync();
-    renderAutoSaveCard();
+    renderSessionChanges();
     BomSync.watch(localLog, handleAutoSaveEvent);
   }
   if (name === "convert") {
@@ -502,9 +502,21 @@ async function repairWorkbook(logger, pickerId) {
 }
 
 /* =====================================================================
- * Materials
+ * Materials + Aesthetic Change Notification & Session History
  * ===================================================================== */
-var mat = { rows: [], mode: "add", selected: null, lastAutoSave: null, recentMap: {} };
+var TOAST_DURATION_MS = 5500;
+var mat = {
+  rows: [],
+  mode: "add",
+  selected: null,
+  sessionLog: [],
+  recentMap: {},
+  toastTimer: null,
+  toastRemaining: 0,
+  toastStartedAt: 0,
+  toastVisible: false,
+  sessionOpen: false
+};
 
 var FIELD_LABELS = {
   category: "Category",
@@ -514,9 +526,20 @@ var FIELD_LABELS = {
   piece: "Piece Weight",
   sl: "Sheet Length",
   sw: "Sheet Width",
-  cost: "Cost",
   remarks: "Remarks"
 };
+
+var TOAST_ICONS = {
+  added: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+  modified: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+  removed: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>'
+};
+
+function normalizeChangeType(t) {
+  if (t === "added") return "added";
+  if (t === "removed") return "removed";
+  return "modified";
+}
 
 function formatClock(iso) {
   try {
@@ -536,8 +559,7 @@ function summarizeMaterialInfo(m) {
   } else if (m.unit === "kg/each" && fmt(m.piece) !== "") parts.push(fmt(m.piece) + " kg/each");
   else if (m.unit) parts.push(m.unit);
 
-  if (m.category) parts.push("Cat: " + m.category);
-  if (fmt(m.cost) !== "") parts.push("Cost: " + fmt(m.cost));
+  if (m.category) parts.push(m.category);
   if (m.remarks) parts.push(m.remarks);
   return parts.join(" · ") || "No weight or details yet";
 }
@@ -547,103 +569,318 @@ function updateMoreOptionsMeta() {
   if (!meta) return;
   var parts = [];
   var cat = $("m-cat") ? $("m-cat").value.trim() : "";
-  var cost = $("m-cost") ? $("m-cost").value.trim() : "";
   var rem = $("m-rem") ? $("m-rem").value.trim() : "";
   if (cat) parts.push(cat);
-  if (cost) parts.push("Cost " + cost);
   if (rem) parts.push("Remarks");
-  meta.textContent = parts.length ? parts.join(" · ") : "Category, cost, remarks";
+  meta.textContent = parts.length ? parts.join(" · ") : "Category, remarks";
   meta.className = "sum-meta" + (parts.length ? " ok" : "");
 }
 
-function recordAutoSave(evt) {
-  if (!evt || !evt.items || !evt.items.length) return;
-  mat.lastAutoSave = evt;
-  var map = {};
-  evt.items.forEach(function (it, idx) {
-    if (it.type !== "removed" && it.material && it.material.material) {
-      map[it.material.material.toLowerCase()] = { type: it.type, order: idx };
-    }
-  });
-  mat.recentMap = map;
-  renderAutoSaveCard();
+function openMaterialInEditor(materialName) {
+  var found = mat.rows.filter(function (r) {
+    return r.material.toLowerCase() === String(materialName || "").toLowerCase();
+  })[0];
+  if (found) {
+    setMatMode("edit", found);
+    matLog("", true);
+  }
 }
 
-function renderAutoSaveCard() {
-  var card = $("mat-autosave-card");
-  var body = $("mat-autosave-body");
-  var meta = $("mat-autosave-meta");
-  if (!card || !body) return;
-  var evt = mat.lastAutoSave;
-  if (!evt || !evt.items || !evt.items.length) {
-    card.hidden = true;
-    body.innerHTML = "";
+function clearToastTimer() {
+  if (mat.toastTimer) {
+    clearTimeout(mat.toastTimer);
+    mat.toastTimer = null;
+  }
+}
+
+function collapseToast(immediate) {
+  clearToastTimer();
+  var toast = $("mat-change-toast");
+  if (!toast || toast.hidden) {
+    mat.toastVisible = false;
+    renderSessionChanges();
     return;
   }
-  card.hidden = false;
-  var where = evt.savedToFile && evt.fileName
-    ? evt.fileName
-    : (evt.needsPermission ? "Local cache (reconnect file)" : "Local cache");
-  var clock = formatClock(evt.time);
-  if (meta) meta.textContent = (clock ? clock + " · " : "") + where;
+  if (immediate) {
+    toast.classList.remove("closing");
+    toast.hidden = true;
+    mat.toastVisible = false;
+    renderSessionChanges();
+    return;
+  }
+  toast.classList.add("closing");
+  setTimeout(function () {
+    toast.classList.remove("closing");
+    toast.hidden = true;
+    mat.toastVisible = false;
+    renderSessionChanges();
+  }, 220);
+}
 
-  body.innerHTML = "";
-  evt.items.slice(0, 4).forEach(function (it) {
+function scheduleToastCollapse(ms) {
+  clearToastTimer();
+  mat.toastRemaining = ms;
+  mat.toastStartedAt = Date.now();
+  mat.toastTimer = setTimeout(function () {
+    collapseToast(false);
+  }, ms);
+}
+
+function pauseToastTimer() {
+  if (!mat.toastVisible || !mat.toastTimer) return;
+  var elapsed = Date.now() - mat.toastStartedAt;
+  mat.toastRemaining = Math.max(400, mat.toastRemaining - elapsed);
+  clearToastTimer();
+}
+
+function resumeToastTimer() {
+  if (!mat.toastVisible || mat.toastTimer) return;
+  scheduleToastCollapse(mat.toastRemaining || 2000);
+}
+
+function showChangeToast(evt) {
+  var toast = $("mat-change-toast");
+  var iconEl = $("mat-toast-icon");
+  var titleEl = $("mat-toast-title");
+  var subEl = $("mat-toast-sub");
+  var itemsEl = $("mat-toast-items");
+  var whereEl = $("mat-toast-where");
+  var hintEl = $("mat-toast-hint");
+  var barEl = $("mat-toast-bar");
+  if (!toast || !itemsEl) return;
+
+  var items = evt.items || [];
+  if (!items.length) return;
+
+  var firstType = normalizeChangeType(items[0].type);
+  var allSame = items.every(function (it) { return normalizeChangeType(it.type) === firstType; });
+  var kind = allSame ? firstType : "added";
+
+  toast.className = "change-toast kind-" + kind;
+  if (iconEl) iconEl.innerHTML = TOAST_ICONS[kind] || TOAST_ICONS.added;
+
+  if (titleEl) {
+    if (items.length === 1) {
+      titleEl.textContent = firstType === "added" ? "Material Added"
+        : firstType === "removed" ? "Material Removed" : "Material Modified";
+    } else {
+      titleEl.textContent = items.length + " Changes Saved";
+    }
+  }
+  if (subEl) {
+    var srcLabel = evt.source === "sheet" ? "Detected on Master sheet" : "Saved from Materials panel";
+    var clk = formatClock(evt.time);
+    subEl.textContent = srcLabel + (clk ? " · " + clk : "");
+  }
+
+  itemsEl.innerHTML = "";
+  var anyClickable = false;
+  items.slice(0, 3).forEach(function (it) {
     var m = it.material || {};
+    var cType = normalizeChangeType(it.type);
+    var clickable = cType !== "removed";
+    if (clickable) anyClickable = true;
+
     var box = document.createElement("div");
-    var isClickable = it.type !== "removed";
-    box.className = "autosave-item" + (isClickable ? " clickable" : "");
+    box.className = "toast-item" + (clickable ? " clickable" : "");
 
     var top = document.createElement("div");
-    top.className = "autosave-item-top";
+    top.className = "toast-item-row";
 
     var nm = document.createElement("span");
-    nm.className = "autosave-name";
+    nm.className = "toast-name";
     nm.textContent = m.material || "(unnamed)";
 
-    var tag = document.createElement("span");
-    tag.className = "autosave-tag " + it.type;
-    var suffix = evt.source === "sheet" ? " on sheet" : "";
-    tag.textContent = it.type === "added"
-      ? ("Added" + suffix)
-      : it.type === "edited"
-        ? ("Edited" + suffix)
-        : ("Removed" + suffix);
+    var badge = document.createElement("span");
+    badge.className = "toast-badge " + cType;
+    badge.textContent = cType === "added" ? "Added" : cType === "removed" ? "Removed" : "Modified";
 
     top.appendChild(nm);
-    top.appendChild(tag);
+    top.appendChild(badge);
     box.appendChild(top);
 
     var infoLine = document.createElement("div");
-    infoLine.className = "autosave-info";
+    infoLine.className = "toast-info";
     infoLine.textContent = summarizeMaterialInfo(m);
     box.appendChild(infoLine);
 
-    if (it.type === "edited" && it.fields && it.fields.length) {
+    if (cType === "modified" && it.fields && it.fields.length) {
       var diffLine = document.createElement("div");
-      diffLine.className = "autosave-diff";
+      diffLine.className = "toast-diff";
       diffLine.textContent = "Changed: " + it.fields.map(function (k) { return FIELD_LABELS[k] || k; }).join(", ");
       box.appendChild(diffLine);
     }
 
-    if (isClickable) {
-      box.title = "Click to open in the editor below";
-      box.onclick = function () {
-        var found = mat.rows.filter(function (r) { return r.material.toLowerCase() === String(m.material || "").toLowerCase(); })[0];
-        if (found) {
-          setMatMode("edit", found);
-          matLog("", true);
-        }
-      };
+    if (clickable) {
+      box.title = "Click to edit in panel";
+      box.onclick = function () { openMaterialInEditor(m.material); };
     }
-    body.appendChild(box);
+    itemsEl.appendChild(box);
   });
 
-  if (evt.items.length > 4) {
-    var more = document.createElement("div");
-    more.className = "note";
-    more.textContent = "+ " + (evt.items.length - 4) + " more material(s) updated.";
-    body.appendChild(more);
+  if (items.length > 3) {
+    var extra = document.createElement("div");
+    extra.className = "toast-info";
+    extra.textContent = "+ " + (items.length - 3) + " more item(s) — view all in Session changes";
+    itemsEl.appendChild(extra);
+  }
+
+  if (whereEl) {
+    whereEl.textContent = evt.savedToFile && evt.fileName
+      ? ("Saved to " + evt.fileName + " & Master sheet")
+      : (evt.needsPermission ? "Saved to Master sheet & cache (reconnect file)" : "Saved to Master sheet & local cache");
+  }
+  if (hintEl) hintEl.textContent = anyClickable ? "Click to edit" : "";
+
+  // Restart CSS progress bar animation cleanly
+  if (barEl) {
+    barEl.style.animation = "none";
+    void barEl.offsetWidth;
+    barEl.style.animation = "";
+  }
+
+  mat.toastVisible = true;
+  mat.sessionOpen = false;
+  toast.hidden = false;
+  renderSessionChanges();
+  scheduleToastCollapse(TOAST_DURATION_MS);
+}
+
+function renderSessionChanges() {
+  var wrap = $("mat-session-wrap");
+  var btn = $("mat-changes-btn");
+  var panel = $("mat-changes-panel");
+  var listEl = $("mat-changes-list");
+  var countEl = $("mat-session-count");
+  var previewEl = $("mat-session-preview");
+  var dotEl = $("mat-session-dot");
+  if (!wrap || !btn || !panel || !listEl) return;
+
+  var count = mat.sessionLog.length;
+  if (!count || mat.toastVisible) {
+    wrap.hidden = true;
+    panel.hidden = true;
+    btn.setAttribute("aria-expanded", "false");
+    return;
+  }
+
+  wrap.hidden = false;
+  if (countEl) countEl.textContent = String(count);
+
+  var latest = mat.sessionLog[0];
+  if (dotEl) dotEl.className = "session-dot " + latest.type;
+  if (previewEl) {
+    var verb = latest.type === "added" ? "Added" : latest.type === "removed" ? "Removed" : "Modified";
+    previewEl.textContent = verb + " " + (latest.material && latest.material.material ? latest.material.material : "");
+  }
+
+  panel.hidden = !mat.sessionOpen;
+  btn.setAttribute("aria-expanded", mat.sessionOpen ? "true" : "false");
+
+  if (!mat.sessionOpen) return;
+
+  listEl.innerHTML = "";
+  mat.sessionLog.forEach(function (entry) {
+    var m = entry.material || {};
+    var clickable = entry.type !== "removed";
+    var row = document.createElement("div");
+    row.className = "session-row" + (clickable ? " clickable" : "");
+
+    var top = document.createElement("div");
+    top.className = "session-row-top";
+
+    var nm = document.createElement("span");
+    nm.className = "toast-name";
+    nm.textContent = m.material || "(unnamed)";
+
+    var badge = document.createElement("span");
+    badge.className = "toast-badge " + entry.type;
+    badge.textContent = entry.type === "added" ? "Added" : entry.type === "removed" ? "Removed" : "Modified";
+
+    top.appendChild(nm);
+    top.appendChild(badge);
+    row.appendChild(top);
+
+    var info = document.createElement("div");
+    info.className = "toast-info";
+    info.textContent = summarizeMaterialInfo(m);
+    row.appendChild(info);
+
+    if (entry.type === "modified" && entry.fields && entry.fields.length) {
+      var diff = document.createElement("div");
+      diff.className = "toast-diff";
+      diff.textContent = "Changed: " + entry.fields.map(function (k) { return FIELD_LABELS[k] || k; }).join(", ");
+      row.appendChild(diff);
+    }
+
+    var meta = document.createElement("div");
+    meta.className = "session-row-time";
+    var srcText = entry.source === "sheet" ? "Master sheet" : "Materials panel";
+    meta.textContent = formatClock(entry.time) + " · " + srcText;
+    row.appendChild(meta);
+
+    if (clickable) {
+      row.title = "Click to edit in panel";
+      row.onclick = function () {
+        mat.sessionOpen = false;
+        renderSessionChanges();
+        openMaterialInEditor(m.material);
+      };
+    }
+    listEl.appendChild(row);
+  });
+}
+
+function recordAutoSave(evt) {
+  if (!evt || !evt.items || !evt.items.length) return;
+  var nowIso = evt.time || new Date().toISOString();
+  var normalizedItems = evt.items.map(function (it) {
+    return {
+      type: normalizeChangeType(it.type),
+      material: it.material || {},
+      fields: it.fields || [],
+      time: it.time || nowIso,
+      source: evt.source || "panel"
+    };
+  });
+
+  // Prepend to session log (newest first, cap at 50 entries)
+  for (var i = normalizedItems.length - 1; i >= 0; i--) {
+    mat.sessionLog.unshift(normalizedItems[i]);
+  }
+  if (mat.sessionLog.length > 50) mat.sessionLog.length = 50;
+
+  // Track recent items for top-bubbling in the Master Materials list
+  var map = {};
+  var order = 0;
+  mat.sessionLog.forEach(function (entry) {
+    var name = entry.material && entry.material.material;
+    if (!name) return;
+    var key = name.toLowerCase();
+    if (map[key]) return;
+    if (entry.type === "removed") {
+      map[key] = { removed: true };
+    } else {
+      map[key] = { type: entry.type, order: order++ };
+    }
+  });
+  Object.keys(map).forEach(function (k) { if (map[k].removed) delete map[k]; });
+  mat.recentMap = map;
+
+  var normalizedEvt = {
+    source: evt.source || "panel",
+    time: nowIso,
+    savedToFile: !!evt.savedToFile,
+    fileName: evt.fileName || "",
+    needsPermission: !!evt.needsPermission,
+    items: normalizedItems
+  };
+
+  if (state.activeTab === "mat") {
+    showChangeToast(normalizedEvt);
+  } else {
+    mat.toastVisible = false;
+    renderSessionChanges();
   }
 }
 
@@ -677,9 +914,8 @@ function setMatMode(mode, row) {
   $("mat-name-label").textContent = mode === "edit" ? "Material name (locked)" : "Material name";
   if ($("m-delete")) $("m-delete").hidden = (mode !== "edit");
   if ($("m-new")) $("m-new").hidden = (mode !== "edit");
-  var r = row || { material: "", category: "", unit: "", lin: "", area: "", piece: "", sl: "", sw: "", cost: "", remarks: "" };
+  var r = row || { material: "", category: "", unit: "", lin: "", area: "", piece: "", sl: "", sw: "", remarks: "" };
   $("m-name").value = r.material; $("m-cat").value = r.category; $("m-unit").value = r.unit;
-  $("m-cost").value = fmt(r.cost);
   $("m-lin").value = fmt(r.lin); $("m-area").value = fmt(r.area); $("m-piece").value = fmt(r.piece);
   $("m-sl").value = fmt(r.sl); $("m-sw").value = fmt(r.sw); $("m-rem").value = r.remarks;
   if ($("m-more") && mode === "add") $("m-more").open = false;
@@ -693,7 +929,7 @@ function renderMatList() {
   box.innerHTML = "";
   var shown = mat.rows.filter(function (r) { return !q || (r.material + " " + r.category).toLowerCase().indexOf(q) >= 0; });
 
-  // Bubble recently auto-saved materials to the very top of the list
+  // Bubble recently changed materials to the very top of the list
   var rec = mat.recentMap || {};
   if (Object.keys(rec).length) {
     shown = shown.slice().sort(function (a, b) {
@@ -718,7 +954,7 @@ function renderMatList() {
     var icon = document.createElement("span");
     icon.className = "vicon " + (v.valid ? "ok" : "inc");
     icon.textContent = v.valid ? "✓" : "!";
-    icon.title = v.valid ? "All required fields populated (Name, Category, Unit, Cost)" : ("Missing: " + v.missing.join(", "));
+    icon.title = v.valid ? "Ready for BOM (Name, Unit, Weight)" : ("Missing: " + v.missing.join(", "));
 
     var a = document.createElement("span");
     a.className = "mname";
@@ -728,8 +964,8 @@ function renderMatList() {
 
     if (recInfo) {
       var tag = document.createElement("span");
-      tag.className = "mtag" + (recInfo.type === "edited" ? " edited" : "");
-      tag.textContent = recInfo.type === "added" ? "Added" : "Edited";
+      tag.className = "mtag" + (recInfo.type === "modified" ? " modified" : "");
+      tag.textContent = recInfo.type === "added" ? "Added" : "Modified";
       left.appendChild(tag);
     }
 
@@ -753,8 +989,8 @@ async function refreshMaterials(keepName) {
     mat.rows = res.rows;
     var dl = $("m-cats"); dl.innerHTML = "";
     res.categories.forEach(function (c) { var o = document.createElement("option"); o.value = c; dl.appendChild(o); });
-    var validCount = res.rows.filter(function (r) { return BomTools.getMaterialValidationStatus(r).valid; }).length;
-    st.textContent = res.rows.length + " items · " + validCount + " complete";
+    var incompleteCount = res.rows.filter(function (r) { return !BomTools.getMaterialValidationStatus(r).valid; }).length;
+    st.textContent = res.rows.length + " items" + (incompleteCount ? (" · " + incompleteCount + " incomplete") : " · all ready");
     var again = keepName && res.rows.filter(function (r) { return r.material.toLowerCase() === keepName.toLowerCase(); })[0];
     if (again) setMatMode("edit", again);
     else if (mat.mode === "edit" && mat.selected) setMatMode("add");
@@ -770,7 +1006,6 @@ async function refreshMaterials(keepName) {
 
 function readMatForm() {
   return { material: $("m-name").value, category: $("m-cat").value, unit: $("m-unit").value,
-           cost: $("m-cost").value,
            lin: $("m-lin").value, area: $("m-area").value, piece: $("m-piece").value,
            sl: $("m-sl").value, sw: $("m-sw").value, remarks: $("m-rem").value };
 }
@@ -786,19 +1021,32 @@ async function saveMaterial() {
   try {
     var wasEdit = mat.mode === "edit";
     var prevObj = wasEdit && mat.selected ? BomTools.normalizeMaterial(mat.selected) : null;
+    BomSync.suppressWatch(3500);
     var r = wasEdit ? await BomTools.updateMaterial(raw) : await BomTools.addMaterial(raw);
-    matLog((wasEdit ? "Saved \"" : "Added \"") + r.material + "\". All BOM sheets updated.");
-    var list = await BomSync.workbookList();
-    BomSync.updateWatchSnap(list);
-    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    var nowIso = r.lastModified || new Date().toISOString();
+    var changeType = wasEdit ? "modified" : "added";
     var diffFields = prevObj ? BomSync.changedFields(prevObj, r) : [];
+    var changeItems = [{ type: changeType, material: r, fields: diffFields, time: nowIso }];
+    var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
+
+    var list = await BomSync.workbookList();
+    // Preserve ISO timestamp on the changed item in JSON
+    list.forEach(function (item) {
+      if (item.material.toLowerCase() === r.material.toLowerCase()) {
+        item.lastAction = changeType;
+        item.lastModified = nowIso;
+      }
+    });
+    BomSync.updateWatchSnap(list);
+    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true, lastChange: lastChange });
+
     recordAutoSave({
       source: "panel",
-      time: new Date().toISOString(),
+      time: nowIso,
       savedToFile: !!(writeRes && writeRes.savedToFile),
       fileName: (writeRes && writeRes.fileName) || "",
       needsPermission: !!(writeRes && writeRes.needsPermission),
-      items: [{ type: wasEdit ? "edited" : "added", material: r, fields: diffFields }]
+      items: changeItems
     });
     if (BomSync.hasToken()) {
       try { await BomSync.push(matLog, { only: r.material }); }
@@ -828,18 +1076,21 @@ async function removeMaterial() {
   state.busy = true; $("m-save").disabled = true; $("m-delete").disabled = true;
   matLog("", true);
   try {
+    BomSync.suppressWatch(3500);
     await BomTools.deleteMaterial(target);
-    matLog("Removed \"" + target + "\".");
+    var nowIso = new Date().toISOString();
+    var changeItems = [{ type: "removed", material: removedObj, fields: [], time: nowIso }];
+    var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
-    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true, lastChange: lastChange });
     recordAutoSave({
       source: "panel",
-      time: new Date().toISOString(),
+      time: nowIso,
       savedToFile: !!(writeRes && writeRes.savedToFile),
       fileName: (writeRes && writeRes.fileName) || "",
       needsPermission: !!(writeRes && writeRes.needsPermission),
-      items: [{ type: "removed", material: removedObj, fields: [] }]
+      items: changeItems
     });
     state.busy = false;
     setMatMode("add");
@@ -1073,15 +1324,22 @@ Office.onReady(function (info) {
   $("mat-search").oninput = renderMatList;
   $("m-unit").onchange = unitFields;
   $("m-cat").oninput = updateMoreOptionsMeta;
-  $("m-cost").oninput = updateMoreOptionsMeta;
   $("m-rem").oninput = updateMoreOptionsMeta;
   $("m-save").onclick = saveMaterial;
   $("m-new").onclick = function () { matLog("", true); setMatMode("add"); };
   $("m-delete").onclick = removeMaterial;
-  $("mat-autosave-dismiss").onclick = function () {
-    mat.lastAutoSave = null;
+  $("mat-toast-close").onclick = function () { collapseToast(false); };
+  $("mat-change-toast").onmouseenter = pauseToastTimer;
+  $("mat-change-toast").onmouseleave = resumeToastTimer;
+  $("mat-changes-btn").onclick = function () {
+    mat.sessionOpen = !mat.sessionOpen;
+    renderSessionChanges();
+  };
+  $("mat-session-clear").onclick = function () {
+    mat.sessionLog = [];
     mat.recentMap = {};
-    renderAutoSaveCard();
+    mat.sessionOpen = false;
+    renderSessionChanges();
     renderMatList();
   };
 

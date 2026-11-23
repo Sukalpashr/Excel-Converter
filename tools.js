@@ -20,10 +20,11 @@
     piece: "Piece Weight",
     sl: "Sheet Length",
     sw: "Sheet Width",
-    cost: "Cost",
-    remarks: "Remarks"
+    remarks: "Remarks",
+    lastAction: "Last Action",
+    lastModified: "Last Modified"
   };
-  var EDITABLE = ["category", "unit", "lin", "area", "piece", "sl", "sw", "cost", "remarks"];
+  var EDITABLE = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
 
   /* Workbook-level named ranges mapped to their Master table column key */
   var MASTER_NAMES = [
@@ -72,6 +73,30 @@
   }
   function pos(v) { return typeof v === "number" && isFinite(v) && v > 0; }
 
+  function formatSheetTimestamp(iso) {
+    var d = iso ? new Date(iso) : new Date();
+    if (isNaN(d.getTime())) d = new Date();
+    var p = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+      p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+  }
+
+  function normalizeActionType(t) {
+    var s = lc(t || "");
+    if (s === "add" || s === "added") return "added";
+    if (s === "edit" || s === "edited" || s === "mod" || s === "modified" || s === "updated") return "modified";
+    if (s === "remove" || s === "removed" || s === "deleted") return "removed";
+    return "";
+  }
+
+  function actionDisplay(t) {
+    var k = normalizeActionType(t);
+    if (k === "added") return "Added";
+    if (k === "modified") return "Modified";
+    if (k === "removed") return "Removed";
+    return "";
+  }
+
   function normalizeMaterial(raw) {
     var r = {
       material: String(raw.material || "").trim(),
@@ -79,9 +104,9 @@
       unit: String(raw.unit || "").trim(),
       remarks: String(raw.remarks || "").trim(),
       lin: num(raw.lin), area: num(raw.area), piece: num(raw.piece), sl: num(raw.sl), sw: num(raw.sw),
-      cost: num(raw.cost)
+      lastAction: normalizeActionType(raw.lastAction || ""),
+      lastModified: raw.lastModified ? String(raw.lastModified).trim() : ""
     };
-    if (r.cost !== null && !isFinite(r.cost)) r.cost = null;
     // keep only the fields that belong to the chosen unit (the master list never mixes them)
     if (r.unit !== "kg/m") r.lin = null;
     if (r.unit !== "kg/m²") { r.area = null; r.sl = null; r.sw = null; }
@@ -93,9 +118,16 @@
     var r = normalizeMaterial(raw || {});
     var missing = [];
     if (!r.material) missing.push("Material Name");
-    if (!r.category) missing.push("Category");
-    if (UNITS.indexOf(r.unit) < 0) missing.push("Unit");
-    if (!pos(r.cost)) missing.push("Cost");
+    if (UNITS.indexOf(r.unit) < 0) {
+      missing.push("Primary Unit");
+    } else if (r.unit === "kg/m") {
+      if (!pos(r.lin)) missing.push("Linear Weight");
+    } else if (r.unit === "kg/each") {
+      if (!pos(r.piece)) missing.push("Piece Weight");
+    } else if (r.unit === "kg/m²") {
+      if (!pos(r.area)) missing.push("Area Weight");
+      if (!pos(r.sl) || !pos(r.sw)) missing.push("Sheet Size");
+    }
     return { valid: missing.length === 0, missing: missing };
   }
 
@@ -187,9 +219,102 @@
       piece: g("piece"),
       sl: g("sl"),
       sw: g("sw"),
-      cost: idx.cost >= 0 ? g("cost") : null,
-      remarks: String(g("remarks"))
+      remarks: String(g("remarks")),
+      lastAction: normalizeActionType(g("lastAction")),
+      lastModified: String(g("lastModified") || "").trim()
     };
+  }
+
+  /* Ensures "Last Action" and "Last Modified" audit columns exist at the right of tblMat without affecting any named range. */
+  async function ensureAuditColumns(context, m) {
+    var needAction = m.idx.lastAction < 0;
+    var needMod = m.idx.lastModified < 0;
+    if (!needAction && !needMod) return m;
+    try {
+      if (needAction) m.t.columns.add(null, null, HEAD.lastAction);
+      if (needMod) m.t.columns.add(null, null, HEAD.lastModified);
+      await context.sync();
+      var hdr = m.t.getHeaderRowRange().load("values");
+      await context.sync();
+      m.headers = hdr.values[0].map(function (s) { return String(s).trim(); });
+      Object.keys(HEAD).forEach(function (k) {
+        m.idx[k] = m.headers.findIndex(function (h) { return h.indexOf(HEAD[k]) === 0; });
+      });
+      m.ncols = m.headers.length;
+      try {
+        if (m.idx.lastAction >= 0) m.t.columns.getItem(m.headers[m.idx.lastAction]).getRange().format.columnWidth = 90;
+        if (m.idx.lastModified >= 0) m.t.columns.getItem(m.headers[m.idx.lastModified]).getRange().format.columnWidth = 135;
+        await context.sync();
+      } catch (eW) { /* ignore column width errors */ }
+    } catch (e) { /* non-fatal if sheet is protected */ }
+    return m;
+  }
+
+  function buildBannerSummary(entries, stampText) {
+    if (!entries || !entries.length) return "";
+    if (entries.length === 1) {
+      var e = entries[0];
+      return "Last change: " + (actionDisplay(e.type) || "Modified") + " \"" + e.material + "\" · " + stampText;
+    }
+    var counts = { added: 0, modified: 0, removed: 0 };
+    entries.forEach(function (e) {
+      var k = normalizeActionType(e.type) || "modified";
+      if (counts[k] !== undefined) counts[k]++;
+    });
+    var parts = [];
+    if (counts.added) parts.push(counts.added + " added");
+    if (counts.modified) parts.push(counts.modified + " modified");
+    if (counts.removed) parts.push(counts.removed + " removed");
+    var names = entries.slice(0, 3).map(function (e) { return e.material; }).join(", ");
+    if (entries.length > 3) names += " +" + (entries.length - 3) + " more";
+    return "Last change: " + parts.join(", ") + " (" + names + ") · " + stampText;
+  }
+
+  async function writeMasterBanner(context, ws, entries, timeIso) {
+    var stamp = formatSheetTimestamp(timeIso);
+    var text = buildBannerSummary(entries, stamp);
+    if (!text) return;
+    try {
+      var cell = ws.getRange("A3");
+      cell.values = [[text]];
+      cell.format.font.size = 9;
+      cell.format.font.italic = true;
+      cell.format.font.color = "#4B5563";
+      await context.sync();
+    } catch (e) { /* non-fatal */ }
+  }
+
+  /* Stamps Last Action & Last Modified onto matching rows of tblMat + updates row 3 summary on Master Unique Materials. */
+  async function stampMasterChanges(entries, timeIso) {
+    if (!entries || !entries.length) return;
+    var stamp = formatSheetTimestamp(timeIso);
+    await Excel.run(async function (context) {
+      var m = await openMaster(context);
+      var rowEntries = entries.filter(function (e) { return normalizeActionType(e.type) !== "removed" && e.material; });
+      if (rowEntries.length) {
+        await ensureAuditColumns(context, m);
+        if (m.idx.lastAction >= 0 || m.idx.lastModified >= 0) {
+          var body = m.t.getDataBodyRange().load("values");
+          await context.sync();
+          var rowMap = {};
+          body.values.forEach(function (row, i) {
+            var n = lc(row[m.idx.material] || "");
+            if (n && rowMap[n] === undefined) rowMap[n] = i;
+          });
+          var touched = false;
+          rowEntries.forEach(function (e) {
+            var at = rowMap[lc(e.material)];
+            if (at === undefined) return;
+            var rStamp = e.time ? formatSheetTimestamp(e.time) : stamp;
+            if (m.idx.lastAction >= 0) body.getCell(at, m.idx.lastAction).values = [[actionDisplay(e.type) || "Modified"]];
+            if (m.idx.lastModified >= 0) body.getCell(at, m.idx.lastModified).values = [[rStamp]];
+            touched = true;
+          });
+          if (touched) await context.sync();
+        }
+      }
+      await writeMasterBanner(context, m.ws, entries, timeIso);
+    });
   }
 
   /* Ensures all 7 workbook-level named ranges point cleanly to tblMat columns (no #REF!, no sheet-level shadows),
@@ -713,9 +838,14 @@
 
   async function addMaterial(raw) {
     var r = normalizeMaterial(raw);
+    var nowIso = new Date().toISOString();
+    var stamp = formatSheetTimestamp(nowIso);
+    r.lastAction = "added";
+    r.lastModified = nowIso;
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
+      await ensureAuditColumns(context, m);
       var cur = m.t.getDataBodyRange().load("values");
       await context.sync();
       var names = cur.values.map(function (row) { return String(row[m.idx.material]); }).filter(function (s) { return s.trim() !== ""; });
@@ -728,7 +858,11 @@
       await context.sync();
       var n = body.rowCount;
       var last = body.getRow(n - 1);
-      var vals = { material: r.material, category: r.category, unit: r.unit, lin: r.lin, area: r.area, piece: r.piece, sl: r.sl, sw: r.sw, cost: r.cost, remarks: r.remarks };
+      var vals = {
+        material: r.material, category: r.category, unit: r.unit,
+        lin: r.lin, area: r.area, piece: r.piece, sl: r.sl, sw: r.sw,
+        remarks: r.remarks, lastAction: "Added", lastModified: stamp
+      };
       var inputIdx = {};
       Object.keys(vals).forEach(function (k) {
         if (m.idx[k] < 0) return;
@@ -750,6 +884,8 @@
         await context.sync();
       }
 
+      await writeMasterBanner(context, m.ws, [{ material: r.material, type: "added", time: nowIso }], nowIso);
+
       // Keep named ranges & dropdowns synced with the newly added row
       var matInfo = await ensureMasterNames(context, wb, noop);
       await refreshAllBomDropdownsIfRangeBased(context, wb, matInfo);
@@ -761,9 +897,14 @@
 
   async function updateMaterial(raw) {
     var r = normalizeMaterial(raw);
+    var nowIso = new Date().toISOString();
+    var stamp = formatSheetTimestamp(nowIso);
+    r.lastAction = "modified";
+    r.lastModified = nowIso;
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
+      await ensureAuditColumns(context, m);
       var body = m.t.getDataBodyRange().load("values");
       await context.sync();
       var at = -1;
@@ -776,7 +917,10 @@
         if (m.idx[k] < 0) return;
         row.getCell(0, m.idx[k]).values = [[r[k] === null ? "" : r[k]]];
       });
+      if (m.idx.lastAction >= 0) row.getCell(0, m.idx.lastAction).values = [["Modified"]];
+      if (m.idx.lastModified >= 0) row.getCell(0, m.idx.lastModified).values = [[stamp]];
       await context.sync();
+      await writeMasterBanner(context, m.ws, [{ material: r.material, type: "modified", time: nowIso }], nowIso);
       wb.application.calculate(Excel.CalculationType.full);
       await context.sync();
     });
@@ -786,6 +930,7 @@
   async function deleteMaterial(materialName) {
     var targetName = String(materialName || "").trim();
     if (!targetName) throw new Error("Choose a material to remove.");
+    var nowIso = new Date().toISOString();
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
@@ -808,6 +953,8 @@
       }
       await context.sync();
 
+      await writeMasterBanner(context, m.ws, [{ material: targetName, type: "removed", time: nowIso }], nowIso);
+
       var matInfo = await ensureMasterNames(context, wb, noop);
       await refreshAllBomDropdownsIfRangeBased(context, wb, matInfo);
       wb.application.calculate(Excel.CalculationType.full);
@@ -819,6 +966,8 @@
   var api = {
     UNITS: UNITS, BLANK: BLANK, MASTER: MASTER,
     _openMaster: openMaster, _rowToObj: rowToObj,
+    _ensureAuditColumns: ensureAuditColumns,
+    _writeMasterBanner: writeMasterBanner,
     _ensureMasterNames: ensureMasterNames,
     _applyBomDataValidation: applyBomDataValidation,
     _repairBomSheet: repairBomSheet,
@@ -827,11 +976,12 @@
     _canonical: { O2: canonicalO2, M4: canonicalM4, AB4: canonicalAB4, AD2: canonicalAD2 },
     inspectSheets: inspectSheets, addBomSheet: addBomSheet, repairWorkbook: repairWorkbook,
     listMaterials: listMaterials, addMaterial: addMaterial, updateMaterial: updateMaterial,
-    deleteMaterial: deleteMaterial,
+    deleteMaterial: deleteMaterial, stampMasterChanges: stampMasterChanges,
     // pure helpers
     checkSheetName: checkSheetName, safeId: safeId, uniqueName: uniqueName,
     normalizeMaterial: normalizeMaterial, validateMaterial: validateMaterial,
-    getMaterialValidationStatus: getMaterialValidationStatus
+    getMaterialValidationStatus: getMaterialValidationStatus,
+    formatSheetTimestamp: formatSheetTimestamp, actionDisplay: actionDisplay
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomTools = api;

@@ -25,8 +25,9 @@
   var IDB_HANDLE_KEY = "localMasterHandle";
   var IDB_JSON_KEY = "localMasterJson";
 
-  var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "cost", "remarks"];
+  var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
   var INPUT_KEYS = ["material"].concat(FIELDS);
+  var AUDIT_KEYS = ["lastAction", "lastModified"];
 
   function noop() {}
   function lc(s) { return String(s).trim().toLowerCase(); }
@@ -63,20 +64,61 @@
 
   function clean(m) {
     var o = { material: m.material, category: m.category || "", unit: m.unit };
-    ["lin", "area", "piece", "sl", "sw", "cost"].forEach(function (k) { o[k] = isNil(m[k]) ? null : m[k]; });
+    ["lin", "area", "piece", "sl", "sw"].forEach(function (k) { o[k] = isNil(m[k]) ? null : m[k]; });
     o.remarks = m.remarks || "";
+    if (m.lastAction) o.lastAction = m.lastAction;
+    if (m.lastModified) o.lastModified = m.lastModified;
     return o;
   }
 
-  function serialize(list) {
-    return '{\n "version": 1,\n "updated": "' + new Date().toISOString() + '",\n "materials": [\n' +
+  function buildLastChangeMeta(info) {
+    if (!info || !info.items || !info.items.length) return null;
+    var time = info.time || new Date().toISOString();
+    var items = info.items.map(function (it) {
+      var name = typeof it.material === "string" ? it.material : (it.material && it.material.material) || "";
+      var type = it.type === "edited" ? "modified" : (it.type || "modified");
+      var entry = { material: name, type: type, time: it.time || time };
+      if (it.fields && it.fields.length) entry.fields = it.fields.slice();
+      return entry;
+    }).filter(function (e) { return e.material; });
+    if (!items.length) return null;
+    var types = {};
+    items.forEach(function (e) { types[e.type] = 1; });
+    var typeList = Object.keys(types);
+    var summaryType = typeList.length === 1 ? typeList[0] : "mixed";
+    return {
+      time: time,
+      type: summaryType,
+      source: info.source || "panel",
+      items: items
+    };
+  }
+
+  function serialize(list, lastChange) {
+    var nowIso = new Date().toISOString();
+    var lcMeta = lastChange && lastChange.items ? buildLastChangeMeta(lastChange) : (lastChange && lastChange.time ? lastChange : null);
+    var out = '{\n "version": 1,\n "updated": "' + nowIso + '",\n';
+    if (lcMeta) {
+      out += ' "lastChange": ' + JSON.stringify(lcMeta) + ',\n';
+    }
+    out += ' "materials": [\n' +
       list.map(function (m) { return "  " + JSON.stringify(clean(m)); }).join(",\n") + "\n ]\n}\n";
+    return out;
+  }
+
+  function parsePayload(text) {
+    var j = JSON.parse(text);
+    var arr = Array.isArray(j) ? j : (j.materials || []);
+    var list = arr.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+    return {
+      list: list,
+      updated: (j && !Array.isArray(j) && j.updated) || "",
+      lastChange: (j && !Array.isArray(j) && j.lastChange) || null
+    };
   }
 
   function parseList(text) {
-    var j = JSON.parse(text);
-    var arr = Array.isArray(j) ? j : (j.materials || []);
-    return arr.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+    return parsePayload(text).list;
   }
 
   function toB64(str) {
@@ -163,12 +205,15 @@
     } catch (e) { return null; }
   }
 
-  async function saveLocalCache(list, fileName) {
-    var json = serialize(list);
+  async function saveLocalCache(list, fileName, lastChange) {
+    var existingMeta = getCachedMeta();
+    var lcMeta = lastChange ? buildLastChangeMeta(lastChange) || lastChange : (existingMeta && existingMeta.lastChange) || null;
+    var json = serialize(list, lcMeta);
     var meta = {
       count: list.length,
       updated: new Date().toISOString(),
-      fileName: fileName || (getCachedMeta() && getCachedMeta().fileName) || ""
+      fileName: fileName || (existingMeta && existingMeta.fileName) || "",
+      lastChange: lcMeta
     };
     try {
       localStorage.setItem(LOCAL_CACHE_KEY, json);
@@ -184,7 +229,8 @@
     if (!json) json = await idbGet(IDB_JSON_KEY);
     if (!json) return null;
     try {
-      return { list: parseList(json), meta: getCachedMeta() };
+      var parsed = parsePayload(json);
+      return { list: parsed.list, lastChange: parsed.lastChange, meta: getCachedMeta() };
     } catch (e) { return null; }
   }
 
@@ -239,7 +285,7 @@
     opts = opts || {};
     var normalized = list.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
     var handle = await getLocalFileHandle();
-    var saved = await saveLocalCache(normalized, handle ? handle.name : "");
+    var saved = await saveLocalCache(normalized, handle ? handle.name : "", opts.lastChange || null);
 
     if (!handle) {
       return { savedToFile: false, savedToCache: true, fileName: "", needsPermission: false, count: normalized.length };
@@ -279,9 +325,9 @@
         try {
           var file = await handle.getFile();
           var text = await file.text();
-          var list = parseList(text);
-          await saveLocalCache(list, handle.name);
-          return { list: list, source: "file", fileName: handle.name, needsPermission: false };
+          var parsed = parsePayload(text);
+          await saveLocalCache(parsed.list, handle.name, parsed.lastChange);
+          return { list: parsed.list, lastChange: parsed.lastChange, source: "file", fileName: handle.name, needsPermission: false };
         } catch (e) {
           // fall through to cache if file temporarily unreadable
         }
@@ -289,6 +335,7 @@
         var cached = await readLocalCache();
         return {
           list: cached ? cached.list : [],
+          lastChange: cached ? cached.lastChange : null,
           source: cached ? "cache" : "none",
           fileName: handle.name,
           needsPermission: true
@@ -297,9 +344,9 @@
     }
     var c = await readLocalCache();
     if (c && c.list) {
-      return { list: c.list, source: "cache", fileName: (c.meta && c.meta.fileName) || "", needsPermission: false };
+      return { list: c.list, lastChange: c.lastChange || null, source: "cache", fileName: (c.meta && c.meta.fileName) || "", needsPermission: false };
     }
-    return { list: [], source: "none", fileName: "", needsPermission: false };
+    return { list: [], lastChange: null, source: "none", fileName: "", needsPermission: false };
   }
 
   /* Create/link a new local master-materials.json file on disk from the current workbook */
@@ -336,14 +383,14 @@
 
     var file = await handle.getFile();
     var text = await file.text();
-    var list = parseList(text);
-    await saveLocalCache(list, handle.name);
-    log("Linked local master file \"" + handle.name + "\" (" + list.length + " materials).");
-    if (opts.applyToWorkbook !== false && list.length) {
-      var r = await applyList(list, log, { syncRemovals: true });
+    var parsed = parsePayload(text);
+    await saveLocalCache(parsed.list, handle.name, parsed.lastChange);
+    log("Linked local master file \"" + handle.name + "\" (" + parsed.list.length + " materials).");
+    if (opts.applyToWorkbook !== false && parsed.list.length) {
+      var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
       log("Workbook updated from \"" + handle.name + "\": " + r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
     }
-    return { fileName: handle.name, count: list.length };
+    return { fileName: handle.name, count: parsed.list.length };
   }
 
   /* Save current workbook's Master Unique Materials into the local file & cache */
@@ -366,7 +413,7 @@
     }
     var label = local.source === "file" ? ("local file \"" + local.fileName + "\"") : "local computer master list";
     log("Syncing master list from " + label + " (" + local.list.length + " materials) ...");
-    var r = await applyList(local.list, log, { syncRemovals: opts.syncRemovals !== false });
+    var r = await applyList(local.list, log, { syncRemovals: opts.syncRemovals !== false, lastChange: local.lastChange });
     log("Master list synced from " + label + ": " + r.added + " added, " + r.updated + " changed" + (r.removed ? ", " + r.removed + " removed" : "") + ".");
     r.skipped.forEach(function (s) { log("Skipped " + s); });
     r.source = local.source;
@@ -377,10 +424,10 @@
   /* Fallback: import raw JSON text (e.g. from <input type="file">) into local computer cache & workbook */
   async function importLocalJsonText(text, fileName, log) {
     log = log || noop;
-    var list = parseList(text);
-    if (!list.length) throw new Error("No materials found in that JSON file.");
-    await saveLocalCache(list, fileName || "master-materials.json");
-    var r = await applyList(list, log, { syncRemovals: true });
+    var parsed = parsePayload(text);
+    if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
+    await saveLocalCache(parsed.list, fileName || "master-materials.json", parsed.lastChange);
+    var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
     log("Loaded \"" + (fileName || "master-materials.json") + "\" into this computer and workbook: " +
       r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
     return r;
@@ -471,11 +518,18 @@
   }
 
   function writeRow(body, i, r, idx) {
+    var T = root.BomTools;
     INPUT_KEYS.forEach(function (k) {
       if (idx[k] < 0) return;
       var v = r[k];
       body.getCell(i, idx[k]).values = [[isNil(v) ? "" : v]];
     });
+    if (idx.lastAction >= 0 && r.lastAction) {
+      body.getCell(i, idx.lastAction).values = [[T.actionDisplay(r.lastAction) || r.lastAction]];
+    }
+    if (idx.lastModified >= 0 && r.lastModified) {
+      body.getCell(i, idx.lastModified).values = [[T.formatSheetTimestamp(r.lastModified)]];
+    }
   }
 
   /* Bring the workbook's master list up to date with `list`.
@@ -486,9 +540,12 @@
     opts = opts || {};
     var syncRemovals = !!opts.syncRemovals;
     var T = root.BomTools, res = { added: 0, updated: 0, removed: 0, skipped: [] };
+    suppressWatch(3500);
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await T._openMaster(context);
+      var hasAuditMeta = list.some(function (r) { return r.lastAction || r.lastModified; });
+      if (hasAuditMeta && T._ensureAuditColumns) await T._ensureAuditColumns(context, m);
       var idx = m.idx;
       var body = m.t.getDataBodyRange().load(["values", "formulas", "rowCount"]);
       await context.sync();
@@ -514,7 +571,11 @@
           body.getCell(i, idx[k]).values = [[isNil(r[k]) ? "" : r[k]]];
           did = true;
         });
-        if (did) res.updated++;
+        if (did) {
+          if (idx.lastAction >= 0 && r.lastAction) body.getCell(i, idx.lastAction).values = [[T.actionDisplay(r.lastAction) || r.lastAction]];
+          if (idx.lastModified >= 0 && r.lastModified) body.getCell(i, idx.lastModified).values = [[T.formatSheetTimestamp(r.lastModified)]];
+          res.updated++;
+        }
       });
 
       // use empty rows of the table first, then add rows
@@ -536,7 +597,7 @@
           var f = m.t.getDataBodyRange().load("formulas");
           await context.sync();
           var isInput = {};
-          INPUT_KEYS.forEach(function (key) { if (idx[key] >= 0) isInput[idx[key]] = 1; });
+          INPUT_KEYS.concat(AUDIT_KEYS).forEach(function (key) { if (idx[key] >= 0) isInput[idx[key]] = 1; });
           for (var j2 = 0; j2 < extra.length; j2++)
             for (var c = 0; c < m.ncols; c++) {
               if (isInput[c]) continue;
@@ -563,6 +624,10 @@
           await context.sync();
           res.removed = toDelete.length;
         }
+      }
+
+      if (opts.lastChange && opts.lastChange.items && opts.lastChange.items.length && T._writeMasterBanner) {
+        await T._writeMasterBanner(context, m.ws, opts.lastChange.items, opts.lastChange.time);
       }
 
       if (toAdd.length || res.updated || res.removed) {
@@ -718,7 +783,11 @@
   }
 
   /* ---------------- auto-save when the Master sheet changes (local file + optional GitHub) ---------------- */
-  var watcher = { on: false, snap: null, timer: null, busy: false, onSaved: null };
+  var watcher = { on: false, snap: null, timer: null, busy: false, onSaved: null, ignoreUntil: 0 };
+
+  function suppressWatch(ms) {
+    watcher.ignoreUntil = Math.max(watcher.ignoreUntil, Date.now() + (ms || 2500));
+  }
 
   function updateWatchSnap(list) {
     if (Array.isArray(list)) watcher.snap = list;
@@ -736,33 +805,62 @@
         if (ws.isNullObject) return;
         watcher.snap = await workbookList();
         ws.onChanged.add(function () {
+          if (Date.now() < watcher.ignoreUntil) return;
           clearTimeout(watcher.timer);
           watcher.timer = setTimeout(async function () {
-            if (watcher.busy) return;
+            if (watcher.busy || Date.now() < watcher.ignoreUntil) return;
             watcher.busy = true;
             try {
               var cur = await workbookList();
               var d = diff(cur, watcher.snap || []);
               var hasChanges = d.onlyWb.length > 0 || d.onlyRemote.length > 0 || d.changed.length > 0;
               if (hasChanges) {
-                // Always save additions, edits, and removals to local computer file + local cache
-                var writeRes = await writeLocalMaster(cur, log, { allowPrompt: false });
+                var nowIso = new Date().toISOString();
+                var items = [];
+                var stampEntries = [];
+                var byKey = new Map();
+                cur.forEach(function (m) { byKey.set(lc(m.material), m); });
+
+                d.onlyWb.forEach(function (m) {
+                  m.lastAction = "added";
+                  m.lastModified = nowIso;
+                  items.push({ type: "added", material: m, fields: [], time: nowIso });
+                  stampEntries.push({ material: m.material, type: "added", time: nowIso });
+                });
+                d.changed.forEach(function (c) {
+                  var ref = byKey.get(lc(c.material)) || c.wb;
+                  ref.lastAction = "modified";
+                  ref.lastModified = nowIso;
+                  items.push({ type: "modified", material: ref, fields: c.fields || [], time: nowIso });
+                  stampEntries.push({ material: ref.material, type: "modified", time: nowIso });
+                });
+                d.onlyRemote.forEach(function (m) {
+                  items.push({ type: "removed", material: m, fields: [], time: nowIso });
+                  stampEntries.push({ material: m.material, type: "removed", time: nowIso });
+                });
+
+                var lastChange = buildLastChangeMeta({ time: nowIso, source: "sheet", items: items });
+
+                // Stamp Last Action / Last Modified + Row 3 banner on the Master sheet without re-triggering watcher
+                suppressWatch(3000);
+                try {
+                  if (T.stampMasterChanges) await T.stampMasterChanges(stampEntries, nowIso);
+                } catch (eSt) { /* non-fatal */ }
+
+                // Always save additions, modifications, and removals (with lastChange info) to local computer file + cache
+                var writeRes = await writeLocalMaster(cur, log, { allowPrompt: false, lastChange: lastChange });
                 if (hasToken()) {
                   var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
                   if (names.length) {
                     try { await push(log, { only: names }); } catch (e) { log("GitHub auto-publish skipped: " + (e.message || e)); }
                   }
                 }
-                var items = [];
-                d.onlyWb.forEach(function (m) { items.push({ type: "added", material: m, fields: [] }); });
-                d.changed.forEach(function (c) { items.push({ type: "edited", material: c.wb, fields: c.fields || [] }); });
-                d.onlyRemote.forEach(function (m) { items.push({ type: "removed", material: m, fields: [] }); });
 
                 watcher.snap = cur;
                 if (typeof watcher.onSaved === "function") {
                   watcher.onSaved({
                     source: "sheet",
-                    time: new Date().toISOString(),
+                    time: nowIso,
                     savedToFile: !!(writeRes && writeRes.savedToFile),
                     fileName: (writeRes && writeRes.fileName) || "",
                     needsPermission: !!(writeRes && writeRes.needsPermission),
@@ -772,7 +870,7 @@
               }
             } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;
-          }, 1500);
+          }, 1400);
         });
         await context.sync();
         watcher.on = true;
@@ -781,7 +879,7 @@
   }
 
   var api = {
-    watch: watch, updateWatchSnap: updateWatchSnap, CFG: CFG,
+    watch: watch, updateWatchSnap: updateWatchSnap, suppressWatch: suppressWatch, CFG: CFG,
     // local computer master file API (no token required)
     supportsLocalFileApi: supportsLocalFileApi,
     getLocalFileStatus: getLocalFileStatus,
@@ -799,7 +897,8 @@
     hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
     // pure helpers
-    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList,
+    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList, parsePayload: parsePayload,
+    buildLastChangeMeta: buildLastChangeMeta,
     workbookList: workbookList, applyList: applyList
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
