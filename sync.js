@@ -248,9 +248,9 @@
     for (var attempt = 0; attempt < 2; attempt++) {
       var cur = await fetchApi();
       var d = diff(wb, cur.list);
-      var only = opts.only ? lc(opts.only) : null;
-      var add = d.onlyWb.filter(function (m) { return !only || lc(m.material) === only; });
-      var chg = d.changed.filter(function (c) { return !only || lc(c.material) === only; });
+      var only = opts.only ? [].concat(opts.only).map(lc) : null;
+      var add = d.onlyWb.filter(function (m) { return !only || only.indexOf(lc(m.material)) >= 0; });
+      var chg = d.changed.filter(function (c) { return !only || only.indexOf(lc(c.material)) >= 0; });
       if (!add.length && !chg.length) { log("GitHub already has this."); return { added: 0, changed: 0 }; }
       var swap = new Map();
       chg.forEach(function (c) { swap.set(lc(c.material), c.wb); });
@@ -275,10 +275,13 @@
     var T = root.BomTools;
     if (!Office.context.requirements.isSetSupported("ExcelApi", "1.13"))
       throw new Error("Importing the template needs Microsoft 365 or Excel 2021 (ExcelApi 1.13). Use a workbook that already has the template instead.");
-    log("Downloading the template ...");
-    var res = await fetch(new URL(CFG.template, location.href).href + "?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error(CFG.template + " was not found next to the add-in (" + res.status + ").");
-    var b64 = bufToB64(await res.arrayBuffer());
+    var b64 = root.BOM_TEMPLATE_B64;                       // embedded in template-data.js
+    if (!b64) {
+      log("Downloading the template ...");
+      var res = await fetch(new URL(CFG.template, location.href).href + "?t=" + Date.now(), { cache: "no-store" });
+      if (!res.ok) throw new Error("No embedded template and " + CFG.template + " was not found (" + res.status + ").");
+      b64 = bufToB64(await res.arrayBuffer());
+    }
 
     await Excel.run(async function (context) {
       var wb = context.workbook;
@@ -299,11 +302,21 @@
         throw new Error(msg);
       };
 
-      var blank = wb.worksheets.getItemOrNullObject(T.BLANK);
-      var master = wb.worksheets.getItemOrNullObject(T.MASTER);
+      added.forEach(function (w) { w.tables.load("items/name"); });
       await context.sync();
-      if (blank.isNullObject || master.isNullObject)
-        await undo("template.xlsx must contain sheets named \"" + T.BLANK + "\" and \"" + T.MASTER + "\". The import was undone.");
+      var hasT = function (w, p) { return w.tables.items.some(function (t) { return t.name.indexOf(p) === 0; }); };
+      var bomWs = added.filter(function (w) { return hasT(w, "bom_"); });
+      var master = added.filter(function (w) { return lc(w.name) === lc(T.MASTER); })[0] ||
+                   added.filter(function (w) { return w.tables.items.some(function (t) { return t.name === "tblMat"; }); })[0];
+      var blank = added.filter(function (w) { return lc(w.name) === lc(T.BLANK); })[0] ||
+                  bomWs.filter(function (w) { return /blank|template|empty/i.test(w.name); })[0] ||
+                  (bomWs.length === 1 ? bomWs[0] : null);
+      if (!blank || !master)
+        await undo("Could not find the " + (!master ? "master list (a sheet with table tblMat)" : "blank BOM sheet (a sheet with a bom_ table)") +
+          " in template.xlsx. Sheets found in it: " + (added.map(function (w) { return "\"" + w.name + "\""; }).join(", ") || "none") + ". The import was undone.");
+      if (master.name !== T.MASTER) master.name = T.MASTER;
+      if (blank.name !== T.BLANK) blank.name = T.BLANK;
+      await context.sync();
 
       var rng = blank.getRange("A1:Z80").load("formulas");
       await context.sync();
@@ -313,6 +326,17 @@
       if (broken)
         await undo("The imported blank sheet has broken formulas (#REF! or a link to another file). The import was undone; see the README note on named ranges.");
 
+      // the template's workbook-level names (used by the BOM formulas and dropdowns); recreate any that did not come across
+      var NAMES = { Materials: "tblMat[Material]", LinWt: "tblMat[Linear Weight (kg/m)]", AreaWt: "tblMat[Area Weight (kg/m²)]",
+                    PieceWt: "tblMat[Piece Weight (kg/each)]", WtUnit: "tblMat[Primary Unit]", SheetL: "tblMat[Sheet Length (mm)]", SheetW: "tblMat[Sheet Width (mm)]" };
+      try {
+        wb.names.load("items/name");
+        await context.sync();
+        var have = wb.names.items.map(function (n) { return n.name.toLowerCase(); });
+        Object.keys(NAMES).forEach(function (k) { if (have.indexOf(k.toLowerCase()) < 0) wb.names.add(k, "=" + NAMES[k]); });
+        await context.sync();
+      } catch (e) { log("WARNING: could not create the named ranges (" + (e.message || e) + ")."); }
+
       added.forEach(function (w) { if (/^README/i.test(w.name)) w.delete(); });   // the template's help sheet is not needed in project files
       blank.visibility = Excel.SheetVisibility.hidden;
       await context.sync();
@@ -321,8 +345,44 @@
     log("Template imported.");
   }
 
+  /* ---------------- auto-publish when the Master sheet changes (while the task pane is open) ---------------- */
+  var watcher = { on: false, snap: null, timer: null, busy: false };
+
+  async function watch(log) {
+    log = log || noop;
+    if (watcher.on || !hasToken()) return;
+    var T = root.BomTools;
+    try {
+      await Excel.run(async function (context) {
+        var ws = context.workbook.worksheets.getItemOrNullObject(T.MASTER);
+        await context.sync();
+        if (ws.isNullObject) return;
+        watcher.snap = await workbookList();
+        ws.onChanged.add(function () {
+          clearTimeout(watcher.timer);
+          watcher.timer = setTimeout(async function () {
+            if (watcher.busy || !hasToken()) return;
+            watcher.busy = true;
+            try {
+              var cur = await workbookList();
+              var d = diff(cur, watcher.snap);
+              var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
+              if (names.length) {
+                await push(log, { only: names });
+                watcher.snap = cur;
+              }
+            } catch (e) { log("Auto-publish failed: " + (e.message || e)); }
+            watcher.busy = false;
+          }, 2500);
+        });
+        await context.sync();
+        watcher.on = true;
+      });
+    } catch (e) { log("Could not watch the Master sheet: " + (e.message || e)); }
+  }
+
   var api = {
-    CFG: CFG, hasToken: hasToken, getToken: getToken, setToken: setToken,
+    watch: watch, CFG: CFG, hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
     // pure helpers
     diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList
