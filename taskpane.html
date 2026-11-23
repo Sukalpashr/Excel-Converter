@@ -6,7 +6,7 @@
 <title>BOM Tools</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>
-  :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; }
+  :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; --danger:#a4262c; }
   * { box-sizing: border-box; }
   [hidden] { display:none !important; }
   body { margin:0; padding:14px; font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:#201f1e; background:#fff; }
@@ -19,10 +19,12 @@
   .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 6px; }
   .status { font-size:12px; }
   .ok { color:#107c10; } .warn { color:#a4262c; }
-  button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 12px; border:1px solid var(--bd); background:#fff; }
+  button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 10px; border:1px solid var(--bd); background:#fff; }
   button:hover:not(:disabled) { background:#f3f2f1; }
   button.primary { background:var(--g); border-color:var(--g); color:#fff; font-weight:600; width:100%; padding:9px; }
   button.primary:hover:not(:disabled) { background:var(--g2); }
+  button.danger { color:var(--danger); border-color:#e0b4b4; background:#fff; }
+  button.danger:hover:not(:disabled) { background:#fdf3f3; }
   button:disabled { opacity:.5; cursor:default; }
   label.opt { display:block; border:1px solid var(--bd); border-radius:6px; padding:8px 10px; margin-bottom:8px; background:#fff; cursor:pointer; }
   label.opt:has(input:checked) { border-color:var(--g); box-shadow:0 0 0 1px var(--g); }
@@ -37,13 +39,19 @@
   input[type=text], input[type=search], input[type=password], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
   input[readonly] { background:#f3f2f1; color:var(--mut); }
   .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:170px; overflow:auto; margin-top:6px; }
-  #mat-list div { padding:5px 8px; border-bottom:1px solid #edebe9; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
-  #mat-list div:hover { background:#f3f2f1; }
-  #mat-list div.sel { background:#dff6dd; }
+  #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:175px; overflow:auto; margin-top:6px; }
+  #mat-list .mrow { padding:5px 8px; border-bottom:1px solid #edebe9; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:6px; }
+  #mat-list .mrow:hover { background:#f3f2f1; }
+  #mat-list .mrow.sel { background:#dff6dd; }
+  #mat-list .mleft { display:flex; align-items:center; gap:6px; min-width:0; }
+  #mat-list .mname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #mat-list .vicon { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; font-size:10px; font-weight:700; flex-shrink:0; }
+  #mat-list .vicon.ok { background:#dff6dd; color:#107c10; }
+  #mat-list .vicon.inc { background:#fff4ce; color:#8a5a00; }
   #mat-list small { color:var(--mut); white-space:nowrap; }
-  .btnrow { display:flex; gap:8px; }
+  .btnrow { display:flex; gap:6px; flex-wrap:wrap; }
   .btnrow .primary { flex:1; width:auto; }
+  .btnrow button { font-size:12px; }
 </style>
 <script src="/_aistudio-iframe.js?v=29045eb3"></script></head>
 <body>
@@ -60,7 +68,9 @@
     <div class="card">
       <h2>Workbook</h2>
       <div id="sh-status" class="status">Checking...</div>
+      <div id="sh-local-status" class="note" style="margin-top:6px"></div>
       <div class="btnrow" style="margin-top:8px">
+        <button id="sh-reconnect" hidden>Reconnect local file</button>
         <button id="sh-repair" hidden>Repair dropdowns &amp; formulas</button>
       </div>
     </div>
@@ -70,43 +80,55 @@
       <label class="field"><span>Project name (shown in the title)</span><input type="text" id="sh-project" autocomplete="off"></label>
       <label class="field"><span>Copy from</span><select id="sh-source"></select></label>
       <label class="chk"><input type="checkbox" id="sh-clear"> <span>Clear entered data (tick this when copying a sheet that already has items)</span></label>
-      <label class="chk"><input type="checkbox" id="sh-sync" checked> <span>Update the master list from GitHub first</span></label>
+      <label class="chk"><input type="checkbox" id="sh-sync" checked> <span>Update master list from local file first (no token needed)</span></label>
       <button id="sh-add" class="primary" disabled>Add sheet</button>
       <div id="sh-log" class="log"></div>
     </div>
-    <p class="note">Works on any workbook. If it has no BOM template yet, only the <b>Master Unique Materials</b> sheet and a hidden <b>BOM Blank</b> sheet are imported first, with named ranges and dropdowns configured automatically.</p>
+    <p class="note">Works on any workbook. If it has no BOM template yet, only <b>Master Unique Materials</b> and hidden <b>BOM Blank</b> are imported, then immediately updated from your local master file.</p>
   </section>
 
   <!-- ===================== MATERIALS ===================== -->
   <section id="page-mat" hidden>
-    <p class="sub">Add a material to the master list or change an existing one. Every take-off sheet in this workbook updates straight away.</p>
+    <p class="sub">Add, edit, or remove materials. Every change updates this workbook and auto-saves to your local master file.</p>
+
     <div class="card">
-      <h2>Shared list (GitHub)</h2>
-      <div id="sync-status" class="status">Checking...</div>
-      <div id="sync-detail" class="note"></div>
+      <h2>Local master file (this computer)</h2>
+      <div id="local-status" class="status">Checking...</div>
+      <div id="local-detail" class="note" style="margin-top:3px"></div>
       <div class="btnrow" style="margin-top:8px">
-        <button id="sync-pull" class="primary" disabled>Update this workbook</button>
-        <button id="sync-push" class="primary" disabled hidden>Publish to GitHub</button>
+        <button id="local-reconnect" class="primary" hidden>Reconnect local file</button>
+        <button id="local-create">Save new file...</button>
+        <button id="local-open">Link existing file...</button>
       </div>
-      <details style="margin-top:8px"><summary class="note">Publisher settings</summary>
-        <label class="field" style="margin-top:6px"><span>GitHub token (only on computers that may publish)</span><input type="password" id="gh-token" autocomplete="off"></label>
-        <div class="btnrow"><button id="gh-save">Save token</button><button id="gh-clear">Remove token</button></div>
-        <p class="note">Everyone can update from GitHub without a token. Publishing needs a fine-grained token limited to this one repository with Contents: Read and write.</p>
-      </details>
-      <div id="sync-log" class="log"></div>
+      <div class="btnrow" style="margin-top:6px">
+        <button id="local-pull" disabled>Load from local file</button>
+        <button id="local-save" disabled>Save workbook to file</button>
+        <button id="local-unlink" hidden>Unlink</button>
+      </div>
+      <div id="local-fallback" class="btnrow" style="margin-top:6px" hidden>
+        <button id="local-import-btn">Import JSON file...</button>
+        <button id="local-export-btn">Download JSON</button>
+        <input type="file" id="local-import-input" accept=".json,application/json" hidden>
+      </div>
+      <div id="local-log" class="log"></div>
     </div>
+
     <div class="card">
       <h2>Master list</h2>
       <div id="mat-status" class="status">Checking...</div>
       <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
       <div id="mat-list"></div>
     </div>
+
     <div class="card">
       <h2 id="mat-mode">New material</h2>
       <label class="field"><span id="mat-name-label">Material name</span><input type="text" id="m-name" autocomplete="off"></label>
       <label class="field"><span>Category</span><input type="text" id="m-cat" list="m-cats" autocomplete="off"><datalist id="m-cats"></datalist></label>
-      <label class="field"><span>Primary unit</span>
-        <select id="m-unit"><option value="">Choose...</option><option>kg/m</option><option>kg/m²</option><option>kg/each</option></select></label>
+      <div class="row2">
+        <label class="field"><span>Primary unit</span>
+          <select id="m-unit"><option value="">Choose...</option><option>kg/m</option><option>kg/m²</option><option>kg/each</option></select></label>
+        <label class="field"><span>Unit cost (optional)</span><input type="text" id="m-cost" inputmode="decimal" placeholder="e.g. 95.00" autocomplete="off"></label>
+      </div>
       <label class="field f-lin" hidden><span>Linear weight (kg/m)</span><input type="text" id="m-lin" inputmode="decimal" autocomplete="off"></label>
       <label class="field f-area" hidden><span>Area weight (kg/m²)</span><input type="text" id="m-area" inputmode="decimal" autocomplete="off"></label>
       <div class="row2 f-area" hidden>
@@ -118,10 +140,23 @@
       <div class="btnrow">
         <button id="m-save" class="primary">Add material</button>
         <button id="m-new">New</button>
+        <button id="m-delete" class="danger" hidden>Remove</button>
       </div>
       <div id="mat-log" class="log"></div>
     </div>
-    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
+
+    <details class="card">
+      <summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--mut)">Optional: GitHub Pages Sync</summary>
+      <div id="sync-status" class="status" style="margin-top:8px">Not checked.</div>
+      <div id="sync-detail" class="note"></div>
+      <div class="btnrow" style="margin-top:8px">
+        <button id="sync-pull" disabled>Pull from GitHub</button>
+        <button id="sync-push" disabled hidden>Publish to GitHub</button>
+      </div>
+      <label class="field" style="margin-top:8px"><span>GitHub token (optional)</span><input type="password" id="gh-token" autocomplete="off"></label>
+      <div class="btnrow"><button id="gh-save">Save token</button><button id="gh-clear">Remove token</button></div>
+      <div id="sync-log" class="log"></div>
+    </details>
   </section>
 
   <!-- ===================== CONVERT ===================== -->
@@ -158,10 +193,10 @@
     </div>
   </section>
 
-  <script src="convert.js?v=7"></script>
-  <script src="tools.js?v=7"></script>
-  <script src="template-data.js?v=7"></script>
-  <script src="sync.js?v=7"></script>
-  <script src="taskpane.js?v=7"></script>
+  <script src="convert.js?v=8"></script>
+  <script src="tools.js?v=8"></script>
+  <script src="template-data.js?v=8"></script>
+  <script src="sync.js?v=8"></script>
+  <script src="taskpane.js?v=8"></script>
 </body>
 </html>

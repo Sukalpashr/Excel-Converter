@@ -20,9 +20,10 @@
     piece: "Piece Weight",
     sl: "Sheet Length",
     sw: "Sheet Width",
+    cost: "Cost",
     remarks: "Remarks"
   };
-  var EDITABLE = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
+  var EDITABLE = ["category", "unit", "lin", "area", "piece", "sl", "sw", "cost", "remarks"];
 
   /* Workbook-level named ranges mapped to their Master table column key */
   var MASTER_NAMES = [
@@ -77,13 +78,25 @@
       category: String(raw.category || "").trim(),
       unit: String(raw.unit || "").trim(),
       remarks: String(raw.remarks || "").trim(),
-      lin: num(raw.lin), area: num(raw.area), piece: num(raw.piece), sl: num(raw.sl), sw: num(raw.sw)
+      lin: num(raw.lin), area: num(raw.area), piece: num(raw.piece), sl: num(raw.sl), sw: num(raw.sw),
+      cost: num(raw.cost)
     };
+    if (r.cost !== null && !isFinite(r.cost)) r.cost = null;
     // keep only the fields that belong to the chosen unit (the master list never mixes them)
     if (r.unit !== "kg/m") r.lin = null;
     if (r.unit !== "kg/m²") { r.area = null; r.sl = null; r.sw = null; }
     if (r.unit !== "kg/each") r.piece = null;
     return r;
+  }
+
+  function getMaterialValidationStatus(raw) {
+    var r = normalizeMaterial(raw || {});
+    var missing = [];
+    if (!r.material) missing.push("Material Name");
+    if (!r.category) missing.push("Category");
+    if (UNITS.indexOf(r.unit) < 0) missing.push("Unit");
+    if (!pos(r.cost)) missing.push("Cost");
+    return { valid: missing.length === 0, missing: missing };
   }
 
   function validateMaterial(r, existingNames, mode) {
@@ -174,6 +187,7 @@
       piece: g("piece"),
       sl: g("sl"),
       sw: g("sw"),
+      cost: idx.cost >= 0 ? g("cost") : null,
       remarks: String(g("remarks"))
     };
   }
@@ -678,7 +692,7 @@
       await context.sync();
       var n = body.rowCount;
       var last = body.getRow(n - 1);
-      var vals = { material: r.material, category: r.category, unit: r.unit, lin: r.lin, area: r.area, piece: r.piece, sl: r.sl, sw: r.sw, remarks: r.remarks };
+      var vals = { material: r.material, category: r.category, unit: r.unit, lin: r.lin, area: r.area, piece: r.piece, sl: r.sl, sw: r.sw, cost: r.cost, remarks: r.remarks };
       var inputIdx = {};
       Object.keys(vals).forEach(function (k) {
         if (m.idx[k] < 0) return;
@@ -733,6 +747,39 @@
     return r;
   }
 
+  async function deleteMaterial(materialName) {
+    var targetName = String(materialName || "").trim();
+    if (!targetName) throw new Error("Choose a material to remove.");
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      var m = await openMaster(context);
+      var body = m.t.getDataBodyRange().load(["values", "rowCount"]);
+      await context.sync();
+      var at = -1;
+      body.values.forEach(function (row, i) {
+        if (at < 0 && lc(row[m.idx.material]) === lc(targetName)) at = i;
+      });
+      if (at < 0) throw new Error("\"" + targetName + "\" was not found in the master list.");
+
+      if (body.rowCount <= 1) {
+        // Keep table valid by clearing the single remaining row instead of deleting the only row
+        var row = body.getRow(0);
+        Object.keys(HEAD).forEach(function (k) {
+          if (m.idx[k] >= 0) row.getCell(0, m.idx[k]).values = [[""]];
+        });
+      } else {
+        m.t.rows.getItemAt(at).delete();
+      }
+      await context.sync();
+
+      var matInfo = await ensureMasterNames(context, wb, noop);
+      await refreshAllBomDropdownsIfRangeBased(context, wb, matInfo);
+      wb.application.calculate(Excel.CalculationType.full);
+      await context.sync();
+    });
+    return targetName;
+  }
+
   var api = {
     UNITS: UNITS, BLANK: BLANK, MASTER: MASTER,
     _openMaster: openMaster, _rowToObj: rowToObj,
@@ -742,9 +789,11 @@
     _refreshAllBomDropdownsIfRangeBased: refreshAllBomDropdownsIfRangeBased,
     inspectSheets: inspectSheets, addBomSheet: addBomSheet, repairWorkbook: repairWorkbook,
     listMaterials: listMaterials, addMaterial: addMaterial, updateMaterial: updateMaterial,
+    deleteMaterial: deleteMaterial,
     // pure helpers
     checkSheetName: checkSheetName, safeId: safeId, uniqueName: uniqueName,
-    normalizeMaterial: normalizeMaterial, validateMaterial: validateMaterial
+    normalizeMaterial: normalizeMaterial, validateMaterial: validateMaterial,
+    getMaterialValidationStatus: getMaterialValidationStatus
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomTools = api;

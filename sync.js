@@ -1,6 +1,12 @@
-/* sync.js - shared materials list on GitHub + template import for BOM Tools.
- * Reads materials.json / template.xlsx from the same GitHub Pages site the add-in is served from.
- * Publishing (writing materials.json) uses the GitHub API and needs a token, kept only in this computer's add-in storage.
+/* sync.js - local computer master file (no token required) + optional GitHub sync + template import for BOM Tools.
+ *
+ * Local Master File flow:
+ * 1. Pick or create a local JSON file (e.g. master-materials.json) on your computer via the File System Access API
+ *    (supported in Excel for Windows WebView2 and Excel on the Web in Edge/Chrome).
+ * 2. The file handle is remembered in IndexedDB and a backup snapshot is stored in local computer storage.
+ * 3. Every add, edit, or removal updates the local file automatically (including edits made directly on the Master sheet).
+ * 4. Whenever you create a new BOM sheet or add a BOM to a non-BOM workbook, the workbook's Master Unique Materials
+ *    table is updated automatically from your local file (additions, edits, and removals) before the sheet is added.
  */
 (function (root) {
   "use strict";
@@ -12,7 +18,14 @@
     template: "template.xlsx"
   };
   var TOKEN_KEY = "bomGhToken";
-  var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
+  var LOCAL_CACHE_KEY = "bomLocalMasterJson";
+  var LOCAL_META_KEY = "bomLocalMasterMeta";
+  var IDB_NAME = "BomToolsLocalDB";
+  var IDB_STORE = "kv";
+  var IDB_HANDLE_KEY = "localMasterHandle";
+  var IDB_JSON_KEY = "localMasterJson";
+
+  var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "cost", "remarks"];
   var INPUT_KEYS = ["material"].concat(FIELDS);
 
   function noop() {}
@@ -50,7 +63,7 @@
 
   function clean(m) {
     var o = { material: m.material, category: m.category || "", unit: m.unit };
-    ["lin", "area", "piece", "sl", "sw"].forEach(function (k) { o[k] = isNil(m[k]) ? null : m[k]; });
+    ["lin", "area", "piece", "sl", "sw", "cost"].forEach(function (k) { o[k] = isNil(m[k]) ? null : m[k]; });
     o.remarks = m.remarks || "";
     return o;
   }
@@ -82,7 +95,298 @@
     return btoa(s);
   }
 
-  /* ---------------- GitHub ---------------- */
+  /* ---------------- IndexedDB & Local Computer Master File ---------------- */
+  function supportsLocalFileApi() {
+    return typeof window !== "undefined" &&
+      typeof window.showOpenFilePicker === "function" &&
+      typeof window.showSaveFilePicker === "function";
+  }
+
+  function openLocalDb() {
+    return new Promise(function (resolve, reject) {
+      if (typeof indexedDB === "undefined") return resolve(null);
+      try {
+        var req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function (ev) {
+          var db = ev.target.result;
+          if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+        };
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { resolve(null); };
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  async function idbGet(key) {
+    var db = await openLocalDb();
+    if (!db) return null;
+    return new Promise(function (resolve) {
+      try {
+        var tx = db.transaction(IDB_STORE, "readonly");
+        var req = tx.objectStore(IDB_STORE).get(key);
+        req.onsuccess = function () { resolve(req.result === undefined ? null : req.result); };
+        req.onerror = function () { resolve(null); };
+      } catch (e) { resolve(null); }
+    });
+  }
+
+  async function idbSet(key, val) {
+    var db = await openLocalDb();
+    if (!db) return false;
+    return new Promise(function (resolve) {
+      try {
+        var tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).put(val, key);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { resolve(false); };
+      } catch (e) { resolve(false); }
+    });
+  }
+
+  async function idbDel(key) {
+    var db = await openLocalDb();
+    if (!db) return false;
+    return new Promise(function (resolve) {
+      try {
+        var tx = db.transaction(IDB_STORE, "readwrite");
+        tx.objectStore(IDB_STORE).delete(key);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { resolve(false); };
+      } catch (e) { resolve(false); }
+    });
+  }
+
+  function getCachedMeta() {
+    try {
+      var raw = localStorage.getItem(LOCAL_META_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  async function saveLocalCache(list, fileName) {
+    var json = serialize(list);
+    var meta = {
+      count: list.length,
+      updated: new Date().toISOString(),
+      fileName: fileName || (getCachedMeta() && getCachedMeta().fileName) || ""
+    };
+    try {
+      localStorage.setItem(LOCAL_CACHE_KEY, json);
+      localStorage.setItem(LOCAL_META_KEY, JSON.stringify(meta));
+    } catch (e) { /* storage may be restricted */ }
+    await idbSet(IDB_JSON_KEY, json);
+    return { json: json, meta: meta };
+  }
+
+  async function readLocalCache() {
+    var json = null;
+    try { json = localStorage.getItem(LOCAL_CACHE_KEY); } catch (e) { json = null; }
+    if (!json) json = await idbGet(IDB_JSON_KEY);
+    if (!json) return null;
+    try {
+      return { list: parseList(json), meta: getCachedMeta() };
+    } catch (e) { return null; }
+  }
+
+  async function getLocalFileHandle() {
+    if (!supportsLocalFileApi()) return null;
+    try { return await idbGet(IDB_HANDLE_KEY); } catch (e) { return null; }
+  }
+
+  async function queryHandlePermission(handle, mode) {
+    if (!handle || typeof handle.queryPermission !== "function") return "prompt";
+    try { return await handle.queryPermission({ mode: mode || "readwrite" }); }
+    catch (e) { return "prompt"; }
+  }
+
+  async function requestHandlePermission(handle, mode) {
+    if (!handle || typeof handle.requestPermission !== "function") return "denied";
+    try { return await handle.requestPermission({ mode: mode || "readwrite" }); }
+    catch (e) { return "denied"; }
+  }
+
+  async function getLocalFileStatus() {
+    var supported = supportsLocalFileApi();
+    var handle = await getLocalFileHandle();
+    var cache = await readLocalCache();
+    var perm = handle ? await queryHandlePermission(handle, "readwrite") : "none";
+    return {
+      supported: supported,
+      linked: !!handle,
+      fileName: handle ? handle.name : ((cache && cache.meta && cache.meta.fileName) || ""),
+      permission: perm,
+      hasCache: !!(cache && cache.list && cache.list.length),
+      cachedCount: cache && cache.list ? cache.list.length : 0,
+      cachedUpdated: (cache && cache.meta && cache.meta.updated) || ""
+    };
+  }
+
+  async function requestLocalPermission() {
+    var handle = await getLocalFileHandle();
+    if (!handle) return false;
+    var p = await requestHandlePermission(handle, "readwrite");
+    return p === "granted";
+  }
+
+  async function unlinkLocalFile() {
+    await idbDel(IDB_HANDLE_KEY);
+    return true;
+  }
+
+  /* Save a list directly to the linked local file on disk + local computer cache */
+  async function writeLocalMaster(list, log, opts) {
+    log = log || noop;
+    opts = opts || {};
+    var normalized = list.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+    var handle = await getLocalFileHandle();
+    var saved = await saveLocalCache(normalized, handle ? handle.name : "");
+
+    if (!handle) {
+      return { savedToFile: false, savedToCache: true, fileName: "", needsPermission: false, count: normalized.length };
+    }
+
+    var perm = await queryHandlePermission(handle, "readwrite");
+    if (perm !== "granted" && opts.allowPrompt) {
+      perm = await requestHandlePermission(handle, "readwrite");
+    }
+    if (perm !== "granted") {
+      log("Saved in local add-in cache (" + normalized.length + " materials). Click \"Reconnect local file\" to write directly to " + handle.name + ".");
+      return { savedToFile: false, savedToCache: true, fileName: handle.name, needsPermission: true, count: normalized.length };
+    }
+
+    try {
+      var writable = await handle.createWritable();
+      await writable.write(saved.json);
+      await writable.close();
+      log("Saved " + normalized.length + " materials to local file \"" + handle.name + "\".");
+      return { savedToFile: true, savedToCache: true, fileName: handle.name, needsPermission: false, count: normalized.length };
+    } catch (e) {
+      log("Saved in local cache, but writing to \"" + handle.name + "\" failed: " + (e.message || e));
+      return { savedToFile: false, savedToCache: true, fileName: handle.name, needsPermission: false, error: e.message || String(e), count: normalized.length };
+    }
+  }
+
+  /* Read the authoritative local master list (prefers linked disk file, falls back to computer cache) */
+  async function readLocalMaster(opts) {
+    opts = opts || {};
+    var handle = await getLocalFileHandle();
+    if (handle) {
+      var perm = await queryHandlePermission(handle, "read");
+      if (perm !== "granted" && opts.allowPrompt) {
+        perm = await requestHandlePermission(handle, "readwrite");
+      }
+      if (perm === "granted") {
+        try {
+          var file = await handle.getFile();
+          var text = await file.text();
+          var list = parseList(text);
+          await saveLocalCache(list, handle.name);
+          return { list: list, source: "file", fileName: handle.name, needsPermission: false };
+        } catch (e) {
+          // fall through to cache if file temporarily unreadable
+        }
+      } else {
+        var cached = await readLocalCache();
+        return {
+          list: cached ? cached.list : [],
+          source: cached ? "cache" : "none",
+          fileName: handle.name,
+          needsPermission: true
+        };
+      }
+    }
+    var c = await readLocalCache();
+    if (c && c.list) {
+      return { list: c.list, source: "cache", fileName: (c.meta && c.meta.fileName) || "", needsPermission: false };
+    }
+    return { list: [], source: "none", fileName: "", needsPermission: false };
+  }
+
+  /* Create/link a new local master-materials.json file on disk from the current workbook */
+  async function linkNewLocalFile(log) {
+    log = log || noop;
+    if (!supportsLocalFileApi()) {
+      throw new Error("This version of Excel does not allow direct file saving. Use Download JSON / Load JSON below instead.");
+    }
+    var handle = await window.showSaveFilePicker({
+      suggestedName: "master-materials.json",
+      types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
+    });
+    await idbSet(IDB_HANDLE_KEY, handle);
+    var wb = await workbookList();
+    var res = await writeLocalMaster(wb, log, { allowPrompt: true });
+    return { fileName: handle.name, count: res.count };
+  }
+
+  /* Link an existing master-materials.json file on disk and optionally sync it into the workbook */
+  async function linkExistingLocalFile(log, opts) {
+    log = log || noop;
+    opts = opts || {};
+    if (!supportsLocalFileApi()) {
+      throw new Error("This version of Excel does not allow direct file linking. Use Load JSON below instead.");
+    }
+    var picks = await window.showOpenFilePicker({
+      multiple: false,
+      types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
+    });
+    var handle = picks && picks[0];
+    if (!handle) return null;
+    await requestHandlePermission(handle, "readwrite");
+    await idbSet(IDB_HANDLE_KEY, handle);
+
+    var file = await handle.getFile();
+    var text = await file.text();
+    var list = parseList(text);
+    await saveLocalCache(list, handle.name);
+    log("Linked local master file \"" + handle.name + "\" (" + list.length + " materials).");
+    if (opts.applyToWorkbook !== false && list.length) {
+      var r = await applyList(list, log, { syncRemovals: true });
+      log("Workbook updated from \"" + handle.name + "\": " + r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
+    }
+    return { fileName: handle.name, count: list.length };
+  }
+
+  /* Save current workbook's Master Unique Materials into the local file & cache */
+  async function saveWorkbookToLocal(log, opts) {
+    log = log || noop;
+    var wb = await workbookList();
+    return writeLocalMaster(wb, log, opts);
+  }
+
+  /* Sync current workbook's Master Unique Materials from the local file (or local computer cache) */
+  async function pullLocal(log, opts) {
+    log = log || noop;
+    opts = opts || {};
+    var local = await readLocalMaster({ allowPrompt: !!opts.allowPrompt });
+    if (!local.list.length) {
+      if (local.needsPermission) {
+        log("Local file \"" + local.fileName + "\" needs permission. Open Materials tab and click Reconnect local file.");
+      }
+      return { added: 0, updated: 0, removed: 0, skipped: [], source: local.source, fileName: local.fileName, empty: true };
+    }
+    var label = local.source === "file" ? ("local file \"" + local.fileName + "\"") : "local computer master list";
+    log("Syncing master list from " + label + " (" + local.list.length + " materials) ...");
+    var r = await applyList(local.list, log, { syncRemovals: opts.syncRemovals !== false });
+    log("Master list synced from " + label + ": " + r.added + " added, " + r.updated + " changed" + (r.removed ? ", " + r.removed + " removed" : "") + ".");
+    r.skipped.forEach(function (s) { log("Skipped " + s); });
+    r.source = local.source;
+    r.fileName = local.fileName;
+    return r;
+  }
+
+  /* Fallback: import raw JSON text (e.g. from <input type="file">) into local computer cache & workbook */
+  async function importLocalJsonText(text, fileName, log) {
+    log = log || noop;
+    var list = parseList(text);
+    if (!list.length) throw new Error("No materials found in that JSON file.");
+    await saveLocalCache(list, fileName || "master-materials.json");
+    var r = await applyList(list, log, { syncRemovals: true });
+    log("Loaded \"" + (fileName || "master-materials.json") + "\" into this computer and workbook: " +
+      r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
+    return r;
+  }
+
+  /* ---------------- GitHub (optional) ---------------- */
   function repoInfo() {
     var o = CFG.owner, r = CFG.repo;
     if ((!o || !r) && typeof location !== "undefined" && /\.github\.io$/i.test(location.hostname)) {
@@ -154,6 +458,18 @@
     return d;
   }
 
+  async function compareLocal() {
+    var wb = await workbookList();
+    var local = await readLocalMaster({ allowPrompt: false });
+    var d = diff(wb, local.list);
+    d.localSource = local.source;
+    d.localFileName = local.fileName;
+    d.needsPermission = local.needsPermission;
+    d.localCount = local.list.length;
+    d.wbCount = wb.length;
+    return d;
+  }
+
   function writeRow(body, i, r, idx) {
     INPUT_KEYS.forEach(function (k) {
       if (idx[k] < 0) return;
@@ -162,15 +478,19 @@
     });
   }
 
-  /* bring the workbook's master list up to date with `list` (adds missing, updates different; never deletes) */
-  async function applyList(list, log) {
+  /* Bring the workbook's master list up to date with `list`.
+   * Adds missing materials, updates changed fields, and when opts.syncRemovals is true, removes rows deleted from the local master file.
+   */
+  async function applyList(list, log, opts) {
     log = log || noop;
-    var T = root.BomTools, res = { added: 0, updated: 0, skipped: [] };
+    opts = opts || {};
+    var syncRemovals = !!opts.syncRemovals;
+    var T = root.BomTools, res = { added: 0, updated: 0, removed: 0, skipped: [] };
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await T._openMaster(context);
       var idx = m.idx;
-      var body = m.t.getDataBodyRange().load("values,formulas");
+      var body = m.t.getDataBodyRange().load(["values", "formulas", "rowCount"]);
       await context.sync();
 
       var byName = new Map(), blanks = [];
@@ -178,6 +498,9 @@
         var n = String(row[idx.material]).trim();
         if (!n) blanks.push(i); else if (!byName.has(n.toLowerCase())) byName.set(n.toLowerCase(), i);
       });
+
+      var wanted = new Map();
+      list.forEach(function (r) { wanted.set(lc(r.material), r); });
 
       var toAdd = [];
       list.forEach(function (r) {
@@ -224,7 +547,25 @@
         }
       }
 
-      if (toAdd.length || res.updated) {
+      // Remove materials deleted from the authoritative local master file (iterate bottom-up)
+      if (syncRemovals && wanted.size > 0) {
+        var curBody = m.t.getDataBodyRange().load(["values", "rowCount"]);
+        await context.sync();
+        var toDelete = [];
+        curBody.values.forEach(function (row, i) {
+          var n = String(row[idx.material]).trim();
+          if (n && !wanted.has(lc(n))) toDelete.push(i);
+        });
+        if (toDelete.length && toDelete.length < curBody.rowCount) {
+          for (var dIdx = toDelete.length - 1; dIdx >= 0; dIdx--) {
+            m.t.rows.getItemAt(toDelete[dIdx]).delete();
+          }
+          await context.sync();
+          res.removed = toDelete.length;
+        }
+      }
+
+      if (toAdd.length || res.updated || res.removed) {
         var matInfo = await T._ensureMasterNames(context, wb, noop);
         await T._refreshAllBomDropdownsIfRangeBased(context, wb, matInfo);
         wb.application.calculate(Excel.CalculationType.full);
@@ -235,13 +576,13 @@
     return res;
   }
 
-  /* ---------------- pull / push ---------------- */
+  /* ---------------- pull / push (GitHub) ---------------- */
   async function pull(log) {
     log = log || noop;
     log("Reading the shared list from GitHub ...");
     var rem = await fetchPages();
-    if (!rem.list.length) { log("The shared list is empty or not published yet. Nothing to update."); return { added: 0, updated: 0, skipped: [] }; }
-    var r = await applyList(rem.list, log);
+    if (!rem.list.length) { log("The shared list is empty or not published yet. Nothing to update."); return { added: 0, updated: 0, removed: 0, skipped: [] }; }
+    var r = await applyList(rem.list, log, { syncRemovals: false });
     log("Master list updated: " + r.added + " added, " + r.updated + " changed.");
     r.skipped.forEach(function (s) { log("Skipped " + s); });
     return r;
@@ -251,7 +592,7 @@
   async function push(log, opts) {
     log = log || noop;
     opts = opts || {};
-    if (!hasToken()) throw new Error("No GitHub token on this computer. Add one under Publisher settings.");
+    if (!hasToken()) throw new Error("No GitHub token on this computer. Add one under GitHub settings.");
     var wb = await workbookList();
     for (var attempt = 0; attempt < 2; attempt++) {
       var cur = await fetchApi();
@@ -376,12 +717,16 @@
     log("Template imported (Master Unique Materials + hidden BOM Blank).");
   }
 
-  /* ---------------- auto-publish when the Master sheet changes (while the task pane is open) ---------------- */
+  /* ---------------- auto-save when the Master sheet changes (local file + optional GitHub) ---------------- */
   var watcher = { on: false, snap: null, timer: null, busy: false };
 
-  async function watch(log) {
+  function updateWatchSnap(list) {
+    if (Array.isArray(list)) watcher.snap = list;
+  }
+
+  async function watch(log, onSaved) {
     log = log || noop;
-    if (watcher.on || !hasToken()) return;
+    if (watcher.on) return;
     var T = root.BomTools;
     try {
       await Excel.run(async function (context) {
@@ -392,19 +737,27 @@
         ws.onChanged.add(function () {
           clearTimeout(watcher.timer);
           watcher.timer = setTimeout(async function () {
-            if (watcher.busy || !hasToken()) return;
+            if (watcher.busy) return;
             watcher.busy = true;
             try {
               var cur = await workbookList();
-              var d = diff(cur, watcher.snap);
-              var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
-              if (names.length) {
-                await push(log, { only: names });
+              var d = diff(cur, watcher.snap || []);
+              var hasChanges = d.onlyWb.length > 0 || d.onlyRemote.length > 0 || d.changed.length > 0;
+              if (hasChanges) {
+                // Always save additions, edits, and removals to local computer file + local cache
+                await writeLocalMaster(cur, log, { allowPrompt: false });
+                if (hasToken()) {
+                  var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
+                  if (names.length) {
+                    try { await push(log, { only: names }); } catch (e) { log("GitHub auto-publish skipped: " + (e.message || e)); }
+                  }
+                }
                 watcher.snap = cur;
+                if (typeof onSaved === "function") onSaved();
               }
-            } catch (e) { log("Auto-publish failed: " + (e.message || e)); }
+            } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;
-          }, 2500);
+          }, 1500);
         });
         await context.sync();
         watcher.on = true;
@@ -413,10 +766,26 @@
   }
 
   var api = {
-    watch: watch, CFG: CFG, hasToken: hasToken, getToken: getToken, setToken: setToken,
+    watch: watch, updateWatchSnap: updateWatchSnap, CFG: CFG,
+    // local computer master file API (no token required)
+    supportsLocalFileApi: supportsLocalFileApi,
+    getLocalFileStatus: getLocalFileStatus,
+    requestLocalPermission: requestLocalPermission,
+    unlinkLocalFile: unlinkLocalFile,
+    linkNewLocalFile: linkNewLocalFile,
+    linkExistingLocalFile: linkExistingLocalFile,
+    readLocalMaster: readLocalMaster,
+    writeLocalMaster: writeLocalMaster,
+    saveWorkbookToLocal: saveWorkbookToLocal,
+    pullLocal: pullLocal,
+    compareLocal: compareLocal,
+    importLocalJsonText: importLocalJsonText,
+    // GitHub optional API
+    hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
     // pure helpers
-    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList
+    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList,
+    workbookList: workbookList
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomSync = api;
