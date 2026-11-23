@@ -3,13 +3,17 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BOM Converter</title>
+<title>BOM Tools</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>
   :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; }
   * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
   body { margin:0; padding:14px; font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:#201f1e; background:#fff; }
-  h1 { font-size:16px; margin:0 0 2px; }
+  h1 { font-size:16px; margin:0 0 10px; }
+  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--bd); margin-bottom:12px; }
+  .tabs button { flex:1; border:0; border-bottom:3px solid transparent; border-radius:0; background:none; padding:8px 4px; color:var(--mut); font-weight:600; }
+  .tabs button[aria-selected="true"] { color:var(--g); border-bottom-color:var(--g); }
   .sub { color:var(--mut); margin:0 0 12px; }
   .card { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; background:var(--bg); }
   .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 6px; }
@@ -24,45 +28,118 @@
   label.opt b { display:block; }
   label.opt span { color:var(--mut); font-size:12px; }
   .chk { display:flex; gap:8px; align-items:flex-start; margin:8px 0 10px; font-size:12px; }
-  #log { white-space:pre-wrap; font:11.5px/1.5 Consolas, monospace; color:#323130; max-height:160px; overflow:auto; }
-  #log:empty { display:none; }
+  .log { white-space:pre-wrap; font:11.5px/1.5 Consolas, monospace; color:#323130; max-height:160px; overflow:auto; margin-top:10px; }
+  .log:empty { display:none; }
   .note { font-size:11.5px; color:var(--mut); }
+  .field { display:block; margin-bottom:8px; }
+  .field > span { display:block; font-size:12px; color:var(--mut); margin-bottom:2px; }
+  input[type=text], input[type=search], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
+  input[readonly] { background:#f3f2f1; color:var(--mut); }
+  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:170px; overflow:auto; margin-top:6px; }
+  #mat-list div { padding:5px 8px; border-bottom:1px solid #edebe9; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
+  #mat-list div:hover { background:#f3f2f1; }
+  #mat-list div.sel { background:#dff6dd; }
+  #mat-list small { color:var(--mut); white-space:nowrap; }
+  .btnrow { display:flex; gap:8px; }
+  .btnrow .primary { flex:1; width:auto; }
 </style>
 </head>
 <body>
-  <h1>BOM Converter</h1>
-  <p class="sub">Turn the automated BOM workbook into a plain, easy-to-edit one.</p>
-
-  <div class="card">
-    <h2>Workbook</h2>
-    <div id="status" class="status">Checking...</div>
-    <button id="refresh" style="margin-top:6px">Re-check</button>
+  <h1>BOM Tools</h1>
+  <div class="tabs" role="tablist">
+    <button id="tab-sheet" role="tab" aria-selected="false">Add sheet</button>
+    <button id="tab-mat" role="tab" aria-selected="false">Materials</button>
+    <button id="tab-convert" role="tab" aria-selected="true">Convert</button>
   </div>
 
-  <div class="card">
-    <h2>Step 1 &middot; Work on a copy</h2>
-    <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
-    <button id="copy" class="primary">Open a copy of this workbook</button>
-    <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Converter there and continue with step 2.</p>
-  </div>
+  <!-- ===================== ADD SHEET ===================== -->
+  <section id="page-sheet" hidden>
+    <p class="sub">Add a new take-off (BOM) sheet with its purchase list, formulas and dropdowns already in place.</p>
+    <div class="card">
+      <h2>Workbook</h2>
+      <div id="sh-status" class="status">Checking...</div>
+    </div>
+    <div class="card">
+      <h2>New sheet</h2>
+      <label class="field"><span>Sheet name (e.g. D3-a)</span><input type="text" id="sh-name" maxlength="31" autocomplete="off"></label>
+      <label class="field"><span>Project name (shown in the title)</span><input type="text" id="sh-project" autocomplete="off"></label>
+      <label class="field"><span>Copy from</span><select id="sh-source"></select></label>
+      <label class="chk"><input type="checkbox" id="sh-clear"> <span>Clear entered data (tick this when copying a sheet that already has items)</span></label>
+      <button id="sh-add" class="primary" disabled>Add sheet</button>
+      <div id="sh-log" class="log"></div>
+    </div>
+    <p class="note">Tip: keep one empty sheet named <b>BOM Blank</b> (hidden is fine) in the template and always copy from it.</p>
+  </section>
 
-  <div class="card">
-    <h2>Step 2 &middot; Convert</h2>
-    <label class="opt"><input type="radio" name="mode" value="growing" checked>
-      <b>Auto-growing purchase list</b>
-      <span>Purchase list is formula-driven: it fills, grows and shrinks by itself when the BOM changes.</span></label>
-    <label class="opt"><input type="radio" name="mode" value="fixed">
-      <b>Fixed purchase list</b>
-      <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
-    <label class="opt"><input type="checkbox" id="compiled">
-      <b>Extra: compiled purchase list sheet</b>
-      <span>Adds a "Compiled Purchase List" sheet: all sheets combined on the left, each sheet's own list to the right with a gap, space on top for company details. With the auto-growing option it is formula-driven and grows with the BOM; with the fixed option it is values only.</span></label>
-    <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
-    <button id="convert" class="primary" disabled>Convert</button>
-    <div id="log" style="margin-top:10px"></div>
-  </div>
+  <!-- ===================== MATERIALS ===================== -->
+  <section id="page-mat" hidden>
+    <p class="sub">Add a material to the master list or change an existing one. Every take-off sheet in this workbook updates straight away.</p>
+    <div class="card">
+      <h2>Master list</h2>
+      <div id="mat-status" class="status">Checking...</div>
+      <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
+      <div id="mat-list"></div>
+    </div>
+    <div class="card">
+      <h2 id="mat-mode">New material</h2>
+      <label class="field"><span id="mat-name-label">Material name</span><input type="text" id="m-name" autocomplete="off"></label>
+      <label class="field"><span>Category</span><input type="text" id="m-cat" list="m-cats" autocomplete="off"><datalist id="m-cats"></datalist></label>
+      <label class="field"><span>Primary unit</span>
+        <select id="m-unit"><option value="">Choose...</option><option>kg/m</option><option>kg/m²</option><option>kg/each</option></select></label>
+      <label class="field f-lin" hidden><span>Linear weight (kg/m)</span><input type="text" id="m-lin" inputmode="decimal" autocomplete="off"></label>
+      <label class="field f-area" hidden><span>Area weight (kg/m²)</span><input type="text" id="m-area" inputmode="decimal" autocomplete="off"></label>
+      <div class="row2 f-area" hidden>
+        <label class="field"><span>Sheet length (mm)</span><input type="text" id="m-sl" inputmode="decimal" autocomplete="off"></label>
+        <label class="field"><span>Sheet width (mm)</span><input type="text" id="m-sw" inputmode="decimal" autocomplete="off"></label>
+      </div>
+      <label class="field f-piece" hidden><span>Piece weight (kg/each)</span><input type="text" id="m-piece" inputmode="decimal" autocomplete="off"></label>
+      <label class="field"><span>Remarks</span><input type="text" id="m-rem" autocomplete="off"></label>
+      <div class="btnrow">
+        <button id="m-save" class="primary">Add material</button>
+        <button id="m-new">New</button>
+      </div>
+      <div id="mat-log" class="log"></div>
+    </div>
+    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
+  </section>
 
-  <script src="convert.js?v=3"></script>
-  <script src="taskpane.js?v=3"></script>
+  <!-- ===================== CONVERT ===================== -->
+  <section id="page-convert">
+    <p class="sub">Turn the automated BOM workbook into a plain, easy-to-edit one.</p>
+
+    <div class="card">
+      <h2>Workbook</h2>
+      <div id="status" class="status">Checking...</div>
+      <button id="refresh" style="margin-top:6px">Re-check</button>
+    </div>
+
+    <div class="card">
+      <h2>Step 1 &middot; Work on a copy</h2>
+      <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
+      <button id="copy" class="primary">Open a copy of this workbook</button>
+      <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Tools there and continue with step 2.</p>
+    </div>
+
+    <div class="card">
+      <h2>Step 2 &middot; Convert</h2>
+      <label class="opt"><input type="radio" name="mode" value="growing" checked>
+        <b>Auto-growing purchase list</b>
+        <span>Purchase list is formula-driven: it fills, grows and shrinks by itself when the BOM changes.</span></label>
+      <label class="opt"><input type="radio" name="mode" value="fixed">
+        <b>Fixed purchase list</b>
+        <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
+      <label class="opt"><input type="checkbox" id="compiled">
+        <b>Extra: compiled purchase list sheet</b>
+        <span>Adds a "Compiled Purchase List" sheet: all sheets combined on the left, each sheet's own list to the right with a gap, space on top for company details. With the auto-growing option it is formula-driven and grows with the BOM; with the fixed option it is values only.</span></label>
+      <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
+      <button id="convert" class="primary" disabled>Convert</button>
+      <div id="log" class="log"></div>
+    </div>
+  </section>
+
+  <script src="convert.js?v=4"></script>
+  <script src="tools.js?v=4"></script>
+  <script src="taskpane.js?v=4"></script>
 </body>
 </html>
