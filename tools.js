@@ -461,9 +461,16 @@
     } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
   }
 
-  /* Repairs named ranges, dropdowns, formatting, and formulas across the entire workbook. */
-  async function repairWorkbook(log) {
+  /* Repairs named ranges, dropdowns, formatting, and formulas across selected (or all) BOM sheets. */
+  async function repairWorkbook(log, opts) {
     log = log || noop;
+    opts = opts || {};
+    var selectedSet = null;
+    if (Array.isArray(opts.sheets)) {
+      if (!opts.sheets.length) throw new Error("Select at least one BOM sheet to repair.");
+      selectedSet = {};
+      opts.sheets.forEach(function (n) { selectedSet[lc(n)] = true; });
+    }
     var count = 0;
     await Excel.run(async function (context) {
       var wb = context.workbook;
@@ -478,6 +485,7 @@
       for (var i = 0; i < sheets.length; i++) {
         var ws = sheets[i];
         if (!firstTable(ws.tables.items, "bom_")) continue;
+        if (selectedSet && !selectedSet[lc(ws.name)]) continue;
         log("Verifying dropdowns, layout and formulas on \"" + ws.name + "\" ...");
         await repairBomSheet(context, wb, ws, matInfo, {}, log);
         count++;

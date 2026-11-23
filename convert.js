@@ -782,13 +782,25 @@
     var warnings = [];
     var extracted = [];
 
-    // 1. Inspect and extract all data from converted BOM sheets first
+    // 1. Inspect and extract all data from selected (or all) converted BOM sheets first
+    var selectedSet = null;
+    if (Array.isArray(opts.sheets)) {
+      if (!opts.sheets.length) throw new Error("Select at least one converted sheet to restore.");
+      selectedSet = {};
+      opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
+    }
+
     var hasMaster = false, hasBlank = false;
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var convSheets = await findConvertedSheets(context, wb);
+      if (selectedSet) {
+        convSheets = convSheets.filter(function (ws) { return !!selectedSet[String(ws.name).trim().toLowerCase()]; });
+      }
       if (!convSheets.length) {
-        throw new Error("No converted BOM sheets found to restore. (Automated BOM sheets with bom_ tables are already automated.)");
+        throw new Error(selectedSet
+          ? "None of the selected converted sheets were found."
+          : "No converted BOM sheets found to restore. (Automated BOM sheets with bom_ tables are already automated.)");
       }
       var mWs = wb.worksheets.getItemOrNullObject(MASTER);
       var bWs = wb.worksheets.getItemOrNullObject(BLANK);

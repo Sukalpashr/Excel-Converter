@@ -22,7 +22,8 @@ Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then r
 3. Every time you **add, edit, or remove** a material—either via the task pane or directly on the `Master Unique Materials` worksheet—that file updates automatically.
 4. Whenever you create a **new BOM sheet**, add a BOM to a **non-BOM workbook**, or **restore a converted BOM**, your latest saved materials list loads automatically.
 
-## What was updated in v1.1 – v1.3
+## What was updated in v1.1 – v1.4
+- **Per-sheet selection & copy option on Restore (v1.4)**: both **Restore Automated** and **Troubleshooting & Repair** let you pick exactly which detected sheets to convert or repair (with quick `All` / `None` toggles), and **Restore Automated** now includes **Step 1 · Open a copy in a new Excel window** just like Flatten for Sharing.
 - **Home-first UI & streamlined panels (v1.3)**: opens to a **Home** tab with quick options; optional Add Sheet fields, Repair tools, and plain-English Local Master Save are neatly tucked into collapsible dropdowns so everyday editing stays fast and uncluttered.
 - **Restore Automated BOM (v1.3)**: converts flattened/plain BOM sheets back into full automated BOM sheets with `Master Unique Materials`, hidden `BOM Blank`, `bom_*`/`pl_*` tables, live dropdowns, formulas, and preserved Stock/PO values.
 - **Local computer master file sync (v1.2)**: uses the File System Access API + IndexedDB handle persistence + local computer storage cache so materials sync automatically across workbooks without a GitHub token; supports adding, editing, and removing materials (`deleteMaterial` + removal sync).

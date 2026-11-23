@@ -451,6 +451,43 @@
   .steps li { margin-bottom: 4px; }
   .steps b { color: var(--text); }
 
+  /* ---- Sheet Checklist (Repair & Restore) ---- */
+  .sheet-pick {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .sheet-pick-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 9px;
+    background: #F6F8F7;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .sheet-pick-list {
+    max-height: 120px;
+    overflow: auto;
+  }
+  .sheet-pick-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    border-bottom: 1px solid #F0F3F1;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sheet-pick-item:last-child { border-bottom: 0; }
+  .sheet-pick-item:hover { background: #F7FAF8; }
+  .sheet-pick-item input { accent-color: var(--brand); margin: 0; }
+  .sheet-pick-item small { color: var(--muted); font-size: 11px; margin-left: auto; }
+
   /* ---- Log Output ---- */
   .log {
     white-space: pre-wrap;
@@ -559,10 +596,11 @@
           <span class="sum-caret" aria-hidden="true">&#9656;</span>
         </summary>
         <div class="drawer-body">
-          <p class="note" style="margin-top:6px;margin-bottom:8px">
-            Only needed if an older workbook's dropdowns, named ranges, or formulas stopped working.
+          <p class="note" style="margin-top:6px;margin-bottom:6px">
+            Pick which BOM sheets to check and repair (dropdowns, named ranges, formulas &amp; layout).
           </p>
-          <button id="home-repair-btn" style="width:100%">Repair dropdowns &amp; formulas</button>
+          <div id="home-repair-sheets" class="sheet-pick" hidden></div>
+          <button id="home-repair-btn" style="width:100%" disabled>Repair selected sheets</button>
           <div id="home-repair-log" class="log"></div>
         </div>
       </details>
@@ -623,10 +661,11 @@
           <span class="sum-caret" aria-hidden="true">&#9656;</span>
         </summary>
         <div class="drawer-body">
-          <p class="note" style="margin-top:6px;margin-bottom:8px">
-            Fixes missing dropdowns, broken named ranges, hidden helper columns, and print headers across all BOM sheets in this workbook.
+          <p class="note" style="margin-top:6px;margin-bottom:6px">
+            Choose which BOM sheets to repair (missing dropdowns, named ranges, helper columns, and print headers).
           </p>
-          <button id="sh-repair" style="width:100%">Repair dropdowns &amp; formulas</button>
+          <div id="sh-repair-sheets" class="sheet-pick" hidden></div>
+          <button id="sh-repair" style="width:100%" disabled>Repair selected sheets</button>
         </div>
       </details>
     </section>
@@ -825,10 +864,19 @@
         </div>
 
         <div class="card">
-          <div class="card-title"><span>Convert Back to Automated BOM</span></div>
-          <p class="note" style="margin-top:0;margin-bottom:10px">
-            Rebuilds each converted BOM sheet back into a full automated sheet with <b>Master Unique Materials</b>, hidden <b>BOM Blank</b>, live dropdowns, formulas, and your entered Stock &amp; PO inputs preserved.
+          <div class="card-title"><span>Step 1 &middot; Work on a copy (recommended)</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Keep your original converted file untouched. Excel opens the copy in a new window—open BOM Tools there to restore it, or restore directly in Step 2.
           </p>
+          <button id="rest-copy" style="width:100%">Open a copy in a new Excel window</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Step 2 &middot; Choose Sheets &amp; Restore</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:6px">
+            Rebuilds each selected sheet back into a full automated BOM with <b>Master Unique Materials</b>, hidden <b>BOM Blank</b>, live dropdowns, formulas, and Stock &amp; PO inputs preserved.
+          </p>
+          <div id="rest-sheets" class="sheet-pick" hidden></div>
           <label class="chk">
             <input type="checkbox" id="rest-sync" checked>
             <span>Load my latest saved materials list from this computer</span>
@@ -837,17 +885,17 @@
             <input type="checkbox" id="rest-drop-compiled">
             <span>Remove "Compiled Purchase List" sheet (if present)</span>
           </label>
-          <button id="restore-btn" class="primary" disabled>Restore Automated BOM</button>
+          <button id="restore-btn" class="primary" disabled>Restore Selected Sheets</button>
           <div id="rest-log" class="log"></div>
         </div>
       </div>
     </section>
   </main>
 
-  <script src="convert.js?v=9"></script>
-  <script src="tools.js?v=9"></script>
-  <script src="template-data.js?v=9"></script>
-  <script src="sync.js?v=9"></script>
-  <script src="taskpane.js?v=9"></script>
+  <script src="convert.js?v=10"></script>
+  <script src="tools.js?v=10"></script>
+  <script src="template-data.js?v=10"></script>
+  <script src="sync.js?v=10"></script>
+  <script src="taskpane.js?v=10"></script>
 </body>
 </html>

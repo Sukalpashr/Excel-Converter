@@ -37,9 +37,88 @@ function setDot(id, kind) {
 function updateButtons() {
   if ($("convert")) $("convert").disabled = state.busy || !state.ok || !$("iscopy").checked;
   if ($("copy")) $("copy").disabled = state.busy;
-  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore;
-  if ($("sh-repair")) $("sh-repair").disabled = state.busy;
-  if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy;
+  if ($("rest-copy")) $("rest-copy").disabled = state.busy;
+  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !getPickedSheets("rest-sheets").length;
+  if ($("sh-repair")) $("sh-repair").disabled = state.busy || !getPickedSheets("sh-repair-sheets").length;
+  if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy || !getPickedSheets("home-repair-sheets").length;
+}
+
+/* Reusable compact checklist for selecting detected sheets (used by Repair & Restore) */
+function getPickedSheets(containerId) {
+  var el = $(containerId);
+  if (!el || el.hidden) return [];
+  var boxes = el.querySelectorAll('input[type="checkbox"]:checked');
+  var out = [];
+  Array.prototype.forEach.call(boxes, function (b) { out.push(b.value); });
+  return out;
+}
+
+function renderSheetPicker(containerId, items, titleText) {
+  var el = $(containerId);
+  if (!el) return;
+  el.innerHTML = "";
+  if (!items || !items.length) {
+    el.hidden = true;
+    updateButtons();
+    return;
+  }
+  el.hidden = false;
+
+  var hdr = document.createElement("div");
+  hdr.className = "sheet-pick-hdr";
+  var title = document.createElement("span");
+  title.textContent = titleText || ("Select sheets (" + items.length + ")");
+  hdr.appendChild(title);
+
+  if (items.length > 1) {
+    var toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "link-btn";
+    toggle.textContent = "None";
+    toggle.onclick = function () {
+      var boxes = el.querySelectorAll('input[type="checkbox"]');
+      var allOn = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+      Array.prototype.forEach.call(boxes, function (b) { b.checked = !allOn; });
+      toggle.textContent = allOn ? "All" : "None";
+      updateButtons();
+    };
+    hdr.appendChild(toggle);
+  }
+  el.appendChild(hdr);
+
+  var list = document.createElement("div");
+  list.className = "sheet-pick-list";
+  items.forEach(function (item) {
+    var name = typeof item === "string" ? item : item.name;
+    var tag = typeof item === "string" ? "" : (item.tag || "");
+    var row = document.createElement("label");
+    row.className = "sheet-pick-item";
+    var cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.value = name;
+    cb.checked = true;
+    cb.onchange = function () {
+      var boxes = el.querySelectorAll('input[type="checkbox"]');
+      var toggleBtn = hdr.querySelector("button");
+      if (toggleBtn) {
+        var allOn = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+        toggleBtn.textContent = allOn ? "None" : "All";
+      }
+      updateButtons();
+    };
+    var txt = document.createElement("span");
+    txt.textContent = name;
+    row.appendChild(cb);
+    row.appendChild(txt);
+    if (tag) {
+      var sm = document.createElement("small");
+      sm.textContent = tag;
+      row.appendChild(sm);
+    }
+    list.appendChild(row);
+  });
+  el.appendChild(list);
+  updateButtons();
 }
 
 /* =====================================================================
@@ -90,6 +169,14 @@ async function refreshHome() {
 
   try {
     var info = await BomConvert.inspectWorkbook();
+    var shInfo = null;
+    try { shInfo = await BomTools.inspectSheets(); } catch (e) { shInfo = null; }
+    var repairItems = (shInfo && shInfo.hasMaster && shInfo.bomSheets.length)
+      ? shInfo.bomSheets.map(function (s) { return { name: s.name, tag: s.hidden ? "template" : "" }; })
+      : [];
+    renderSheetPicker("home-repair-sheets", repairItems, "BOM sheets to repair");
+    if ($("home-repair-drawer")) $("home-repair-drawer").hidden = !repairItems.length;
+
     var hasAuto = info.master && info.bomSheets.length > 0;
     var hasConv = info.convertedSheets && info.convertedSheets.length > 0;
 
@@ -119,6 +206,7 @@ async function refreshHome() {
     st.className = "status warn";
     st.textContent = "Could not inspect workbook: " + (e.message || e);
   }
+  updateButtons();
 }
 
 /* =====================================================================
@@ -325,6 +413,10 @@ async function refreshSheets() {
 
     var hasRepairTarget = sheetInfo.hasMaster && names.length > 0;
     if ($("sh-repair-drawer")) $("sh-repair-drawer").hidden = !hasRepairTarget;
+    var repairItems = hasRepairTarget
+      ? sheetInfo.bomSheets.map(function (s) { return { name: s.name, tag: s.hidden ? "template" : "" }; })
+      : [];
+    renderSheetPicker("sh-repair-sheets", repairItems, "BOM sheets to repair");
 
     if (sheetInfo.needsTemplate) {
       setDot("sh-dot", "info");
@@ -352,7 +444,7 @@ async function refreshSheets() {
 
 function updateSheetButton() {
   $("sh-add").disabled = state.busy || !sheetInfo || (!sheetInfo.bomSheets.length && !sheetInfo.needsTemplate) || !$("sh-name").value.trim();
-  if ($("sh-repair")) $("sh-repair").disabled = state.busy;
+  updateButtons();
 }
 
 async function addSheet() {
@@ -389,17 +481,23 @@ async function addSheet() {
   await refreshLocalFileStatus();
 }
 
-async function repairWorkbook(logger) {
+async function repairWorkbook(logger, pickerId) {
   logger = logger || shLog;
+  var picked = pickerId ? getPickedSheets(pickerId) : null;
+  if (picked && !picked.length) {
+    logger("Select at least one BOM sheet to repair.", true);
+    return;
+  }
   state.busy = true; updateSheetButton(); updateButtons();
   logger("", true);
   try {
-    await BomTools.repairWorkbook(logger);
+    await BomTools.repairWorkbook(logger, picked ? { sheets: picked } : {});
   } catch (e) {
     logger("Repair failed: " + (e.message || JSON.stringify(e)));
   }
   state.busy = false; updateButtons();
   await refreshSheets();
+  if (state.activeTab === "home") await refreshHome();
 }
 
 /* =====================================================================
@@ -590,13 +688,15 @@ async function check(autoPickSubmode) {
     if (state.canRestore) {
       setDot("rest-dot", "ok");
       rst.className = "status ok";
-      rst.textContent = "Ready · " + info.convertedSheets.length + " converted sheet(s) found: " + info.convertedSheets.join(", ");
+      rst.textContent = "Ready · " + info.convertedSheets.length + " converted sheet(s) found.";
+      renderSheetPicker("rest-sheets", info.convertedSheets, "Converted sheets to restore");
     } else {
       setDot("rest-dot", "info");
       rst.className = "status";
       rst.textContent = state.ok
         ? "All BOM sheets in this workbook are already automated."
         : "No converted BOM sheets found to restore.";
+      renderSheetPicker("rest-sheets", [], "");
     }
 
     if (autoPickSubmode && !state.ok && state.canRestore) {
@@ -607,6 +707,7 @@ async function check(autoPickSubmode) {
     setDot("conv-dot", "warn"); setDot("rest-dot", "warn");
     st.className = "status warn"; st.textContent = "Could not read workbook: " + (e.message || e);
     rst.className = "status warn"; rst.textContent = "Could not read workbook: " + (e.message || e);
+    renderSheetPicker("rest-sheets", [], "");
   }
   updateButtons();
 }
@@ -634,19 +735,20 @@ function getFileBase64() {
   });
 }
 
-async function openCopy() {
+async function openCopy(logger, tipText) {
+  logger = logger || log;
   state.busy = true; updateButtons();
-  log("Reading this workbook...", true);
+  logger("Reading this workbook...", true);
   try {
     var b64 = await getFileBase64();
     await Excel.run(async function (context) {
       Excel.createWorkbook(b64).open();
       await context.sync();
     });
-    log("Opened a copy in a new window. Open BOM Tools there, tick the confirmation box, and convert.");
+    logger(tipText || "Opened a copy in a new window. Open BOM Tools there to convert it safely.");
   } catch (e) {
-    log("Could not open a copy automatically: " + (e.message || JSON.stringify(e)));
-    log("Tip: use File > Save As a new name, then convert that copy.");
+    logger("Could not open a copy automatically: " + (e.message || JSON.stringify(e)));
+    logger("Tip: use File > Save As a new name, then convert that copy.");
   }
   state.busy = false; updateButtons();
 }
@@ -668,14 +770,20 @@ async function convert() {
 }
 
 async function restoreAutomated() {
+  var picked = getPickedSheets("rest-sheets");
+  if (!picked.length) {
+    restLog("Select at least one converted sheet to restore.", true);
+    return;
+  }
   state.busy = true; updateButtons();
   restLog("", true);
   try {
     var res = await BomConvert.restoreAutomatedWorkbook(restLog, {
+      sheets: picked,
       syncLocal: $("rest-sync").checked,
       removeCompiled: $("rest-drop-compiled").checked
     });
-    restLog("Done! Your BOM sheets are automated again with working dropdowns and formulas.");
+    restLog("Done! Restored " + res.restoredCount + " sheet(s) back to automated BOM format.");
     res.warnings.forEach(function (w) { restLog("NOTE: " + w); });
   } catch (e) {
     restLog("Restore failed: " + (e.message || JSON.stringify(e)));
@@ -760,11 +868,11 @@ Office.onReady(function (info) {
   $("qa-flatten").onclick = function () { showTab("convert", { submode: "flatten" }); };
   $("qa-restore").onclick = function () { showTab("convert", { submode: "restore" }); };
   $("home-reconnect").onclick = localReconnect;
-  $("home-repair-btn").onclick = function () { repairWorkbook(homeRepairLog); };
+  $("home-repair-btn").onclick = function () { repairWorkbook(homeRepairLog, "home-repair-sheets"); };
 
   // Add sheet
   $("sh-add").onclick = addSheet;
-  $("sh-repair").onclick = function () { repairWorkbook(shLog); };
+  $("sh-repair").onclick = function () { repairWorkbook(shLog, "sh-repair-sheets"); };
   $("sh-reconnect").onclick = localReconnect;
   $("sh-name").oninput = updateSheetButton;
   $("sh-source").onchange = setSheetClearDefault;
@@ -801,7 +909,12 @@ Office.onReady(function (info) {
   // Convert (two-way)
   $("cmode-flatten").onclick = function () { setConvertSubmode("flatten"); };
   $("cmode-restore").onclick = function () { setConvertSubmode("restore"); };
-  $("copy").onclick = openCopy;
+  $("copy").onclick = function () {
+    openCopy(log, "Opened a copy in a new window. Open BOM Tools there, tick the confirmation box, and convert.");
+  };
+  $("rest-copy").onclick = function () {
+    openCopy(restLog, "Opened a copy in a new window. Open BOM Tools there to restore your sheets while keeping the original file untouched.");
+  };
   $("convert").onclick = convert;
   $("iscopy").onchange = updateButtons;
   $("restore-btn").onclick = restoreAutomated;
