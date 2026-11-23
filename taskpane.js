@@ -98,14 +98,217 @@ async function convert() {
   await check();
 }
 
+
+/* =====================================================================
+ * Tabs
+ * ===================================================================== */
+var TABS = ["sheet", "mat", "convert"];
+
+function showTab(name) {
+  TABS.forEach(function (t) {
+    $("tab-" + t).setAttribute("aria-selected", t === name ? "true" : "false");
+    $("page-" + t).hidden = (t !== name);
+  });
+  try { localStorage.setItem("bomTab", name); } catch (e) { /* storage may be blocked */ }
+  if (name === "convert") check();
+  if (name === "sheet") refreshSheets();
+  if (name === "mat") refreshMaterials();
+}
+
+function makeLog(id) {
+  return function (msg, clear) {
+    var el = $(id);
+    if (clear) el.textContent = "";
+    el.textContent += (el.textContent ? "\n" : "") + msg;
+    el.scrollTop = el.scrollHeight;
+  };
+}
+var shLog = makeLog("sh-log"), matLog = makeLog("mat-log");
+
+/* =====================================================================
+ * Add sheet
+ * ===================================================================== */
+var sheetInfo = null;
+
+function setSheetClearDefault() {
+  $("sh-clear").checked = $("sh-source").value !== BomTools.BLANK;
+}
+
+async function refreshSheets() {
+  var st = $("sh-status");
+  st.className = "status"; st.textContent = "Checking...";
+  try {
+    sheetInfo = await BomTools.inspectSheets();
+    var sel = $("sh-source"), keep = sel.value;
+    sel.innerHTML = "";
+    sheetInfo.bomSheets.forEach(function (s) {
+      var o = document.createElement("option");
+      o.value = s.name; o.textContent = s.name + (s.hidden ? " (hidden)" : "");
+      sel.appendChild(o);
+    });
+    var names = sheetInfo.bomSheets.map(function (s) { return s.name; });
+    sel.value = names.indexOf(keep) >= 0 ? keep : (sheetInfo.hasBlank ? BomTools.BLANK : names[0]);
+    setSheetClearDefault();
+    if (!$("sh-project").value && sheetInfo.project) $("sh-project").value = sheetInfo.project;
+    if (names.length) {
+      st.className = "status ok";
+      st.textContent = names.length + " BOM sheet(s) found" + (sheetInfo.hasBlank ? " incl. the blank sheet." : ". No \"BOM Blank\" sheet yet; you can copy any sheet and clear its data.");
+    } else {
+      st.className = "status warn";
+      st.textContent = "No BOM sheets (tables named bom_...) found. Use this on the automated template or project workbook, not a converted one.";
+    }
+  } catch (e) {
+    sheetInfo = null;
+    st.className = "status warn";
+    st.textContent = "Could not read the workbook: " + (e.message || e);
+  }
+  updateSheetButton();
+}
+
+function updateSheetButton() {
+  $("sh-add").disabled = state.busy || !sheetInfo || !sheetInfo.bomSheets.length || !$("sh-name").value.trim();
+}
+
+async function addSheet() {
+  state.busy = true; updateSheetButton(); updateButtons();
+  shLog("", true);
+  try {
+    var r = await BomTools.addBomSheet({
+      name: $("sh-name").value, project: $("sh-project").value,
+      source: $("sh-source").value, clear: $("sh-clear").checked
+    }, shLog);
+    shLog("Added sheet \"" + r.name + "\".");
+    r.warnings.forEach(function (w) { shLog("WARNING: " + w); });
+    $("sh-name").value = "";
+  } catch (e) {
+    shLog("Could not add the sheet: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false; updateButtons();
+  await refreshSheets();
+}
+
+/* =====================================================================
+ * Materials
+ * ===================================================================== */
+var mat = { rows: [], mode: "add", selected: null };
+
+function unitFields() {
+  var u = $("m-unit").value;
+  var show = { "f-lin": u === "kg/m", "f-area": u === "kg/m²", "f-piece": u === "kg/each" };
+  Object.keys(show).forEach(function (cls) {
+    Array.prototype.forEach.call(document.getElementsByClassName(cls), function (el) { el.hidden = !show[cls]; });
+  });
+}
+
+function fmt(v) { return (v === "" || v === null || v === undefined) ? "" : String(v); }
+
+function setMatMode(mode, row) {
+  mat.mode = mode; mat.selected = row || null;
+  $("mat-mode").textContent = mode === "edit" ? "Edit material" : "New material";
+  $("m-save").textContent = mode === "edit" ? "Save changes" : "Add material";
+  $("m-name").readOnly = (mode === "edit");
+  $("mat-name-label").textContent = mode === "edit" ? "Material name (locked)" : "Material name";
+  var r = row || { material: "", category: "", unit: "", lin: "", area: "", piece: "", sl: "", sw: "", remarks: "" };
+  $("m-name").value = r.material; $("m-cat").value = r.category; $("m-unit").value = r.unit;
+  $("m-lin").value = fmt(r.lin); $("m-area").value = fmt(r.area); $("m-piece").value = fmt(r.piece);
+  $("m-sl").value = fmt(r.sl); $("m-sw").value = fmt(r.sw); $("m-rem").value = r.remarks;
+  unitFields();
+  renderMatList();
+}
+
+function renderMatList() {
+  var box = $("mat-list"), q = $("mat-search").value.trim().toLowerCase();
+  box.innerHTML = "";
+  var shown = mat.rows.filter(function (r) { return !q || (r.material + " " + r.category).toLowerCase().indexOf(q) >= 0; });
+  shown.slice(0, 150).forEach(function (r) {
+    var d = document.createElement("div");
+    if (mat.selected && mat.selected.row === r.row) d.className = "sel";
+    var a = document.createElement("span"); a.textContent = r.material;
+    var b = document.createElement("small");
+    var w = r.unit === "kg/m" ? r.lin : r.unit === "kg/m²" ? r.area : r.piece;
+    b.textContent = fmt(w) + " " + r.unit;
+    d.appendChild(a); d.appendChild(b);
+    d.onclick = function () { setMatMode("edit", r); matLog("", true); };
+    box.appendChild(d);
+  });
+  if (!shown.length) {
+    var e = document.createElement("div"); e.textContent = "No match."; e.style.cursor = "default"; box.appendChild(e);
+  }
+}
+
+async function refreshMaterials(keepName) {
+  var st = $("mat-status");
+  st.className = "status"; st.textContent = "Checking...";
+  try {
+    var res = await BomTools.listMaterials();
+    mat.rows = res.rows;
+    var dl = $("m-cats"); dl.innerHTML = "";
+    res.categories.forEach(function (c) { var o = document.createElement("option"); o.value = c; dl.appendChild(o); });
+    st.className = "status ok";
+    st.textContent = res.rows.length + " materials in the master list.";
+    var again = keepName && res.rows.filter(function (r) { return r.material.toLowerCase() === keepName.toLowerCase(); })[0];
+    if (again) setMatMode("edit", again);
+    else if (mat.mode === "edit" && mat.selected) setMatMode("add");
+    else renderMatList();
+    $("m-save").disabled = false;
+  } catch (e) {
+    mat.rows = [];
+    st.className = "status warn";
+    st.textContent = "Could not read the master list: " + (e.message || e);
+    renderMatList();
+    $("m-save").disabled = true;
+  }
+}
+
+function readMatForm() {
+  return { material: $("m-name").value, category: $("m-cat").value, unit: $("m-unit").value,
+           lin: $("m-lin").value, area: $("m-area").value, piece: $("m-piece").value,
+           sl: $("m-sl").value, sw: $("m-sw").value, remarks: $("m-rem").value };
+}
+
+async function saveMaterial() {
+  var raw = readMatForm();
+  matLog("", true);
+  var pre = BomTools.validateMaterial(BomTools.normalizeMaterial(raw),
+    mat.rows.map(function (r) { return r.material; }), mat.mode);
+  if (pre.length) { pre.forEach(function (m) { matLog(m); }); return; }
+  state.busy = true; $("m-save").disabled = true;
+  try {
+    var wasEdit = mat.mode === "edit";
+    var r = wasEdit ? await BomTools.updateMaterial(raw) : await BomTools.addMaterial(raw);
+    matLog((wasEdit ? "Saved \"" : "Added \"") + r.material + "\". Take-off sheets update automatically.");
+    var keep = wasEdit ? r.material : null;
+    state.busy = false;
+    await refreshMaterials(keep);
+    if (!wasEdit) setMatMode("add");
+  } catch (e) {
+    matLog("Failed: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false; $("m-save").disabled = false;
+}
+
 Office.onReady(function (info) {
   if (info.host !== Office.HostType.Excel) {
     $("status").textContent = "This add-in works in Excel only.";
     return;
   }
+  // convert page
   $("refresh").onclick = check;
   $("copy").onclick = openCopy;
   $("convert").onclick = convert;
   $("iscopy").onchange = updateButtons;
-  check();
+  // add sheet page
+  $("sh-add").onclick = addSheet;
+  $("sh-name").oninput = updateSheetButton;
+  $("sh-source").onchange = setSheetClearDefault;
+  // materials page
+  $("mat-search").oninput = renderMatList;
+  $("m-unit").onchange = unitFields;
+  $("m-save").onclick = saveMaterial;
+  $("m-new").onclick = function () { matLog("", true); setMatMode("add"); };
+  // tabs
+  TABS.forEach(function (t) { $("tab-" + t).onclick = function () { showTab(t); }; });
+  var first = "convert";
+  try { var s = localStorage.getItem("bomTab"); if (TABS.indexOf(s) >= 0) first = s; } catch (e) { /* ignore */ }
+  showTab(first);
 });
