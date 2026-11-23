@@ -11,6 +11,7 @@
   var BOTTOM = 320;
   var KGM2 = "kg/m²";
   var MASTER = "Master Unique Materials";
+  var BLANK = "BOM Blank";
   var COLS_PO = [22, 23, 24, 25, 27];      // V W X Y AA : typed stock / PO inputs
 
   function colLetter(n) {
@@ -86,20 +87,28 @@
     body.values.forEach(function (row, i) {
       var name = row[cM];
       if (isBlank(name)) return;
-      m[String(name)] = { order: i, unit: row[cU], lin: row[cLin], area: row[cAr], piece: row[cPc], sl: row[cSL], sw: row[cSW] };
+      var key = String(name).trim();
+      var info = { order: i, unit: row[cU], lin: row[cLin], area: row[cAr], piece: row[cPc], sl: row[cSL], sw: row[cSW] };
+      m[String(name)] = info;
+      if (key !== String(name)) m[key] = info;
     });
     return m;
   }
 
+  /* Find active BOM sheets (skipping the hidden "BOM Blank" template sheet when real take-off sheets exist). */
   async function findBomSheets(context, wb) {
-    wb.worksheets.load("items/name");
+    wb.worksheets.load("items/name,items/visibility");
     await context.sync();
     var sheets = wb.worksheets.items;
     sheets.forEach(function (ws) { ws.tables.load("items/name"); });
     await context.sync();
-    return sheets.filter(function (ws) {
+    var allBom = sheets.filter(function (ws) {
       return ws.tables.items.some(function (t) { return t.name.indexOf("bom_") === 0; });
     });
+    var realBom = allBom.filter(function (ws) {
+      return !(ws.name === BLANK && ws.visibility !== "Visible");
+    });
+    return realBom.length ? realBom : allBom;
   }
 
   /* ---------- steps shared by both modes ---------- */
@@ -121,7 +130,7 @@
   function readPo(S, master) {   // typed stock / PO values per material (growing + fixed both put them back)
     var po = {};
     for (var r = 6; r <= 40; r++) {
-      var mat = String(S.val(r, 16));
+      var mat = String(S.val(r, 16)).trim();
       if (mat !== "" && master[mat]) {
         po[mat] = COLS_PO.map(function (c) {
           return (isFormula(S.frm(r, c)) || S.val(r, c) === "") ? undefined : S.val(r, c);
@@ -157,7 +166,7 @@
         continue;
       }
       put(ws, "A" + r, '=IF(C' + r + '="","",COUNTA($C$' + first + ':C' + r + '))');
-      var info = master[mat];
+      var info = master[mat] || master[mat.trim()];
       if (!info) { missing.push("row " + (r) + ": '" + mat + "' is not in the Master - weight left blank"); continue; }
       if (isBlank(S.val(oldRow, 8)) && !isBlank(S.val(oldRow, 7))) put(ws, "H" + r, 1);
       if (info.unit === "kg/m") {
@@ -256,7 +265,7 @@
       var names = ws.getRange("P5:P" + (4 + nn)).load("values");
       await context.sync();
       names.values.forEach(function (row, i) {
-        var pv = po[String(row[0])];
+        var pv = po[String(row[0]).trim()];
         if (!pv) return;
         pv.forEach(function (v, j) { if (v !== undefined) ws.getRange(colLetter(COLS_PO[j]) + (5 + i)).values = [[v]]; });
       });
@@ -276,7 +285,8 @@
     var used = {};
     for (var r0 = 6; r0 <= S.lastOld; r0++) {
       var m0 = S.val(r0, 3);
-      if (!isBlank(m0) && master[String(m0)]) used[String(m0)] = master[String(m0)].order;
+      var mKey = isBlank(m0) ? "" : String(m0).trim();
+      if (mKey && master[mKey]) used[mKey] = master[mKey].order;
     }
     var names = Object.keys(used).sort(function (a, b) { return used[a] - used[b]; });
     var n = names.length;
@@ -351,7 +361,7 @@
     return missing;
   }
 
-  /* ---------- EXTRA: compiled purchase list sheet (static values, no formulas) ---------- */
+  /* ---------- EXTRA: compiled purchase list sheet ---------- */
   var COMPILED = "Compiled Purchase List";
   var PAD = 4;                  // empty rows on top for company name etc.
   var BLOCK = 13;               // purchase list is O..AA = 13 columns
@@ -404,7 +414,6 @@
     return rows;
   }
 
-  // run queued Office.js calls and, if Excel rejects them, say WHICH step it was
   async function step(context, name, fn) {
     try { fn(); await context.sync(); }
     catch (e) {
@@ -412,13 +421,13 @@
       throw new Error(name + ": " + ((e && e.message) || e) + loc);
     }
   }
-  async function soft(context, log, name, fn) {            // cosmetic steps never abort the build
+  async function soft(context, log, name, fn) {
     try { fn(); await context.sync(); }
     catch (e) { log("Note: skipped '" + name + "' (" + ((e && e.message) || e) + ")"); }
   }
   var qs = function (name) { return "'" + String(name).replace(/'/g, "''") + "'"; };
 
-  function blockBorders(cs, c0, n) {          // static lists: item rows boxed, grand-total row boxed
+  function blockBorders(cs, c0, n) {
     var L = function (c) { return colLetter(c0 + c); };
     if (n > 0) setBorders(cs.getRange(L(0) + (PAD + 5) + ":" + L(BLOCK - 1) + (PAD + 4 + n)), true);
     var gr = PAD + 5 + n;
@@ -426,7 +435,6 @@
     for (var c = 4; c < BLOCK; c++) setBorders(cs.getRange(L(c) + gr), true, true);
   }
 
-  // borders / bold that follow the list length (same rules as the BOM sheet's own purchase list)
   function addGrowCf(cs, c0, r1, r2, nAddr) {
     var off = PAD + 4, L = function (c) { return colLetter(c0 + c); };
     var cf = cs.getRange(L(0) + r1 + ":" + L(BLOCK - 1) + r2).conditionalFormats.add("Custom");
@@ -446,12 +454,11 @@
     }
   }
 
-  /* ---- growing mode: compiled sheet + side lists are formulas, so they grow with the BOM ---- */
   async function growingBody(context, cs, datas, master, ctx) {
     var nL = datas.length, src = datas[0].ws;
     var capMain = Math.min(nL * CAP, 120), mainLast = PAD + 4 + capMain + 3;
     var lastListEnd = ctx.lastListEnd;
-    var hs = lastListEnd + 3;                              // helper block (hidden), after the last list
+    var hs = lastListEnd + 3;
     var HN = colLetter(hs), HQ = colLetter(hs + 1), HT = colLetter(hs + 2), HS = colLetter(hs + 3), HR = colLetter(hs + 4),
         HU = colLetter(hs + 5), HL = colLetter(hs + 6), HW = colLetter(hs + 7), HK = colLetter(hs + 8),
         OT1 = colLetter(hs + 10), OT2 = colLetter(hs + 11), NC = colLetter(hs + 12);
@@ -460,7 +467,6 @@
     var rHN = rg(HN), rHQ = rg(HQ), rHT = rg(HT), rHS = rg(HS), rHR = rg(HR), rHU = rg(HU), rHL = rg(HL), rHW = rg(HW), rHK = rg(HK);
     var nMain = "$" + NC + "$5";
 
-    // helper: one row per possible purchase-list item of every sheet
     await step(context, "helper block", function () {
       var rows = [];
       datas.forEach(function (d, s) {
@@ -487,7 +493,6 @@
       datas.forEach(function (d, s) { cs.getRange(NC + (6 + s)).formulas = [["=" + qs(d.name) + "!$AE$2"]]; });
     });
 
-    // main compiled list (A..M)
     await step(context, "compiled list formulas", function () {
       var k = "(ROW()-" + (PAD + 4) + ")", n = nMain, out = [];
       for (var r = PAD + 5; r <= mainLast; r++) {
@@ -511,7 +516,6 @@
       cs.getRange("A" + (PAD + 5) + ":M" + mainLast).formulas = out;
     });
 
-    // each sheet's own list, mirrored cell by cell (rows 5..PL_LAST) so it grows with its sheet
     await step(context, "side lists", function () {
       datas.forEach(function (d, k) {
         var c0 = 1 + STRIDE * (k + 1), q = qs(d.name), out = [];
@@ -541,9 +545,8 @@
     return { lastRow: mainLast };
   }
 
-  /* ---- fixed mode: compiled sheet + side lists are plain values ---- */
   async function staticBody(context, cs, datas, master, ctx) {
-    var rows = compileMaterials(datas, master), n = rows.length, first = datas[0], src = first.ws, nL = datas.length;
+    var rows = compileMaterials(datas, master), n = rows.length, first = datas[0], src = first.ws;
     var gr = PAD + 5 + n, rr = gr + 2;
     await step(context, "compiled list formats", function () {
       for (var i = 0; i < n; i++) cs.getRange("A" + (PAD + 5 + i) + ":M" + (PAD + 5 + i)).copyFrom(src.getRange("O5:AA5"), "Formats");
@@ -585,7 +588,6 @@
     await context.sync();
     context.application.suspendApiCalculationUntilNextSync();
 
-    // column widths copied from the first sheet's purchase list
     var srcCols = [];
     for (var c = 0; c < BLOCK; c++) {
       var cr = src.getRange(colLetter(15 + c) + ":" + colLetter(15 + c));
@@ -601,7 +603,6 @@
       for (var k = 0; k <= nL; k++) { if (k > 0) setW(1 + STRIDE * k); cs.getRange(colLetter(1 + STRIDE * k + BLOCK) + ":" + colLetter(1 + STRIDE * k + BLOCK)).format.columnWidth = 18; }
     });
 
-    // header rows (static text, may contain merged cells -> copy as a whole, never write cell by cell)
     await step(context, "header rows", function () {
       cs.getRange("A" + (PAD + 1) + ":M" + (PAD + 4)).copyFrom(src.getRange("O1:AA4"), "All");
       datas.forEach(function (d, k) {
@@ -620,7 +621,6 @@
       ? await growingBody(context, cs, datas, master, { lastListEnd: lastListEnd })
       : await staticBody(context, cs, datas, master, { lastListEnd: lastListEnd });
 
-    // printing: landscape, print area, one page per list (cosmetic - never aborts)
     await soft(context, log, "landscape", function () { cs.pageLayout.orientation = "Landscape"; });
     await soft(context, log, "print area", function () { cs.pageLayout.setPrintArea("A1:" + colLetter(lastListEnd) + res.lastRow); });
     await soft(context, log, "page breaks", function () {
@@ -631,12 +631,13 @@
   }
 
   /* ---------- workbook level ---------- */
-  async function cleanWorkbook(context, wb) {
+  async function cleanWorkbook(context, wb, convertedNames) {
     wb.names.load("items/name");
     await context.sync();
     wb.names.items.forEach(function (nm) { if (nm.name.indexOf("Print_") < 0) nm.delete(); });
     try { await context.sync(); } catch (e) { /* some names are protected - ignore */ }
     var drop = ["Master Unique Materials", "Formulas", "README"];
+    if (!convertedNames || convertedNames.indexOf(BLANK) < 0) drop.push(BLANK);
     for (var i = 0; i < drop.length; i++) {
       var sh = wb.worksheets.getItemOrNullObject(drop[i]);
       await context.sync();
@@ -666,6 +667,7 @@
       var master = await readMaster(context, wb);
       var sheets = await findBomSheets(context, wb);
       if (!sheets.length) throw new Error("No BOM sheet (table named bom_...) found in this workbook.");
+      var convertedNames = sheets.map(function (s) { return s.name; });
       for (var i = 0; i < sheets.length; i++) {
         var ws = sheets[i];
         log("Converting " + ws.name + " ...");
@@ -679,8 +681,8 @@
         try { await buildCompiled(context, wb, sheets, master, log, mode === "growing"); }
         catch (e) { warnings.push("Compiled sheet failed: " + (e.message || e)); }
       }
-      log("Removing Master / Formulas / README sheets and named ranges ...");
-      await cleanWorkbook(context, wb);
+      log("Removing template sheets and named ranges ...");
+      await cleanWorkbook(context, wb, convertedNames);
     });
     return warnings;
   }

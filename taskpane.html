@@ -20,6 +20,7 @@
   .status { font-size:12px; }
   .ok { color:#107c10; } .warn { color:#a4262c; }
   button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 12px; border:1px solid var(--bd); background:#fff; }
+  button:hover:not(:disabled) { background:#f3f2f1; }
   button.primary { background:var(--g); border-color:var(--g); color:#fff; font-weight:600; width:100%; padding:9px; }
   button.primary:hover:not(:disabled) { background:var(--g2); }
   button:disabled { opacity:.5; cursor:default; }
@@ -33,7 +34,7 @@
   .note { font-size:11.5px; color:var(--mut); }
   .field { display:block; margin-bottom:8px; }
   .field > span { display:block; font-size:12px; color:var(--mut); margin-bottom:2px; }
-  input[type=text], input[type=search], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
+  input[type=text], input[type=search], input[type=password], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
   input[readonly] { background:#f3f2f1; color:var(--mut); }
   .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:170px; overflow:auto; margin-top:6px; }
@@ -44,7 +45,7 @@
   .btnrow { display:flex; gap:8px; }
   .btnrow .primary { flex:1; width:auto; }
 </style>
-</head>
+<script src="/_aistudio-iframe.js?v=29045eb3"></script></head>
 <body>
   <h1>BOM Tools</h1>
   <div class="tabs" role="tablist">
@@ -59,6 +60,9 @@
     <div class="card">
       <h2>Workbook</h2>
       <div id="sh-status" class="status">Checking...</div>
+      <div class="btnrow" style="margin-top:8px">
+        <button id="sh-repair" hidden>Repair dropdowns &amp; formulas</button>
+      </div>
     </div>
     <div class="card">
       <h2>New sheet</h2>
@@ -70,7 +74,7 @@
       <button id="sh-add" class="primary" disabled>Add sheet</button>
       <div id="sh-log" class="log"></div>
     </div>
-    <p class="note">Works on any workbook. If it has no BOM template yet, the master list and a hidden <b>BOM Blank</b> sheet are imported first, then your sheet is added.</p>
+    <p class="note">Works on any workbook. If it has no BOM template yet, only the <b>Master Unique Materials</b> sheet and a hidden <b>BOM Blank</b> sheet are imported first, with named ranges and dropdowns configured automatically.</p>
   </section>
 
   <!-- ===================== MATERIALS ===================== -->
@@ -132,7 +136,7 @@
 
     <div class="card">
       <h2>Step 1 &middot; Work on a copy</h2>
-      <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
+      <p class="note" style="margin-top:0">Conversion deletes the Master and hidden BOM Blank sheets, so never run it on your original.</p>
       <button id="copy" class="primary">Open a copy of this workbook</button>
       <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Tools there and continue with step 2.</p>
     </div>
@@ -154,10 +158,10 @@
     </div>
   </section>
 
-  <script src="convert.js?v=6"></script>
-  <script src="tools.js?v=6"></script>
-  <script src="template-data.js?v=6"></script>
-  <script src="sync.js?v=6"></script>
-  <script src="taskpane.js?v=6"></script>
+  <script src="convert.js?v=7"></script>
+  <script src="tools.js?v=7"></script>
+  <script src="template-data.js?v=7"></script>
+  <script src="sync.js?v=7"></script>
+  <script src="taskpane.js?v=7"></script>
 </body>
 </html>

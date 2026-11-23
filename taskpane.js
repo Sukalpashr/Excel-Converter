@@ -1,4 +1,4 @@
-/* taskpane.js - UI glue for the BOM Converter task pane */
+/* taskpane.js - UI glue for the BOM Tools task pane */
 "use strict";
 
 var $ = function (id) { return document.getElementById(id); };
@@ -13,6 +13,7 @@ function log(msg) {
 function updateButtons() {
   $("convert").disabled = state.busy || !state.ok || !$("iscopy").checked;
   $("copy").disabled = state.busy;
+  if ($("sh-repair")) $("sh-repair").disabled = state.busy;
 }
 
 async function check() {
@@ -73,7 +74,7 @@ async function openCopy() {
       Excel.createWorkbook(b64).open();
       await context.sync();
     });
-    log("A copy was opened in a new window. Open BOM Converter there, tick the box and convert.");
+    log("A copy was opened in a new window. Open BOM Tools there, tick the box and convert.");
   } catch (e) {
     log("Could not open a copy: " + (e.message || JSON.stringify(e)));
     log("Alternative: File > Save As a new name, then open that file and convert it.");
@@ -112,7 +113,7 @@ function showTab(name) {
   try { localStorage.setItem("bomTab", name); } catch (e) { /* storage may be blocked */ }
   if (name === "convert") check();
   if (name === "sheet") refreshSheets();
-  if (name === "mat") { refreshMaterials(); refreshSync(); }
+  if (name === "mat") { refreshMaterials(); refreshSync(); BomSync.watch(syncLog); }
 }
 
 function makeLog(id) {
@@ -155,6 +156,7 @@ async function refreshSheets() {
     sel.value = names.indexOf(keep) >= 0 ? keep : (sheetInfo.hasBlank || sheetInfo.needsTemplate ? BomTools.BLANK : names[0]);
     setSheetClearDefault();
     if (!$("sh-project").value && sheetInfo.project) $("sh-project").value = sheetInfo.project;
+    if ($("sh-repair")) $("sh-repair").hidden = !(sheetInfo.hasMaster && names.length > 0);
     if (sheetInfo.needsTemplate) {
       st.className = "status ok";
       st.textContent = "No BOM template in this workbook yet. Adding a sheet will import the master list and blank BOM sheet first.";
@@ -167,6 +169,7 @@ async function refreshSheets() {
     }
   } catch (e) {
     sheetInfo = null;
+    if ($("sh-repair")) $("sh-repair").hidden = true;
     st.className = "status warn";
     st.textContent = "Could not read the workbook: " + (e.message || e);
   }
@@ -175,6 +178,7 @@ async function refreshSheets() {
 
 function updateSheetButton() {
   $("sh-add").disabled = state.busy || !sheetInfo || (!sheetInfo.bomSheets.length && !sheetInfo.needsTemplate) || !$("sh-name").value.trim();
+  if ($("sh-repair")) $("sh-repair").disabled = state.busy;
 }
 
 async function addSheet() {
@@ -199,6 +203,18 @@ async function addSheet() {
     $("sh-name").value = "";
   } catch (e) {
     shLog("Could not add the sheet: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false; updateButtons();
+  await refreshSheets();
+}
+
+async function repairWorkbook() {
+  state.busy = true; updateSheetButton(); updateButtons();
+  shLog("", true);
+  try {
+    await BomTools.repairWorkbook(shLog);
+  } catch (e) {
+    shLog("Repair failed: " + (e.message || JSON.stringify(e)));
   }
   state.busy = false; updateButtons();
   await refreshSheets();
@@ -378,6 +394,7 @@ Office.onReady(function (info) {
   $("iscopy").onchange = updateButtons;
   // add sheet page
   $("sh-add").onclick = addSheet;
+  if ($("sh-repair")) $("sh-repair").onclick = repairWorkbook;
   $("sh-name").oninput = updateSheetButton;
   $("sh-source").onchange = setSheetClearDefault;
   // materials page
@@ -392,6 +409,7 @@ Office.onReady(function (info) {
     $("gh-token").value = "";
     syncLog(ok ? "Token saved on this computer." : "Could not store the token (storage is blocked).", true);
     refreshSync();
+    if (ok) BomSync.watch(syncLog);
   };
   $("gh-clear").onclick = function () { BomSync.setToken(""); syncLog("Token removed.", true); refreshSync(); };
   // tabs
@@ -399,4 +417,5 @@ Office.onReady(function (info) {
   var first = "convert";
   try { var s = localStorage.getItem("bomTab"); if (TABS.indexOf(s) >= 0) first = s; } catch (e) { /* ignore */ }
   showTab(first);
+  if (BomSync.hasToken()) BomSync.watch(syncLog);
 });

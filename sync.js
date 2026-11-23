@@ -167,6 +167,7 @@
     log = log || noop;
     var T = root.BomTools, res = { added: 0, updated: 0, skipped: [] };
     await Excel.run(async function (context) {
+      var wb = context.workbook;
       var m = await T._openMaster(context);
       var idx = m.idx;
       var body = m.t.getDataBodyRange().load("values,formulas");
@@ -222,6 +223,13 @@
           await context.sync();
         }
       }
+
+      if (toAdd.length || res.updated) {
+        var matInfo = await T._ensureMasterNames(context, wb, noop);
+        await T._refreshAllBomDropdownsIfRangeBased(context, wb, matInfo);
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+      }
       res.added = toAdd.length;
     });
     return res;
@@ -269,7 +277,7 @@
     throw new Error("Could not publish after retrying. Try again.");
   }
 
-  /* ---------------- template import ---------------- */
+  /* ---------------- template import (BOM Blank + Master Unique Materials only; never Formulas/README) ---------------- */
   async function importTemplate(log) {
     log = log || noop;
     var T = root.BomTools;
@@ -285,64 +293,87 @@
 
     await Excel.run(async function (context) {
       var wb = context.workbook;
-      wb.worksheets.load("items/name");
-      await context.sync();
-      var before = wb.worksheets.items.map(function (w) { return w.name; });
-
-      log("Importing the master list and the blank BOM sheet ...");
-      wb.insertWorksheetsFromBase64(b64, { positionType: Excel.WorksheetPositionType.end });
-      await context.sync();
-      wb.worksheets.load("items/name");
-      await context.sync();
-      var added = wb.worksheets.items.filter(function (w) { return before.indexOf(w.name) < 0; });
-
-      var undo = async function (msg) {
-        added.forEach(function (w) { w.delete(); });
-        try { await context.sync(); } catch (e) { /* ignore */ }
-        throw new Error(msg);
-      };
-
-      added.forEach(function (w) { w.tables.load("items/name"); });
-      await context.sync();
-      var hasT = function (w, p) { return w.tables.items.some(function (t) { return t.name.indexOf(p) === 0; }); };
-      var bomWs = added.filter(function (w) { return hasT(w, "bom_"); });
-      var master = added.filter(function (w) { return lc(w.name) === lc(T.MASTER); })[0] ||
-                   added.filter(function (w) { return w.tables.items.some(function (t) { return t.name === "tblMat"; }); })[0];
-      var blank = added.filter(function (w) { return lc(w.name) === lc(T.BLANK); })[0] ||
-                  bomWs.filter(function (w) { return /blank|template|empty/i.test(w.name); })[0] ||
-                  (bomWs.length === 1 ? bomWs[0] : null);
-      if (!blank || !master)
-        await undo("Could not find the " + (!master ? "master list (a sheet with table tblMat)" : "blank BOM sheet (a sheet with a bom_ table)") +
-          " in template.xlsx. Sheets found in it: " + (added.map(function (w) { return "\"" + w.name + "\""; }).join(", ") || "none") + ". The import was undone.");
-      if (master.name !== T.MASTER) master.name = T.MASTER;
-      if (blank.name !== T.BLANK) blank.name = T.BLANK;
-      await context.sync();
-
-      var rng = blank.getRange("A1:Z80").load("formulas");
-      await context.sync();
-      var broken = rng.formulas.some(function (row) {
-        return row.some(function (f) { return typeof f === "string" && (f.indexOf("#REF!") >= 0 || /\[\d+\]/.test(f)); });
-      });
-      if (broken)
-        await undo("The imported blank sheet has broken formulas (#REF! or a link to another file). The import was undone; see the README note on named ranges.");
-
-      // the template's workbook-level names (used by the BOM formulas and dropdowns); recreate any that did not come across
-      var NAMES = { Materials: "tblMat[Material]", LinWt: "tblMat[Linear Weight (kg/m)]", AreaWt: "tblMat[Area Weight (kg/m²)]",
-                    PieceWt: "tblMat[Piece Weight (kg/each)]", WtUnit: "tblMat[Primary Unit]", SheetL: "tblMat[Sheet Length (mm)]", SheetW: "tblMat[Sheet Width (mm)]" };
+      var prevCalcMode = null;
       try {
-        wb.names.load("items/name");
+        wb.application.load("calculationMode");
         await context.sync();
-        var have = wb.names.items.map(function (n) { return n.name.toLowerCase(); });
-        Object.keys(NAMES).forEach(function (k) { if (have.indexOf(k.toLowerCase()) < 0) wb.names.add(k, "=" + NAMES[k]); });
+        prevCalcMode = wb.application.calculationMode;
+        wb.application.calculationMode = Excel.CalculationMode.manual;
         await context.sync();
-      } catch (e) { log("WARNING: could not create the named ranges (" + (e.message || e) + ")."); }
+      } catch (e) { prevCalcMode = null; }
 
-      added.forEach(function (w) { if (/^README/i.test(w.name)) w.delete(); });   // the template's help sheet is not needed in project files
-      blank.visibility = Excel.SheetVisibility.hidden;
-      await context.sync();
-      await T._openMaster(context);                                                // confirms tblMat is there
+      var added = [];
+      try {
+        wb.worksheets.load("items/name");
+        await context.sync();
+        var before = wb.worksheets.items.map(function (w) { return w.name; });
+
+        log("Importing the master list and blank BOM sheet ...");
+        wb.insertWorksheetsFromBase64(b64, { positionType: Excel.WorksheetPositionType.end });
+        await context.sync();
+        wb.worksheets.load("items/name");
+        await context.sync();
+        added = wb.worksheets.items.filter(function (w) { return before.indexOf(w.name) < 0; });
+
+        var undo = async function (msg) {
+          added.forEach(function (w) { try { w.delete(); } catch (e) {} });
+          try { await context.sync(); } catch (e) { /* ignore */ }
+          throw new Error(msg);
+        };
+
+        added.forEach(function (w) { w.tables.load("items/name"); });
+        await context.sync();
+        var hasT = function (w, p) { return w.tables.items.some(function (t) { return t.name.indexOf(p) === 0; }); };
+        var bomWs = added.filter(function (w) { return hasT(w, "bom_"); });
+        var master = added.filter(function (w) { return lc(w.name) === lc(T.MASTER); })[0] ||
+                     added.filter(function (w) { return w.tables.items.some(function (t) { return t.name === "tblMat"; }); })[0];
+        var blank = added.filter(function (w) { return lc(w.name) === lc(T.BLANK); })[0] ||
+                    bomWs.filter(function (w) { return /blank|template|empty|take-?off/i.test(w.name); })[0] ||
+                    (bomWs.length === 1 ? bomWs[0] : null);
+        if (!blank || !master) {
+          await undo("Could not find the " + (!master ? "master list (a sheet with table tblMat)" : "blank BOM sheet (a sheet with a bom_ table)") +
+            " in template.xlsx. Sheets found: " + (added.map(function (w) { return "\"" + w.name + "\""; }).join(", ") || "none") + ". The import was undone.");
+        }
+
+        // Never leave Formulas or README sheets in the workbook (even if an older external template.xlsx is used)
+        added.forEach(function (w) {
+          if (w !== master && w !== blank && /^(README|Formulas)$/i.test(w.name.trim())) {
+            w.delete();
+          }
+        });
+        if (master.name !== T.MASTER) master.name = T.MASTER;
+        if (blank.name !== T.BLANK) blank.name = T.BLANK;
+        await context.sync();
+
+        // Create / repair all 7 workbook-level named ranges FIRST so formulas & dropdowns resolve cleanly
+        log("Setting up named ranges and dropdowns ...");
+        var matInfo = await T._ensureMasterNames(context, wb, log);
+
+        // Repair BOM Blank formulas, dropdown (C6:C2000), hidden row 5 / cols M & AB, freeze panes, and print setup
+        await T._repairBomSheet(context, wb, blank, matInfo, {}, log);
+
+        // Verify no broken external links or #REF! remain on BOM Blank
+        var rng = blank.getRange("A1:AB35").load("formulas");
+        await context.sync();
+        var broken = rng.formulas.some(function (row) {
+          return row.some(function (f) { return typeof f === "string" && (f.indexOf("#REF!") >= 0 || /\[\d+\]/.test(f)); });
+        });
+        if (broken) {
+          await undo("The imported blank sheet has broken formulas (#REF! or an external link). The import was undone.");
+        }
+
+        blank.visibility = Excel.SheetVisibility.hidden;
+        await context.sync();
+        await T._openMaster(context);
+      } finally {
+        try {
+          if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
+          wb.application.calculate(Excel.CalculationType.full);
+          await context.sync();
+        } catch (e) { /* ignore */ }
+      }
     });
-    log("Template imported.");
+    log("Template imported (Master Unique Materials + hidden BOM Blank).");
   }
 
   /* ---------------- auto-publish when the Master sheet changes (while the task pane is open) ---------------- */
