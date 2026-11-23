@@ -1,9 +1,10 @@
 # BOM Tools - Excel Add-in
 
-Adds a **BOM Tools** button on Excel's Home tab with three tabs:
-1. **Add sheet** — imports the cleaned template (`Master Unique Materials` + hidden `BOM Blank`, without `Formulas` or `README` sheets), configures all 7 named ranges and dropdowns, and creates new take-off sheets with auto-renamed `bom_*` / `pl_*` tables. Includes a one-click **Repair dropdowns & formulas** tool for older workbooks.
-2. **Materials** — view, search, add, edit, or remove materials in `tblMat` with validation status indicators (Material Name, Category, Unit, Cost) and automatic **Local Master File** sync directly on your computer (no GitHub token required).
-3. **Convert** — creates a copy of the workbook and flattens active BOM sheets into either an **Auto-growing purchase list** or a **Fixed purchase list**, with optional **Compiled Purchase List** sheet.
+Adds a **BOM Tools** button on Excel's Home tab with four clean tabs:
+1. **Home** — opens here by default with workbook status and quick-action cards for every common task, plus a collapsed *Troubleshooting & Repair* drawer at the bottom.
+2. **Add Sheet** — uncluttered form (just Sheet name + Add BOM Sheet) with project name, copy source, clear data, and local sync tucked inside a *More options* dropdown, and *Troubleshooting & Repair* at the bottom.
+3. **Materials** — unobstructed Master list (with per-row validation status icons for Name, Category, Unit, Cost) and Add/Edit/Remove editor, with plain-English **Save Master List on This Computer** tucked into a collapsible dropdown below.
+4. **Convert** — two-way converter: **Flatten for Sharing** (Auto-growing, Fixed, and Compiled Purchase List) and **Restore Automated** (converts flattened BOM sheets right back into full automated BOM sheets with `Master Unique Materials`, hidden `BOM Blank`, dropdowns, formulas, and preserved Stock/PO values).
 
 ## 1. Host the files
 Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then replace `https://YOUR-HOST` in `manifest.xml` with your base URL (no trailing slash):
@@ -15,12 +16,15 @@ Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then r
 - **Excel for Windows**: place `manifest.xml` in a shared folder registered under File > Options > Trust Center > Trust Center Settings > Trusted Add-in Catalogs (tick *Show in Menu*), restart Excel, then Insert > My Add-ins > Shared Folder > BOM Tools.
 - **Microsoft 365 organization-wide**: Admin center > Settings > Integrated apps > Upload custom apps.
 
-## 3. Local Master File (No GitHub Token Needed)
-1. Open the **Materials** tab and click **Save new file...** (or **Link existing file...**) to pick a `master-materials.json` file anywhere on your computer (or in a OneDrive / SharePoint synced folder).
-2. Every time you **add, edit, or remove** a material—either via the task pane or directly on the `Master Unique Materials` worksheet—the add-in automatically updates that file and its local computer cache.
-3. Whenever you create a **new BOM sheet** or add a BOM to a **non-BOM workbook**, the add-in imports the clean template (if needed) and automatically pulls your updated master list (additions, edits, and removals) from your local file before creating the sheet.
+## 3. Save Master List on This Computer (No GitHub Token Needed)
+1. Open the **Materials** tab and expand **Save Master List on This Computer** at the bottom.
+2. Click **Choose where to save...** once to create a `master-materials.json` file in your Documents or OneDrive folder (or **Use an existing file...**).
+3. Every time you **add, edit, or remove** a material—either via the task pane or directly on the `Master Unique Materials` worksheet—that file updates automatically.
+4. Whenever you create a **new BOM sheet**, add a BOM to a **non-BOM workbook**, or **restore a converted BOM**, your latest saved materials list loads automatically.
 
-## What was fixed in v1.1 & v1.2
+## What was updated in v1.1 – v1.3
+- **Home-first UI & streamlined panels (v1.3)**: opens to a **Home** tab with quick options; optional Add Sheet fields, Repair tools, and plain-English Local Master Save are neatly tucked into collapsible dropdowns so everyday editing stays fast and uncluttered.
+- **Restore Automated BOM (v1.3)**: converts flattened/plain BOM sheets back into full automated BOM sheets with `Master Unique Materials`, hidden `BOM Blank`, `bom_*`/`pl_*` tables, live dropdowns, formulas, and preserved Stock/PO values.
 - **Local computer master file sync (v1.2)**: uses the File System Access API + IndexedDB handle persistence + local computer storage cache so materials sync automatically across workbooks without a GitHub token; supports adding, editing, and removing materials (`deleteMaterial` + removal sync).
 - **Material validation status icons (v1.2)**: displays per-row validation icons confirming whether Material Name, Category, Unit, and Cost are populated.
 - **No Formulas or README sheets created**: removed `Formulas` and `README` from the embedded template (`template-data.js` / `template.xlsx`) and added an import filter in `sync.js` so they are never left in project workbooks.

@@ -645,8 +645,317 @@
     }
   }
 
+  /* ---------- detect converted (flattened) BOM sheets ---------- */
+  var SKIP_SHEETS = { "master unique materials": 1, "bom blank": 1, "compiled purchase list": 1, "formulas": 1, "readme": 1 };
+
+  async function findConvertedSheets(context, wb) {
+    wb.worksheets.load("items/name,items/visibility,items/position");
+    await context.sync();
+    var sheets = wb.worksheets.items;
+    sheets.forEach(function (ws) { ws.tables.load("items/name"); });
+    await context.sync();
+
+    var candidates = sheets.filter(function (ws) {
+      var low = String(ws.name || "").trim().toLowerCase();
+      if (SKIP_SHEETS[low]) return false;
+      if (ws.visibility !== "Visible") return false;
+      var hasBomTable = ws.tables.items.some(function (t) { return t.name.indexOf("bom_") === 0; });
+      return !hasBomTable;
+    });
+    if (!candidates.length) return [];
+
+    var hdrs = candidates.map(function (ws) {
+      return ws.getRange("A1:P4").load("values");
+    });
+    await context.sync();
+
+    var found = [];
+    candidates.forEach(function (ws, idx) {
+      var v = hdrs[idx].values;
+      var a1 = String((v[0] && v[0][0]) || "").toLowerCase();
+      var o2 = String((v[1] && v[1][14]) || "").toLowerCase();
+      var b3 = String((v[2] && v[2][1]) || "").toLowerCase();
+      var b4 = String((v[3] && v[3][1]) || "").toLowerCase();
+      var c3 = String((v[2] && v[2][2]) || "").toLowerCase();
+      var c4 = String((v[3] && v[3][2]) || "").toLowerCase();
+      var looksLikeBom =
+        a1.indexOf("bill of materials") >= 0 ||
+        o2.indexOf("purchase list") >= 0 ||
+        ((b3.indexOf("description") >= 0 || b4.indexOf("description") >= 0) &&
+         (c3.indexOf("material") >= 0 || c4.indexOf("material") >= 0));
+      if (looksLikeBom) found.push(ws);
+    });
+    return found;
+  }
+
+  /* Extract all user-entered BOM rows, title metadata, bar length, and typed PO inputs from a converted BOM sheet. */
+  async function extractConvertedSheetData(context, ws) {
+    var rg = ws.getRange("A1:AE" + BOTTOM);
+    rg.load(["values", "formulas"]);
+    await context.sync();
+
+    var vals = rg.values;
+    var frms = rg.formulas;
+    var val = function (r, c) { return vals[r - 1][c - 1]; };
+    var frm = function (r, c) { return frms[r - 1][c - 1]; };
+
+    var title = isBlank(val(1, 1)) ? "" : String(val(1, 1));
+    var subtitle = isBlank(val(2, 1)) ? ws.name : String(val(2, 1));
+
+    // Standard bar length: AE1 if present (growing mode), otherwise first numeric Q value in purchase list (fixed mode), else 6000
+    var stdLen = 6000;
+    if (typeof val(1, 31) === "number" && val(1, 31) > 0) {
+      stdLen = val(1, 31);
+    } else {
+      for (var rq = 5; rq <= 45; rq++) {
+        var qv = val(rq, 17);
+        if (typeof qv === "number" && qv > 0) { stdLen = qv; break; }
+      }
+    }
+
+    // Locate BOM data rows (start at row 5 in converted sheets, stop right before "Total:" in col I)
+    var stopRow = BOTTOM;
+    for (var r = 5; r <= BOTTOM; r++) {
+      var iv = String(val(r, 9) || "").trim().toLowerCase();
+      if (iv === "total:" || iv === "total") { stopRow = r - 1; break; }
+    }
+    var lastDataRow = 4;
+    for (var r2 = 5; r2 <= stopRow; r2++) {
+      if (!isBlank(val(r2, 2)) || !isBlank(val(r2, 3)) || !isBlank(val(r2, 4)) || !isBlank(val(r2, 7)) || !isBlank(val(r2, 11))) {
+        lastDataRow = r2;
+      }
+    }
+
+    var bomRows = [];
+    var usedMaterials = {};
+    for (var r3 = 5; r3 <= lastDataRow; r3++) {
+      var matVal = isBlank(val(r3, 3)) ? "" : String(val(r3, 3)).trim();
+      if (matVal) usedMaterials[matVal] = true;
+      bomRows.push({
+        desc: isBlank(val(r3, 2)) ? "" : val(r3, 2),
+        mat: matVal,
+        len: isBlank(val(r3, 4)) ? "" : val(r3, 4),
+        wid: isBlank(val(r3, 5)) ? "" : val(r3, 5),
+        thk: isBlank(val(r3, 6)) ? "" : val(r3, 6),
+        qty: isBlank(val(r3, 7)) ? "" : val(r3, 7),
+        set: isBlank(val(r3, 8)) ? "" : val(r3, 8),
+        rem: isBlank(val(r3, 11)) ? "" : val(r3, 11)
+      });
+    }
+
+    // Extract typed Stock / PO inputs (V, W, X, Y, AA) per material from the converted purchase list (rows 5..55)
+    var po = {};
+    for (var rp = 5; rp <= 55; rp++) {
+      var pName = isBlank(val(rp, 16)) ? "" : String(val(rp, 16)).trim();
+      if (!pName) continue;
+      if (pName.toLowerCase().indexOf("grand total") === 0 || pName.toLowerCase().indexOf("requested by") === 0) break;
+      var entry = COLS_PO.map(function (c) {
+        var f = frm(rp, c), v = val(rp, c);
+        return (isFormula(f) || isBlank(v)) ? undefined : v;
+      });
+      if (entry.some(function (x) { return x !== undefined; })) {
+        po[pName.toLowerCase()] = entry;
+      }
+    }
+
+    return {
+      name: ws.name,
+      title: title,
+      subtitle: subtitle,
+      stdLen: stdLen,
+      bomRows: bomRows,
+      usedMaterials: Object.keys(usedMaterials),
+      po: po
+    };
+  }
+
+  /* Restore converted (plain) BOM sheets back into full automated BOM sheets with Master Unique Materials,
+   * hidden BOM Blank, bom_* / pl_* tables, working dropdowns, formulas, and preserved Stock/PO inputs.
+   */
+  async function restoreAutomatedWorkbook(log, opts) {
+    log = log || function () {};
+    opts = opts || {};
+    var T = root.BomTools;
+    var S = root.BomSync;
+    if (!T || !S) throw new Error("Required modules (tools.js / sync.js) are not loaded.");
+
+    var warnings = [];
+    var extracted = [];
+
+    // 1. Inspect and extract all data from converted BOM sheets first
+    var hasMaster = false, hasBlank = false;
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      var convSheets = await findConvertedSheets(context, wb);
+      if (!convSheets.length) {
+        throw new Error("No converted BOM sheets found to restore. (Automated BOM sheets with bom_ tables are already automated.)");
+      }
+      var mWs = wb.worksheets.getItemOrNullObject(MASTER);
+      var bWs = wb.worksheets.getItemOrNullObject(BLANK);
+      await context.sync();
+      hasMaster = !mWs.isNullObject;
+      hasBlank = !bWs.isNullObject;
+
+      for (var i = 0; i < convSheets.length; i++) {
+        log("Reading converted sheet \"" + convSheets[i].name + "\" ...");
+        extracted.push(await extractConvertedSheetData(context, convSheets[i]));
+      }
+    });
+
+    // 2. Ensure Master Unique Materials and hidden BOM Blank exist (import cleaned template if missing)
+    if (!hasMaster || !hasBlank) {
+      if (hasMaster && !hasBlank) {
+        // Backup existing master list before re-importing clean template so nothing is lost
+        var existingMaster = [];
+        try { existingMaster = await S.workbookList(); } catch (e) { existingMaster = []; }
+        await Excel.run(async function (context) {
+          var mWs = context.workbook.worksheets.getItemOrNullObject(MASTER);
+          await context.sync();
+          if (!mWs.isNullObject) { mWs.delete(); await context.sync(); }
+        });
+        await S.importTemplate(log);
+        if (existingMaster.length) {
+          await S.applyList(existingMaster, log, { syncRemovals: false });
+        }
+      } else {
+        await S.importTemplate(log);
+      }
+    }
+
+    // 3. Optionally sync the latest local computer master list before restoring formulas
+    if (opts.syncLocal !== false) {
+      try {
+        await S.pullLocal(log, { allowPrompt: true, syncRemovals: true });
+      } catch (e) {
+        log("Note: skipped local master file sync (" + (e.message || e) + ").");
+      }
+    }
+
+    // 4. Rebuild each converted sheet using BOM Blank and copy all entered data + PO inputs back in
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      var matInfo = await T._ensureMasterNames(context, wb, log);
+      var masterLookup = await readMaster(context, wb);
+
+      var blankWs = wb.worksheets.getItem(BLANK);
+      blankWs.tables.load("items/name");
+      await context.sync();
+      var srcBom = blankWs.tables.items.filter(function (t) { return t.name.indexOf("bom_") === 0; })[0];
+      var srcPl = blankWs.tables.items.filter(function (t) { return t.name.indexOf("pl_") === 0; })[0];
+      if (!srcBom) throw new Error("Hidden \"BOM Blank\" sheet has no bom_ table.");
+
+      var firstRestored = null;
+      for (var i = 0; i < extracted.length; i++) {
+        var data = extracted[i];
+        log("Restoring \"" + data.name + "\" to an automated BOM sheet ...");
+
+        // Warn if any material used on the converted sheet isn't in Master Unique Materials
+        data.usedMaterials.forEach(function (matName) {
+          if (!masterLookup[matName] && !masterLookup[matName.trim()]) {
+            warnings.push(data.name + ": \"" + matName + "\" is not in Master Unique Materials (add it in the Materials tab so weights calculate).");
+          }
+        });
+
+        var oldWs = wb.worksheets.getItem(data.name);
+        wb.worksheets.load("items/name");
+        await context.sync();
+        var existingNames = wb.worksheets.items.map(function (w) { return w.name; });
+        var tmpName = T.uniqueName("__tmp_" + i, existingNames).slice(0, 31);
+        oldWs.name = tmpName;
+        await context.sync();
+
+        var restored = blankWs.copy(Excel.WorksheetPositionType.after, oldWs);
+        restored.name = data.name;
+        restored.visibility = Excel.SheetVisibility.visible;
+        restored.tables.load("items/name");
+        wb.tables.load("items/name");
+        await context.sync();
+
+        var bomT = restored.tables.items.filter(function (t) { return t.name.indexOf("bom_") === 0; })[0];
+        var plT = restored.tables.items.filter(function (t) { return t.name.indexOf("pl_") === 0; })[0];
+        var taken = wb.tables.items.map(function (t) { return t.name; });
+        var id = T.safeId(data.name);
+        var bomName = T.uniqueName("bom_" + id, taken);
+        var plName = T.uniqueName("pl_" + id, taken.concat([bomName]));
+        if (bomT) bomT.name = bomName;
+        if (plT) plT.name = plName;
+        await context.sync();
+
+        if (data.title) restored.getRange("A1").values = [[data.title]];
+        restored.getRange("A2").values = [[data.subtitle || data.name]];
+        restored.getRange("AE1").values = [[data.stdLen || 6000]];
+        await context.sync();
+
+        // Populate BOM table input columns (B, C, D, E, F, G, H, K)
+        if (bomT && data.bomRows.length) {
+          var bomBody = bomT.getDataBodyRange().load("rowCount");
+          await context.sync();
+          var extraRows = data.bomRows.length - bomBody.rowCount;
+          if (extraRows > 0) {
+            for (var er = 0; er < extraRows; er++) bomT.rows.add();
+            await context.sync();
+          }
+          var rowCount = data.bomRows.length;
+          var endRow = 5 + rowCount; // data starts on row 6
+          var colsBtoH = data.bomRows.map(function (r) {
+            return [r.desc, r.mat, r.len, r.wid, r.thk, r.qty, r.set];
+          });
+          var colK = data.bomRows.map(function (r) { return [r.rem]; });
+          restored.getRange("B6:H" + endRow).values = colsBtoH;
+          restored.getRange("K6:K" + endRow).values = colK;
+          await context.sync();
+        }
+
+        // Repair formulas, dropdowns (C6:C2000), hidden helper row/cols, freeze panes, and print setup
+        await T._repairBomSheet(context, wb, restored, matInfo, {
+          srcBomName: srcBom.name,
+          srcPlName: srcPl ? srcPl.name : ""
+        }, log);
+
+        // Recalculate so automated Purchase List populates column P, then restore typed PO/Stock inputs
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+
+        if (plT && Object.keys(data.po).length) {
+          var plBody = plT.getDataBodyRange().load(["values", "rowIndex"]);
+          await context.sync();
+          var plStart = (plBody.rowIndex || 5) + 1; // 1-based Excel row (row 6)
+          plBody.values.forEach(function (row, idx) {
+            var matKey = String(row[1] || "").trim().toLowerCase(); // col P is 2nd column of pl_ (O=0, P=1)
+            var pv = matKey ? data.po[matKey] : null;
+            if (!pv) return;
+            var excelRow = plStart + idx;
+            pv.forEach(function (valToPut, j) {
+              if (valToPut !== undefined) {
+                restored.getRange(colLetter(COLS_PO[j]) + excelRow).values = [[valToPut]];
+              }
+            });
+          });
+          await context.sync();
+        }
+
+        oldWs.delete();
+        await context.sync();
+        if (!firstRestored) firstRestored = restored;
+      }
+
+      if (opts.removeCompiled) {
+        var compWs = wb.worksheets.getItemOrNullObject(COMPILED);
+        await context.sync();
+        if (!compWs.isNullObject) { compWs.delete(); await context.sync(); }
+      }
+
+      wb.application.calculate(Excel.CalculationType.full);
+      if (firstRestored) firstRestored.activate();
+      await context.sync();
+    });
+
+    log("Restored " + extracted.length + " sheet(s) back to automated BOM format.");
+    return { restoredCount: extracted.length, warnings: warnings };
+  }
+
   async function inspectWorkbook() {
-    var out = { master: false, bomSheets: [] };
+    var out = { master: false, bomSheets: [], convertedSheets: [] };
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = wb.worksheets.getItemOrNullObject(MASTER);
@@ -654,6 +963,8 @@
       out.master = !m.isNullObject;
       var sheets = await findBomSheets(context, wb);
       out.bomSheets = sheets.map(function (s) { return s.name; });
+      var conv = await findConvertedSheets(context, wb);
+      out.convertedSheets = conv.map(function (s) { return s.name; });
     });
     return out;
   }
@@ -687,7 +998,15 @@
     return warnings;
   }
 
-  var api = { convertWorkbook: convertWorkbook, inspectWorkbook: inspectWorkbook, plFormulas: plFormulas, compileMaterials: compileMaterials, CAP: CAP, PL_LAST: PL_LAST };
+  var api = {
+    convertWorkbook: convertWorkbook,
+    restoreAutomatedWorkbook: restoreAutomatedWorkbook,
+    inspectWorkbook: inspectWorkbook,
+    plFormulas: plFormulas,
+    compileMaterials: compileMaterials,
+    CAP: CAP,
+    PL_LAST: PL_LAST
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomConvert = api;
 })(typeof window !== "undefined" ? window : this);

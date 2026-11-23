@@ -785,7 +785,7 @@
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
     // pure helpers
     diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList,
-    workbookList: workbookList
+    workbookList: workbookList, applyList: applyList
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomSync = api;
