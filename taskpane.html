@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BOM Converter</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:14px; font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:#201f1e; background:#fff; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  .sub { color:var(--mut); margin:0 0 12px; }
+  .card { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; background:var(--bg); }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 6px; }
+  .status { font-size:12px; }
+  .ok { color:#107c10; } .warn { color:#a4262c; }
+  button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 12px; border:1px solid var(--bd); background:#fff; }
+  button.primary { background:var(--g); border-color:var(--g); color:#fff; font-weight:600; width:100%; padding:9px; }
+  button.primary:hover:not(:disabled) { background:var(--g2); }
+  button:disabled { opacity:.5; cursor:default; }
+  label.opt { display:block; border:1px solid var(--bd); border-radius:6px; padding:8px 10px; margin-bottom:8px; background:#fff; cursor:pointer; }
+  label.opt:has(input:checked) { border-color:var(--g); box-shadow:0 0 0 1px var(--g); }
+  label.opt b { display:block; }
+  label.opt span { color:var(--mut); font-size:12px; }
+  .chk { display:flex; gap:8px; align-items:flex-start; margin:8px 0 10px; font-size:12px; }
+  #log { white-space:pre-wrap; font:11.5px/1.5 Consolas, monospace; color:#323130; max-height:160px; overflow:auto; }
+  #log:empty { display:none; }
+  .note { font-size:11.5px; color:var(--mut); }
+</style>
+</head>
+<body>
+  <h1>BOM Converter</h1>
+  <p class="sub">Turn the automated BOM workbook into a plain, easy-to-edit one.</p>
+
+  <div class="card">
+    <h2>Workbook</h2>
+    <div id="status" class="status">Checking...</div>
+    <button id="refresh" style="margin-top:6px">Re-check</button>
+  </div>
+
+  <div class="card">
+    <h2>Step 1 &middot; Work on a copy</h2>
+    <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
+    <button id="copy" class="primary">Open a copy of this workbook</button>
+    <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Converter there and continue with step 2.</p>
+  </div>
+
+  <div class="card">
+    <h2>Step 2 &middot; Convert</h2>
+    <label class="opt"><input type="radio" name="mode" value="growing" checked>
+      <b>Auto-growing purchase list</b>
+      <span>Purchase list is formula-driven: it fills, grows and shrinks by itself when the BOM changes.</span></label>
+    <label class="opt"><input type="radio" name="mode" value="fixed">
+      <b>Fixed purchase list</b>
+      <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
+    <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
+    <button id="convert" class="primary" disabled>Convert</button>
+    <div id="log" style="margin-top:10px"></div>
+  </div>
+
+  <script src="convert.js"></script>
+  <script src="taskpane.js"></script>
+</body>
+</html>
