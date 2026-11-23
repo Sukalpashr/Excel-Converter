@@ -55,10 +55,11 @@
 
   <!-- ===================== ADD SHEET ===================== -->
   <section id="page-sheet" hidden>
-    <p class="sub">Add a new take-off (BOM) sheet with its purchase list, formulas and dropdowns already in place.</p>
+    <p class="sub">Add a take-off (BOM) sheet, with its purchase list, formulas and dropdowns, to any workbook. If the workbook has no master list, the latest one is added too.</p>
     <div class="card">
       <h2>Workbook</h2>
       <div id="sh-status" class="status">Checking...</div>
+      <div id="sh-master" class="status" style="margin-top:4px"></div>
     </div>
     <div class="card">
       <h2>New sheet</h2>
@@ -69,7 +70,7 @@
       <button id="sh-add" class="primary" disabled>Add sheet</button>
       <div id="sh-log" class="log"></div>
     </div>
-    <p class="note">Tip: keep one empty sheet named <b>BOM Blank</b> (hidden is fine) in the template and always copy from it.</p>
+    <p class="note" id="sh-note"></p>
   </section>
 
   <!-- ===================== MATERIALS ===================== -->
@@ -80,6 +81,14 @@
       <div id="mat-status" class="status">Checking...</div>
       <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
       <div id="mat-list"></div>
+    </div>
+    <div class="card" id="mat-sync" hidden>
+      <h2 id="sync-title">Latest master list</h2>
+      <div id="sync-text" class="status"></div>
+      <label class="chk" id="sync-allrow"><input type="checkbox" id="sync-all"> <span>Also update materials whose values differ (can change weights already used in this workbook)</span></label>
+      <button id="sync-apply" class="primary">Update this workbook's master list</button>
+      <button id="sync-addmaster" class="primary">Add master list sheet</button>
+      <div id="sync-log" class="log"></div>
     </div>
     <div class="card">
       <h2 id="mat-mode">New material</h2>
@@ -101,7 +110,8 @@
       </div>
       <div id="mat-log" class="log"></div>
     </div>
-    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
+    <p class="note" id="mat-store"></p>
+    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. </p>
   </section>
 
   <!-- ===================== CONVERT ===================== -->
@@ -138,8 +148,9 @@
     </div>
   </section>
 
-  <script src="convert.js?v=4"></script>
-  <script src="tools.js?v=4"></script>
-  <script src="taskpane.js?v=4"></script>
+  <script src="convert.js?v=5"></script>
+  <script src="sync.js?v=5"></script>
+  <script src="tools.js?v=5"></script>
+  <script src="taskpane.js?v=5"></script>
 </body>
 </html>
