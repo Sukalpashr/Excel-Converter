@@ -488,6 +488,106 @@
   .sheet-pick-item input { accent-color: var(--brand); margin: 0; }
   .sheet-pick-item small { color: var(--muted); font-size: 11px; margin-left: auto; }
 
+  /* ---- Nested More Options Drawer (Materials Form) ---- */
+  details.inner-drawer {
+    background: #F9FBFA;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin: 9px 0 10px;
+    box-shadow: none;
+  }
+  details.inner-drawer > summary {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  details.inner-drawer .drawer-body {
+    padding: 4px 10px 9px;
+  }
+
+  /* ---- Top Auto-Saved Material Card ---- */
+  .autosave-card {
+    background: #F4FBF7;
+    border: 1px solid #B7DEC6;
+    border-left: 3px solid var(--brand);
+    border-radius: var(--radius);
+    padding: 10px 11px;
+    margin-bottom: 10px;
+  }
+  .autosave-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .autosave-title {
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--ok);
+  }
+  .autosave-meta {
+    font-size: 10.5px;
+    color: var(--muted);
+    margin-left: auto;
+  }
+  .autosave-item {
+    background: #fff;
+    border: 1px solid #DCEBE1;
+    border-radius: var(--radius-sm);
+    padding: 7px 9px;
+    margin-top: 6px;
+    transition: border-color .12s;
+  }
+  .autosave-item.clickable { cursor: pointer; }
+  .autosave-item.clickable:hover { border-color: var(--brand); }
+  .autosave-item-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .autosave-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .autosave-tag {
+    font-size: 10.5px;
+    font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .autosave-tag.added { color: var(--ok); }
+  .autosave-tag.edited { color: #1F5E9C; }
+  .autosave-tag.removed { color: var(--err); }
+  .autosave-info {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .autosave-diff {
+    font-size: 11px;
+    color: var(--text);
+    margin-top: 3px;
+  }
+  #mat-list .mrow.recent {
+    background: #F4FBF7;
+  }
+  #mat-list .mtag {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--ok);
+    margin-left: 4px;
+    flex-shrink: 0;
+  }
+  #mat-list .mtag.edited { color: #1F5E9C; }
+
   /* ---- Log Output ---- */
   .log {
     white-space: pre-wrap;
@@ -672,6 +772,16 @@
 
     <!-- ===================== MATERIALS ===================== -->
     <section id="page-mat" hidden>
+      <!-- Top Auto-Saved Material Card (visible as soon as a change is auto-saved from Master sheet or form) -->
+      <div id="mat-autosave-card" class="autosave-card" hidden>
+        <div class="autosave-hdr">
+          <span class="autosave-title">Last Auto-Saved</span>
+          <span id="mat-autosave-meta" class="autosave-meta"></span>
+          <button type="button" id="mat-autosave-dismiss" class="link-btn" title="Hide this notice">Clear</button>
+        </div>
+        <div id="mat-autosave-body"></div>
+      </div>
+
       <!-- Main Panel 1: Search & Browse Master List -->
       <div class="card">
         <div class="card-title">
@@ -682,7 +792,7 @@
         <div id="mat-list"></div>
       </div>
 
-      <!-- Main Panel 2: Add / Edit Material Form (Unobstructed!) -->
+      <!-- Main Panel 2: Add / Edit Material Form (Streamlined; optional fields under More options) -->
       <div class="card">
         <div class="card-title">
           <span id="mat-mode">Add New Material</span>
@@ -693,25 +803,14 @@
           <input type="text" id="m-name" placeholder="e.g. ISMB 250" autocomplete="off">
         </label>
         <label class="field">
-          <span>Category</span>
-          <input type="text" id="m-cat" list="m-cats" placeholder="e.g. Structural Beams" autocomplete="off">
-          <datalist id="m-cats"></datalist>
+          <span>Primary unit</span>
+          <select id="m-unit">
+            <option value="">Choose...</option>
+            <option>kg/m</option>
+            <option>kg/m²</option>
+            <option>kg/each</option>
+          </select>
         </label>
-        <div class="row2">
-          <label class="field">
-            <span>Primary unit</span>
-            <select id="m-unit">
-              <option value="">Choose...</option>
-              <option>kg/m</option>
-              <option>kg/m²</option>
-              <option>kg/each</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>Unit cost</span>
-            <input type="text" id="m-cost" inputmode="decimal" placeholder="e.g. 95.00" autocomplete="off">
-          </label>
-        </div>
         <label class="field f-lin" hidden>
           <span>Linear weight (kg/m)</span>
           <input type="text" id="m-lin" inputmode="decimal" autocomplete="off">
@@ -728,10 +827,30 @@
           <span>Piece weight (kg/each)</span>
           <input type="text" id="m-piece" inputmode="decimal" autocomplete="off">
         </label>
-        <label class="field">
-          <span>Remarks (optional)</span>
-          <input type="text" id="m-rem" placeholder="Optional note" autocomplete="off">
-        </label>
+
+        <details class="drawer inner-drawer" id="m-more">
+          <summary>
+            <span class="sum-left"><span>More options</span></span>
+            <span id="m-more-meta" class="sum-meta">Category, cost, remarks</span>
+            <span class="sum-caret" aria-hidden="true">&#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <label class="field">
+              <span>Category (optional)</span>
+              <input type="text" id="m-cat" list="m-cats" placeholder="e.g. Structural Beams" autocomplete="off">
+              <datalist id="m-cats"></datalist>
+            </label>
+            <label class="field">
+              <span>Unit cost (optional)</span>
+              <input type="text" id="m-cost" inputmode="decimal" placeholder="e.g. 95.00" autocomplete="off">
+            </label>
+            <label class="field">
+              <span>Remarks (optional)</span>
+              <input type="text" id="m-rem" placeholder="Optional note" autocomplete="off">
+            </label>
+          </div>
+        </details>
+
         <div class="btnrow">
           <button id="m-save" class="primary">Add Material</button>
           <button id="m-delete" class="danger" hidden>Remove</button>
@@ -892,10 +1011,10 @@
     </section>
   </main>
 
-  <script src="convert.js?v=10"></script>
-  <script src="tools.js?v=10"></script>
-  <script src="template-data.js?v=10"></script>
-  <script src="sync.js?v=10"></script>
-  <script src="taskpane.js?v=10"></script>
+  <script src="convert.js?v=12"></script>
+  <script src="tools.js?v=12"></script>
+  <script src="template-data.js?v=12"></script>
+  <script src="sync.js?v=12"></script>
+  <script src="taskpane.js?v=12"></script>
 </body>
 </html>

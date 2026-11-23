@@ -718,7 +718,7 @@
   }
 
   /* ---------------- auto-save when the Master sheet changes (local file + optional GitHub) ---------------- */
-  var watcher = { on: false, snap: null, timer: null, busy: false };
+  var watcher = { on: false, snap: null, timer: null, busy: false, onSaved: null };
 
   function updateWatchSnap(list) {
     if (Array.isArray(list)) watcher.snap = list;
@@ -726,6 +726,7 @@
 
   async function watch(log, onSaved) {
     log = log || noop;
+    if (typeof onSaved === "function") watcher.onSaved = onSaved;
     if (watcher.on) return;
     var T = root.BomTools;
     try {
@@ -745,15 +746,29 @@
               var hasChanges = d.onlyWb.length > 0 || d.onlyRemote.length > 0 || d.changed.length > 0;
               if (hasChanges) {
                 // Always save additions, edits, and removals to local computer file + local cache
-                await writeLocalMaster(cur, log, { allowPrompt: false });
+                var writeRes = await writeLocalMaster(cur, log, { allowPrompt: false });
                 if (hasToken()) {
                   var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
                   if (names.length) {
                     try { await push(log, { only: names }); } catch (e) { log("GitHub auto-publish skipped: " + (e.message || e)); }
                   }
                 }
+                var items = [];
+                d.onlyWb.forEach(function (m) { items.push({ type: "added", material: m, fields: [] }); });
+                d.changed.forEach(function (c) { items.push({ type: "edited", material: c.wb, fields: c.fields || [] }); });
+                d.onlyRemote.forEach(function (m) { items.push({ type: "removed", material: m, fields: [] }); });
+
                 watcher.snap = cur;
-                if (typeof onSaved === "function") onSaved();
+                if (typeof watcher.onSaved === "function") {
+                  watcher.onSaved({
+                    source: "sheet",
+                    time: new Date().toISOString(),
+                    savedToFile: !!(writeRes && writeRes.savedToFile),
+                    fileName: (writeRes && writeRes.fileName) || "",
+                    needsPermission: !!(writeRes && writeRes.needsPermission),
+                    items: items
+                  });
+                }
               }
             } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;

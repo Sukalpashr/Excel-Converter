@@ -147,7 +147,8 @@ function showTab(name, opts) {
     refreshMaterials();
     refreshLocalFileStatus();
     refreshSync();
-    BomSync.watch(localLog, function () { refreshMaterials(); refreshLocalFileStatus(); });
+    renderAutoSaveCard();
+    BomSync.watch(localLog, handleAutoSaveEvent);
   }
   if (name === "convert") {
     if (opts.submode) setConvertSubmode(opts.submode);
@@ -503,7 +504,154 @@ async function repairWorkbook(logger, pickerId) {
 /* =====================================================================
  * Materials
  * ===================================================================== */
-var mat = { rows: [], mode: "add", selected: null };
+var mat = { rows: [], mode: "add", selected: null, lastAutoSave: null, recentMap: {} };
+
+var FIELD_LABELS = {
+  category: "Category",
+  unit: "Primary Unit",
+  lin: "Linear Weight",
+  area: "Area Weight",
+  piece: "Piece Weight",
+  sl: "Sheet Length",
+  sw: "Sheet Width",
+  cost: "Cost",
+  remarks: "Remarks"
+};
+
+function formatClock(iso) {
+  try {
+    var d = iso ? new Date(iso) : new Date();
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch (e) { return ""; }
+}
+
+function summarizeMaterialInfo(m) {
+  if (!m) return "";
+  var parts = [];
+  if (m.unit === "kg/m" && fmt(m.lin) !== "") parts.push(fmt(m.lin) + " kg/m");
+  else if (m.unit === "kg/m²") {
+    var a = fmt(m.area) !== "" ? (fmt(m.area) + " kg/m²") : "kg/m²";
+    if (fmt(m.sl) !== "" && fmt(m.sw) !== "") a += " (" + fmt(m.sl) + "×" + fmt(m.sw) + " mm)";
+    parts.push(a);
+  } else if (m.unit === "kg/each" && fmt(m.piece) !== "") parts.push(fmt(m.piece) + " kg/each");
+  else if (m.unit) parts.push(m.unit);
+
+  if (m.category) parts.push("Cat: " + m.category);
+  if (fmt(m.cost) !== "") parts.push("Cost: " + fmt(m.cost));
+  if (m.remarks) parts.push(m.remarks);
+  return parts.join(" · ") || "No weight or details yet";
+}
+
+function updateMoreOptionsMeta() {
+  var meta = $("m-more-meta");
+  if (!meta) return;
+  var parts = [];
+  var cat = $("m-cat") ? $("m-cat").value.trim() : "";
+  var cost = $("m-cost") ? $("m-cost").value.trim() : "";
+  var rem = $("m-rem") ? $("m-rem").value.trim() : "";
+  if (cat) parts.push(cat);
+  if (cost) parts.push("Cost " + cost);
+  if (rem) parts.push("Remarks");
+  meta.textContent = parts.length ? parts.join(" · ") : "Category, cost, remarks";
+  meta.className = "sum-meta" + (parts.length ? " ok" : "");
+}
+
+function recordAutoSave(evt) {
+  if (!evt || !evt.items || !evt.items.length) return;
+  mat.lastAutoSave = evt;
+  var map = {};
+  evt.items.forEach(function (it, idx) {
+    if (it.type !== "removed" && it.material && it.material.material) {
+      map[it.material.material.toLowerCase()] = { type: it.type, order: idx };
+    }
+  });
+  mat.recentMap = map;
+  renderAutoSaveCard();
+}
+
+function renderAutoSaveCard() {
+  var card = $("mat-autosave-card");
+  var body = $("mat-autosave-body");
+  var meta = $("mat-autosave-meta");
+  if (!card || !body) return;
+  var evt = mat.lastAutoSave;
+  if (!evt || !evt.items || !evt.items.length) {
+    card.hidden = true;
+    body.innerHTML = "";
+    return;
+  }
+  card.hidden = false;
+  var where = evt.savedToFile && evt.fileName
+    ? evt.fileName
+    : (evt.needsPermission ? "Local cache (reconnect file)" : "Local cache");
+  var clock = formatClock(evt.time);
+  if (meta) meta.textContent = (clock ? clock + " · " : "") + where;
+
+  body.innerHTML = "";
+  evt.items.slice(0, 4).forEach(function (it) {
+    var m = it.material || {};
+    var box = document.createElement("div");
+    var isClickable = it.type !== "removed";
+    box.className = "autosave-item" + (isClickable ? " clickable" : "");
+
+    var top = document.createElement("div");
+    top.className = "autosave-item-top";
+
+    var nm = document.createElement("span");
+    nm.className = "autosave-name";
+    nm.textContent = m.material || "(unnamed)";
+
+    var tag = document.createElement("span");
+    tag.className = "autosave-tag " + it.type;
+    var suffix = evt.source === "sheet" ? " on sheet" : "";
+    tag.textContent = it.type === "added"
+      ? ("Added" + suffix)
+      : it.type === "edited"
+        ? ("Edited" + suffix)
+        : ("Removed" + suffix);
+
+    top.appendChild(nm);
+    top.appendChild(tag);
+    box.appendChild(top);
+
+    var infoLine = document.createElement("div");
+    infoLine.className = "autosave-info";
+    infoLine.textContent = summarizeMaterialInfo(m);
+    box.appendChild(infoLine);
+
+    if (it.type === "edited" && it.fields && it.fields.length) {
+      var diffLine = document.createElement("div");
+      diffLine.className = "autosave-diff";
+      diffLine.textContent = "Changed: " + it.fields.map(function (k) { return FIELD_LABELS[k] || k; }).join(", ");
+      box.appendChild(diffLine);
+    }
+
+    if (isClickable) {
+      box.title = "Click to open in the editor below";
+      box.onclick = function () {
+        var found = mat.rows.filter(function (r) { return r.material.toLowerCase() === String(m.material || "").toLowerCase(); })[0];
+        if (found) {
+          setMatMode("edit", found);
+          matLog("", true);
+        }
+      };
+    }
+    body.appendChild(box);
+  });
+
+  if (evt.items.length > 4) {
+    var more = document.createElement("div");
+    more.className = "note";
+    more.textContent = "+ " + (evt.items.length - 4) + " more material(s) updated.";
+    body.appendChild(more);
+  }
+}
+
+function handleAutoSaveEvent(evt) {
+  if (evt && evt.items && evt.items.length) recordAutoSave(evt);
+  refreshMaterials(mat.mode === "edit" && mat.selected ? mat.selected.material : null);
+  refreshLocalFileStatus();
+}
 
 function unitFields() {
   var u = $("m-unit").value;
@@ -534,7 +682,9 @@ function setMatMode(mode, row) {
   $("m-cost").value = fmt(r.cost);
   $("m-lin").value = fmt(r.lin); $("m-area").value = fmt(r.area); $("m-piece").value = fmt(r.piece);
   $("m-sl").value = fmt(r.sl); $("m-sw").value = fmt(r.sw); $("m-rem").value = r.remarks;
+  if ($("m-more") && mode === "add") $("m-more").open = false;
   unitFields();
+  updateMoreOptionsMeta();
   renderMatList();
 }
 
@@ -542,9 +692,24 @@ function renderMatList() {
   var box = $("mat-list"), q = $("mat-search").value.trim().toLowerCase();
   box.innerHTML = "";
   var shown = mat.rows.filter(function (r) { return !q || (r.material + " " + r.category).toLowerCase().indexOf(q) >= 0; });
+
+  // Bubble recently auto-saved materials to the very top of the list
+  var rec = mat.recentMap || {};
+  if (Object.keys(rec).length) {
+    shown = shown.slice().sort(function (a, b) {
+      var ra = rec[a.material.toLowerCase()];
+      var rb = rec[b.material.toLowerCase()];
+      if (ra && !rb) return -1;
+      if (!ra && rb) return 1;
+      if (ra && rb) return ra.order - rb.order;
+      return a.row - b.row;
+    });
+  }
+
   shown.slice(0, 150).forEach(function (r) {
+    var recInfo = rec[r.material.toLowerCase()];
     var d = document.createElement("div");
-    d.className = "mrow" + (mat.selected && mat.selected.row === r.row ? " sel" : "");
+    d.className = "mrow" + (mat.selected && mat.selected.row === r.row ? " sel" : "") + (recInfo ? " recent" : "");
 
     var left = document.createElement("span");
     left.className = "mleft";
@@ -560,6 +725,13 @@ function renderMatList() {
     a.textContent = r.material;
     left.appendChild(icon);
     left.appendChild(a);
+
+    if (recInfo) {
+      var tag = document.createElement("span");
+      tag.className = "mtag" + (recInfo.type === "edited" ? " edited" : "");
+      tag.textContent = recInfo.type === "added" ? "Added" : "Edited";
+      left.appendChild(tag);
+    }
 
     var b = document.createElement("small");
     var w = r.unit === "kg/m" ? r.lin : r.unit === "kg/m²" ? r.area : r.piece;
@@ -606,17 +778,28 @@ function readMatForm() {
 async function saveMaterial() {
   var raw = readMatForm();
   matLog("", true);
-  var pre = BomTools.validateMaterial(BomTools.normalizeMaterial(raw),
+  var norm = BomTools.normalizeMaterial(raw);
+  var pre = BomTools.validateMaterial(norm,
     mat.rows.map(function (r) { return r.material; }), mat.mode);
   if (pre.length) { pre.forEach(function (m) { matLog(m); }); return; }
   state.busy = true; $("m-save").disabled = true;
   try {
     var wasEdit = mat.mode === "edit";
+    var prevObj = wasEdit && mat.selected ? BomTools.normalizeMaterial(mat.selected) : null;
     var r = wasEdit ? await BomTools.updateMaterial(raw) : await BomTools.addMaterial(raw);
     matLog((wasEdit ? "Saved \"" : "Added \"") + r.material + "\". All BOM sheets updated.");
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
-    await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    var diffFields = prevObj ? BomSync.changedFields(prevObj, r) : [];
+    recordAutoSave({
+      source: "panel",
+      time: new Date().toISOString(),
+      savedToFile: !!(writeRes && writeRes.savedToFile),
+      fileName: (writeRes && writeRes.fileName) || "",
+      needsPermission: !!(writeRes && writeRes.needsPermission),
+      items: [{ type: wasEdit ? "edited" : "added", material: r, fields: diffFields }]
+    });
     if (BomSync.hasToken()) {
       try { await BomSync.push(matLog, { only: r.material }); }
       catch (e) { matLog("Saved locally; GitHub publish skipped (" + (e.message || e) + ")."); }
@@ -640,6 +823,7 @@ async function removeMaterial() {
     matLog("Click \"Confirm\" to permanently remove \"" + mat.selected.material + "\" from this workbook and your saved list.", true);
     return;
   }
+  var removedObj = BomTools.normalizeMaterial(mat.selected);
   var target = mat.selected.material;
   state.busy = true; $("m-save").disabled = true; $("m-delete").disabled = true;
   matLog("", true);
@@ -648,7 +832,15 @@ async function removeMaterial() {
     matLog("Removed \"" + target + "\".");
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
-    await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true });
+    recordAutoSave({
+      source: "panel",
+      time: new Date().toISOString(),
+      savedToFile: !!(writeRes && writeRes.savedToFile),
+      fileName: (writeRes && writeRes.fileName) || "",
+      needsPermission: !!(writeRes && writeRes.needsPermission),
+      items: [{ type: "removed", material: removedObj, fields: [] }]
+    });
     state.busy = false;
     setMatMode("add");
     await refreshMaterials();
@@ -880,9 +1072,18 @@ Office.onReady(function (info) {
   // Materials
   $("mat-search").oninput = renderMatList;
   $("m-unit").onchange = unitFields;
+  $("m-cat").oninput = updateMoreOptionsMeta;
+  $("m-cost").oninput = updateMoreOptionsMeta;
+  $("m-rem").oninput = updateMoreOptionsMeta;
   $("m-save").onclick = saveMaterial;
   $("m-new").onclick = function () { matLog("", true); setMatMode("add"); };
   $("m-delete").onclick = removeMaterial;
+  $("mat-autosave-dismiss").onclick = function () {
+    mat.lastAutoSave = null;
+    mat.recentMap = {};
+    renderAutoSaveCard();
+    renderMatList();
+  };
 
   // Local master file controls
   $("local-reconnect").onclick = localReconnect;
@@ -922,5 +1123,5 @@ Office.onReady(function (info) {
   // Top nav tabs — always opens to Home tab!
   TABS.forEach(function (t) { $("tab-" + t).onclick = function () { showTab(t); }; });
   showTab("home");
-  BomSync.watch(localLog, function () { refreshMaterials(); refreshLocalFileStatus(); });
+  BomSync.watch(localLog, handleAutoSaveEvent);
 });

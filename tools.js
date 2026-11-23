@@ -229,8 +229,10 @@
     var existing = {};
     wb.names.items.forEach(function (nm) { existing[nm.name.toLowerCase()] = nm; });
 
-    // 3. Verify or recreate each of the 7 workbook-level named ranges
+    // 3. Verify or recreate each of the 7 workbook-level named ranges (batched for speed)
     var usedRangeFallback = false;
+    var toCreate = [];
+    var deletedAny = false;
     for (var i = 0; i < MASTER_NAMES.length; i++) {
       var def = MASTER_NAMES[i];
       var info = colRanges[def.name];
@@ -246,40 +248,52 @@
         if (!isBroken && (matchesStruct || matchesAddr)) {
           needsCreate = false;
         } else {
-          try { cur.delete(); await context.sync(); } catch (e) { /* ignore */ }
+          try { cur.delete(); deletedAny = true; } catch (e) { /* ignore */ }
         }
       }
+      if (needsCreate) toCreate.push({ def: def, info: info, structFormula: structFormula });
+    }
+    if (deletedAny) {
+      try { await context.sync(); } catch (e) { /* ignore */ }
+    }
 
-      if (needsCreate) {
-        var added = false;
+    if (toCreate.length) {
+      var batchOk = false;
+      try {
+        toCreate.forEach(function (item) { wb.names.add(item.def.name, item.structFormula); });
+        await context.sync();
+        batchOk = true;
+      } catch (eBatch) {
+        batchOk = false;
+      }
+
+      if (batchOk) {
+        // Verify none of the batch-added names became #REF! in a single sync
         try {
-          wb.names.add(def.name, structFormula);
+          var checks = toCreate.map(function (item) {
+            return { item: item, nm: wb.names.getItem(item.def.name).load("formula") };
+          });
           await context.sync();
-          added = true;
-        } catch (e1) {
-          // Some Excel builds reject structured table references in wb.names.add(); fall back to the actual Range object
-          try {
-            wb.names.add(def.name, info.range);
+          var bad = checks.filter(function (c) { return String(c.nm.formula || "").indexOf("#REF!") >= 0; });
+          if (bad.length) {
+            bad.forEach(function (c) { c.nm.delete(); });
             await context.sync();
-            added = true;
+            bad.forEach(function (c) { wb.names.add(c.item.def.name, c.item.info.range); });
+            await context.sync();
+            usedRangeFallback = true;
+          }
+        } catch (eChk) { /* ignore */ }
+      } else {
+        // Per-name fallback for Excel builds that reject structured refs in wb.names.add()
+        for (var j = 0; j < toCreate.length; j++) {
+          var it = toCreate[j];
+          try {
+            wb.names.add(it.def.name, it.info.range);
+            await context.sync();
             usedRangeFallback = true;
           } catch (e2) {
-            log("WARNING: could not create named range " + def.name + " (" + (e2.message || e2) + ").");
+            log("WARNING: could not create named range " + it.def.name + " (" + (e2.message || e2) + ").");
           }
-        }
-        if (added && !usedRangeFallback) {
-          // Verify the added name didn't immediately become #REF!
-          try {
-            var chk = wb.names.getItem(def.name).load("formula");
-            await context.sync();
-            if (String(chk.formula || "").indexOf("#REF!") >= 0) {
-              chk.delete();
-              await context.sync();
-              wb.names.add(def.name, info.range);
-              await context.sync();
-              usedRangeFallback = true;
-            }
-          } catch (e3) { /* ignore */ }
         }
       }
     }
@@ -376,12 +390,16 @@
     var bomName = bomT.name;
     var plName = plT ? plT.name : "";
 
-    // 1. Verify / fix top-level sheet formulas (O2, M4, AB4, AD2, AE1)
+    // 1. Load top-level formulas + optional stale table bodies in ONE sync
     var rO2 = ws.getRange("O2").load("formulas");
     var rM4 = ws.getRange("M4").load("formulas");
     var rAB4 = ws.getRange("AB4").load("formulas");
     var rAD2 = ws.getRange("AD2").load("formulas");
     var rAE1 = ws.getRange("AE1").load("values");
+    var bomBody = (opts.srcBomName && opts.srcBomName !== bomName) ? bomT.getDataBodyRange().load("formulas") : null;
+    var plBody = (plT && ((opts.srcBomName && opts.srcBomName !== bomName) || (opts.srcPlName && opts.srcPlName !== plName)))
+      ? plT.getDataBodyRange().load("formulas")
+      : null;
     await context.sync();
 
     var fO2 = String(rO2.formulas[0][0] || "");
@@ -406,12 +424,8 @@
     if (isBlank(rAE1.values[0][0])) {
       rAE1.values = [[6000]];
     }
-    await context.sync();
 
-    // 2. If copied from another sheet and Excel left stale table references inside bomT / plT, rewrite them cleanly
-    if (opts.srcBomName && opts.srcBomName !== bomName) {
-      var bomBody = bomT.getDataBodyRange().load("formulas");
-      await context.sync();
+    if (bomBody) {
       var bomChanged = false;
       var bomOut = bomBody.formulas.map(function (row) {
         return row.map(function (cell) {
@@ -420,11 +434,9 @@
           return fixed;
         });
       });
-      if (bomChanged) { bomBody.formulas = bomOut; await context.sync(); }
+      if (bomChanged) bomBody.formulas = bomOut;
     }
-    if (plT && ((opts.srcBomName && opts.srcBomName !== bomName) || (opts.srcPlName && opts.srcPlName !== plName))) {
-      var plBody = plT.getDataBodyRange().load("formulas");
-      await context.sync();
+    if (plBody) {
       var plChanged = false;
       var plOut = plBody.formulas.map(function (row) {
         return row.map(function (cell) {
@@ -435,13 +447,10 @@
           return fixed;
         });
       });
-      if (plChanged) { plBody.formulas = plOut; await context.sync(); }
+      if (plChanged) plBody.formulas = plOut;
     }
 
-    // 3. Re-apply Materials dropdown on C6:C2000
-    await applyBomDataValidation(context, ws, matInfo, log);
-
-    // 4. Enforce hidden table header row (row 5), hidden helper columns (M & AB), gridlines off, freeze panes
+    // 2. Enforce hidden table header row (row 5), hidden helper columns (M & AB), gridlines off, freeze panes in same sync
     try {
       ws.getRange("5:5").rowHidden = true;
       ws.getRange("M:M").columnHidden = true;
@@ -449,10 +458,13 @@
       ws.showGridlines = false;
       ws.freezePanes.unfreeze();
       ws.freezePanes.freezeRows(5);
-      await context.sync();
     } catch (e) { /* non-fatal */ }
+    await context.sync();
 
-    // 5. Enforce landscape print setup & repeating header rows 3:4
+    // 3. Re-apply Materials dropdown on C6:C2000
+    await applyBomDataValidation(context, ws, matInfo, log);
+
+    // 4. Enforce landscape print setup & repeating header rows 3:4
     try {
       ws.pageLayout.orientation = Excel.PageOrientation.landscape;
       ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
@@ -474,25 +486,41 @@
     var count = 0;
     await Excel.run(async function (context) {
       var wb = context.workbook;
-      log("Checking Master sheet and workbook named ranges ...");
-      var matInfo = await ensureMasterNames(context, wb, log);
-      wb.worksheets.load("items/name,items/visibility");
-      await context.sync();
-      var sheets = wb.worksheets.items;
-      sheets.forEach(function (ws) { ws.tables.load("items/name"); });
-      await context.sync();
+      var prevCalcMode = null;
+      try {
+        wb.application.load("calculationMode");
+        await context.sync();
+        prevCalcMode = wb.application.calculationMode;
+        if (prevCalcMode !== Excel.CalculationMode.manual) {
+          wb.application.calculationMode = Excel.CalculationMode.manual;
+          await context.sync();
+        }
+      } catch (e) { prevCalcMode = null; }
 
-      for (var i = 0; i < sheets.length; i++) {
-        var ws = sheets[i];
-        if (!firstTable(ws.tables.items, "bom_")) continue;
-        if (selectedSet && !selectedSet[lc(ws.name)]) continue;
-        log("Verifying dropdowns, layout and formulas on \"" + ws.name + "\" ...");
-        await repairBomSheet(context, wb, ws, matInfo, {}, log);
-        count++;
+      try {
+        log("Checking Master sheet and workbook named ranges ...");
+        var matInfo = await ensureMasterNames(context, wb, log);
+        wb.worksheets.load("items/name,items/visibility");
+        await context.sync();
+        var sheets = wb.worksheets.items;
+        sheets.forEach(function (ws) { ws.tables.load("items/name"); });
+        await context.sync();
+
+        for (var i = 0; i < sheets.length; i++) {
+          var ws = sheets[i];
+          if (!firstTable(ws.tables.items, "bom_")) continue;
+          if (selectedSet && !selectedSet[lc(ws.name)]) continue;
+          log("Verifying dropdowns, layout and formulas on \"" + ws.name + "\" ...");
+          await repairBomSheet(context, wb, ws, matInfo, {}, log);
+          count++;
+        }
+      } finally {
+        try {
+          if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
+          wb.application.calculate(Excel.CalculationType.full);
+          await context.sync();
+        } catch (e) { /* ignore */ }
       }
-
-      wb.application.calculate(Excel.CalculationType.full);
-      await context.sync();
     });
     log("Repaired " + count + " BOM sheet(s) and Master named ranges.");
     return { sheetsRepaired: count };
@@ -795,6 +823,8 @@
     _applyBomDataValidation: applyBomDataValidation,
     _repairBomSheet: repairBomSheet,
     _refreshAllBomDropdownsIfRangeBased: refreshAllBomDropdownsIfRangeBased,
+    _replaceTableRef: replaceTableRef,
+    _canonical: { O2: canonicalO2, M4: canonicalM4, AB4: canonicalAB4, AD2: canonicalAD2 },
     inspectSheets: inspectSheets, addBomSheet: addBomSheet, repairWorkbook: repairWorkbook,
     listMaterials: listMaterials, addMaterial: addMaterial, updateMaterial: updateMaterial,
     deleteMaterial: deleteMaterial,
