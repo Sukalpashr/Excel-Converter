@@ -371,12 +371,14 @@
     if (!gt) throw new Error(ws.name + ": purchase list has no Grand Total row.");
     for (i = gt; i < Math.min(v.length, gt + 6); i++) { if (String(v[i][1]) === "Requested by:") { rq = i + 1; break; } }
     if (!rq) rq = gt + 2;
-    var L = {};
-    bom.values.forEach(function (row) {
+    var L = {}, tot = 0;
+    bom.values.forEach(function (row, idx) {
       var mat = String(row[2]);
+      if (String(row[8]) === "Total:") tot = 5 + idx;
       if (mat !== "" && typeof row[11] === "number") L[mat] = (L[mat] || 0) + row[11];
     });
-    return { name: ws.name, vals: v, items: items, gt: gt, rq: rq, L: L, ws: ws };
+    if (!tot) tot = 5 + bom.values.length;
+    return { name: ws.name, vals: v, items: items, gt: gt, rq: rq, L: L, tot: tot, ws: ws };
   }
 
   function compileMaterials(datas, master) {
@@ -402,7 +404,21 @@
     return rows;
   }
 
-  function blockBorders(cs, c0, n) {          // item rows boxed, grand-total row boxed like the original
+  // run queued Office.js calls and, if Excel rejects them, say WHICH step it was
+  async function step(context, name, fn) {
+    try { fn(); await context.sync(); }
+    catch (e) {
+      var loc = e && e.debugInfo && e.debugInfo.errorLocation ? " [" + e.debugInfo.errorLocation + "]" : "";
+      throw new Error(name + ": " + ((e && e.message) || e) + loc);
+    }
+  }
+  async function soft(context, log, name, fn) {            // cosmetic steps never abort the build
+    try { fn(); await context.sync(); }
+    catch (e) { log("Note: skipped '" + name + "' (" + ((e && e.message) || e) + ")"); }
+  }
+  var qs = function (name) { return "'" + String(name).replace(/'/g, "''") + "'"; };
+
+  function blockBorders(cs, c0, n) {          // static lists: item rows boxed, grand-total row boxed
     var L = function (c) { return colLetter(c0 + c); };
     if (n > 0) setBorders(cs.getRange(L(0) + (PAD + 5) + ":" + L(BLOCK - 1) + (PAD + 4 + n)), true);
     var gr = PAD + 5 + n;
@@ -410,79 +426,208 @@
     for (var c = 4; c < BLOCK; c++) setBorders(cs.getRange(L(c) + gr), true, true);
   }
 
-  async function buildCompiled(context, wb, sheets, master, log) {
+  // borders / bold that follow the list length (same rules as the BOM sheet's own purchase list)
+  function addGrowCf(cs, c0, r1, r2, nAddr) {
+    var off = PAD + 4, L = function (c) { return colLetter(c0 + c); };
+    var cf = cs.getRange(L(0) + r1 + ":" + L(BLOCK - 1) + r2).conditionalFormats.add("Custom");
+    cf.custom.rule.formula = "=ROW()-" + off + "<=" + nAddr;
+    ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom"].forEach(function (e) { cf.custom.format.borders.getItem(e).style = "Continuous"; });
+    cf.stopIfTrue = false;
+    for (var c = 0; c < BLOCK; c++) {
+      var sc = 15 + c;
+      var cf2 = cs.getRange(L(c) + r1 + ":" + L(c) + r2).conditionalFormats.add("Custom");
+      cf2.custom.rule.formula = "=ROW()-" + off + "=" + nAddr + "+1";
+      cf2.custom.format.borders.getItem("EdgeTop").style = "Continuous";
+      cf2.custom.format.borders.getItem("EdgeBottom").style = "Continuous";
+      if (sc !== 16 && sc !== 17 && sc !== 18) cf2.custom.format.borders.getItem("EdgeLeft").style = "Continuous";
+      if (sc !== 15 && sc !== 16 && sc !== 17) cf2.custom.format.borders.getItem("EdgeRight").style = "Continuous";
+      if ([16, 19, 21, 23, 26].indexOf(sc) >= 0) cf2.custom.format.font.bold = true;
+      cf2.stopIfTrue = false;
+    }
+  }
+
+  /* ---- growing mode: compiled sheet + side lists are formulas, so they grow with the BOM ---- */
+  async function growingBody(context, cs, datas, master, ctx) {
+    var nL = datas.length, src = datas[0].ws;
+    var capMain = Math.min(nL * CAP, 120), mainLast = PAD + 4 + capMain + 3;
+    var lastListEnd = ctx.lastListEnd;
+    var hs = lastListEnd + 3;                              // helper block (hidden), after the last list
+    var HN = colLetter(hs), HQ = colLetter(hs + 1), HT = colLetter(hs + 2), HS = colLetter(hs + 3), HR = colLetter(hs + 4),
+        HU = colLetter(hs + 5), HL = colLetter(hs + 6), HW = colLetter(hs + 7), HK = colLetter(hs + 8),
+        OT1 = colLetter(hs + 10), OT2 = colLetter(hs + 11), NC = colLetter(hs + 12);
+    var hEnd = 4 + nL * CAP;
+    var rg = function (c) { return "$" + c + "$5:$" + c + "$" + hEnd; };
+    var rHN = rg(HN), rHQ = rg(HQ), rHT = rg(HT), rHS = rg(HS), rHR = rg(HR), rHU = rg(HU), rHL = rg(HL), rHW = rg(HW), rHK = rg(HK);
+    var nMain = "$" + NC + "$5";
+
+    // helper: one row per possible purchase-list item of every sheet
+    await step(context, "helper block", function () {
+      var rows = [];
+      datas.forEach(function (d, s) {
+        var q = qs(d.name);
+        for (var i = 1; i <= CAP; i++) {
+          var hr = 4 + s * CAP + i, sr = 4 + i, nm = HN + hr;
+          var key = '=IF(' + nm + '="","",IF(COUNTIF(' + HN + '$5:' + nm + ',' + nm + ')>1,"",IFERROR(VLOOKUP(' + nm + ',$' + OT1 + '$5:$' + OT2 + '$600,2,0),1000000)+ROW()/100000))';
+          rows.push([
+            '=IF(ISNUMBER(' + q + '!O' + sr + '),' + q + '!P' + sr + ',"")',
+            '=IF(' + nm + '="","",' + q + '!Q' + sr + ')',
+            '=IF(' + nm + '="","",' + q + '!T' + sr + ')',
+            '=IF(' + nm + '="",0,N(' + q + '!S' + sr + '))',
+            '=IF(' + nm + '="",0,N(' + q + '!R' + sr + '))',
+            '=IF(' + nm + '="",0,N(' + q + '!U' + sr + '))',
+            '=IF(' + nm + '="",0,SUMIF(' + q + '!$C$5:$C$' + d.tot + ',' + nm + ',' + q + '!$L$5:$L$' + d.tot + '))',
+            '=IF(' + nm + '="","",IFERROR(' + q + '!U' + sr + '/' + q + '!R' + sr + ',""))',
+            key]);
+        }
+      });
+      cs.getRange(HN + "5:" + HK + hEnd).formulas = rows;
+      var ord = Object.keys(master).map(function (k) { return [k, master[k].order]; });
+      if (ord.length) cs.getRange(OT1 + "5:" + OT2 + (4 + ord.length)).values = ord;
+      cs.getRange(NC + "5").formulas = [["=COUNT(" + rHK + ")"]];
+      datas.forEach(function (d, s) { cs.getRange(NC + (6 + s)).formulas = [["=" + qs(d.name) + "!$AE$2"]]; });
+    });
+
+    // main compiled list (A..M)
+    await step(context, "compiled list formulas", function () {
+      var k = "(ROW()-" + (PAD + 4) + ")", n = nMain, out = [];
+      for (var r = PAD + 5; r <= mainLast; r++) {
+        var B = "B" + r, C = "C" + r, D = "D" + r, F = "F" + r;
+        var bar = 'AND(ISNUMBER(' + C + '),SUMIF(' + rHN + ',' + B + ',' + rHL + ')>0)';
+        var sht = 'AND(ISTEXT(' + C + '),' + C + '<>"")';
+        var sw = 'INDEX(' + rHW + ',MATCH(' + B + ',' + rHN + ',0))';
+        var above = function (c) { return r > PAD + 5 ? 'SUM(' + c + '$' + (PAD + 5) + ':' + c + (r - 1) + ')' : '""'; };
+        var row = new Array(BLOCK).fill("");
+        row[0] = '=IF(' + k + '<=' + n + ',' + k + ',"")';
+        row[1] = '=IF(' + k + '<=' + n + ',INDEX(' + rHN + ',MATCH(SMALL(' + rHK + ',' + k + '),' + rHK + ',0)),IF(' + k + '=' + n + '+1,"Grand Total Weight in KG :",IF(' + k + '=' + n + '+3,"Requested by:","")))';
+        row[2] = '=IF(' + k + '=' + n + '+3,"Procurement",IF(' + k + '>' + n + ',"",IFERROR(INDEX(' + rHQ + ',MATCH(' + B + ',' + rHN + ',0)),"")))';
+        row[3] = '=IF(' + k + '>' + n + ',"",IF(' + bar + ',ROUNDUP(ROUND(SUMIF(' + rHN + ',' + B + ',' + rHL + ')/' + C + ',6),0),IF(' + sht + ',ROUNDUP(ROUND(SUMIF(' + rHN + ',' + B + ',' + rHS + ')/' + sw + ',6),0),SUMIF(' + rHN + ',' + B + ',' + rHR + '))))';
+        row[4] = '=IF(' + k + '=' + n + '+1,' + above("E") + ',IF(' + k + '>' + n + ',"",SUMIF(' + rHN + ',' + B + ',' + rHS + ')))';
+        row[5] = '=IF(' + k + '=' + n + '+3,"Store Section:",IF(' + k + '>' + n + ',"",IFERROR(INDEX(' + rHT + ',MATCH(' + B + ',' + rHN + ',0)),"")))';
+        row[6] = '=IF(' + k + '=' + n + '+1,' + above("G") + ',IF(' + k + '>' + n + ',"",IF(' + bar + ',' + C + '/1000*' + D + '*' + F + ',IF(' + sht + ',' + D + '*' + sw + ',SUMIF(' + rHN + ',' + B + ',' + rHU + ')))))';
+        row[8] = '=IF(' + k + '=' + n + '+3,"Production","")';
+        row[11] = '=IF(' + k + '=' + n + '+3,"Engineering","")';
+        out.push(row);
+      }
+      cs.getRange("A" + (PAD + 5) + ":M" + mainLast).formulas = out;
+    });
+
+    // each sheet's own list, mirrored cell by cell (rows 5..PL_LAST) so it grows with its sheet
+    await step(context, "side lists", function () {
+      datas.forEach(function (d, k) {
+        var c0 = 1 + STRIDE * (k + 1), q = qs(d.name), out = [];
+        for (var r = 5; r <= PL_LAST; r++) {
+          var row = [];
+          for (var c = 0; c < BLOCK; c++) { var a = q + "!" + colLetter(15 + c) + r; row.push('=IF(' + a + '="","",' + a + ')'); }
+          out.push(row);
+        }
+        cs.getRange(colLetter(c0) + (PAD + 5) + ":" + colLetter(c0 + BLOCK - 1) + (PAD + PL_LAST)).formulas = out;
+      });
+    });
+
+    await step(context, "formats", function () {
+      for (var r = PAD + 5; r <= mainLast; r++) cs.getRange("A" + r + ":M" + r).copyFrom(src.getRange("O5:AA5"), "Formats");
+      datas.forEach(function (d, k) {
+        var c0 = 1 + STRIDE * (k + 1);
+        cs.getRange(colLetter(c0) + (PAD + 5) + ":" + colLetter(c0 + BLOCK - 1) + (PAD + PL_LAST)).copyFrom(d.ws.getRange("O5:AA" + PL_LAST), "Formats");
+      });
+    });
+
+    await step(context, "grow-with-list formatting", function () {
+      cs.getRange().conditionalFormats.clearAll();
+      addGrowCf(cs, 1, PAD + 5, mainLast, nMain);
+      datas.forEach(function (d, k) { addGrowCf(cs, 1 + STRIDE * (k + 1), PAD + 5, PAD + PL_LAST, "$" + NC + "$" + (6 + k)); });
+      cs.getRange(HN + ":" + colLetter(hs + 12)).columnHidden = true;
+    });
+    return { lastRow: mainLast };
+  }
+
+  /* ---- fixed mode: compiled sheet + side lists are plain values ---- */
+  async function staticBody(context, cs, datas, master, ctx) {
+    var rows = compileMaterials(datas, master), n = rows.length, first = datas[0], src = first.ws, nL = datas.length;
+    var gr = PAD + 5 + n, rr = gr + 2;
+    await step(context, "compiled list formats", function () {
+      for (var i = 0; i < n; i++) cs.getRange("A" + (PAD + 5 + i) + ":M" + (PAD + 5 + i)).copyFrom(src.getRange("O5:AA5"), "Formats");
+      cs.getRange("A" + gr + ":M" + gr).copyFrom(src.getRange("O" + first.gt + ":AA" + first.gt), "Formats");
+      cs.getRange("A" + rr + ":M" + rr).copyFrom(src.getRange("O" + first.rq + ":AA" + first.rq), "Formats");
+    });
+    await step(context, "compiled list values", function () {
+      var vals = rows.map(function (r, i) { return [i + 1, r.mat, r.Q, r.R, r.S, r.T, r.U, "", "", "", "", "", ""]; });
+      if (n > 0) cs.getRange("A" + (PAD + 5) + ":M" + (PAD + 4 + n)).values = vals;
+      var tot = function (k) { return Math.round(rows.reduce(function (a, r) { return a + num(r[k]); }, 0) * 1000) / 1000; };
+      cs.getRange("A" + gr + ":M" + gr).values = [["", "Grand Total Weight in KG :", "", "", tot("S"), "", tot("U"), "", "", "", "", "", ""]];
+      cs.getRange("A" + rr + ":M" + rr).values = [first.vals[first.rq - 1].map(function (x) { return x === null ? "" : x; })];
+    });
+    await step(context, "side lists", function () {
+      datas.forEach(function (d, k) {
+        var c0 = 1 + STRIDE * (k + 1), a = colLetter(c0), b = colLetter(c0 + BLOCK - 1);
+        cs.getRange(a + (PAD + 5) + ":" + b + (PAD + d.rq)).copyFrom(d.ws.getRange("O5:AA" + d.rq), "Formats");
+        cs.getRange(a + (PAD + 5) + ":" + b + (PAD + d.rq)).values =
+          d.vals.slice(4, d.rq).map(function (r) { return r.map(function (x) { return x === null ? "" : x; }); });
+      });
+    });
+    await step(context, "borders", function () {
+      cs.getRange().conditionalFormats.clearAll();
+      blockBorders(cs, 1, n);
+      datas.forEach(function (d, k) { blockBorders(cs, 1 + STRIDE * (k + 1), d.items.length); });
+    });
+    return { lastRow: Math.max(rr, PAD + Math.max.apply(null, datas.map(function (d) { return d.rq; }))) };
+  }
+
+  async function buildCompiled(context, wb, sheets, master, log, growing) {
     var datas = [];
     for (var s = 0; s < sheets.length; s++) datas.push(await readPurchaseData(context, sheets[s]));
-    var rows = compileMaterials(datas, master), n = rows.length, first = datas[0];
+    var nL = datas.length, first = datas[0], src = first.ws;
 
     var old = wb.worksheets.getItemOrNullObject(COMPILED);
     await context.sync();
     if (!old.isNullObject) { old.delete(); await context.sync(); }
     var cs = wb.worksheets.add(COMPILED);
+    await context.sync();
     context.application.suspendApiCalculationUntilNextSync();
 
+    // column widths copied from the first sheet's purchase list
     var srcCols = [];
     for (var c = 0; c < BLOCK; c++) {
-      var cr = first.ws.getRange(colLetter(15 + c) + ":" + colLetter(15 + c));
+      var cr = src.getRange(colLetter(15 + c) + ":" + colLetter(15 + c));
       cr.format.load("columnWidth");
       srcCols.push(cr);
     }
     await context.sync();
     var widths = srcCols.map(function (r) { return r.format.columnWidth; });
-    var gapW = 18, nLists = datas.length;
-    var setW = function (c0) { for (var c = 0; c < BLOCK; c++) cs.getRange(colLetter(c0 + c) + ":" + colLetter(c0 + c)).format.columnWidth = widths[c]; };
-    setW(1);
-    cs.getRange("N:N").format.columnWidth = gapW;
-
-    // ---- main compiled list (columns A..M), header rows copied from the first sheet
-    var src = first.ws;
-    var hdrDst = cs.getRange("A" + (PAD + 1) + ":M" + (PAD + 4));
-    hdrDst.copyFrom(src.getRange("O1:AA4"), "Formats");
-    hdrDst.copyFrom(src.getRange("O1:AA4"), "Values");
-    var title = String(first.vals[1][0] || "");
-    cs.getRange("A" + (PAD + 2)).values = [[title.indexOf("Remaining Purchase List") >= 0
-      ? title.replace("Remaining Purchase List", "Compiled Purchase List (all sheets)") : "Compiled Purchase List (all sheets)"]];
-    if (n > 0) cs.getRange("A" + (PAD + 5) + ":M" + (PAD + 4 + n)).copyFrom(src.getRange("O5:AA5"), "Formats");
-    var vals = rows.map(function (r, i) {
-      return [i + 1, r.mat, r.Q, r.R, r.S, r.T, r.U, "", "", "", "", "", ""];
+    var lastListEnd = 1 + STRIDE * nL + BLOCK - 1;
+    await step(context, "column widths", function () {
+      var setW = function (c0) { for (var c = 0; c < BLOCK; c++) cs.getRange(colLetter(c0 + c) + ":" + colLetter(c0 + c)).format.columnWidth = widths[c]; };
+      setW(1);
+      for (var k = 0; k <= nL; k++) { if (k > 0) setW(1 + STRIDE * k); cs.getRange(colLetter(1 + STRIDE * k + BLOCK) + ":" + colLetter(1 + STRIDE * k + BLOCK)).format.columnWidth = 18; }
     });
-    if (n > 0) cs.getRange("A" + (PAD + 5) + ":M" + (PAD + 4 + n)).values = vals;
-    var gr = PAD + 5 + n, rr = gr + 2;
-    cs.getRange("A" + gr + ":M" + gr).copyFrom(src.getRange("O" + first.gt + ":AA" + first.gt), "Formats");
-    cs.getRange("A" + rr + ":M" + rr).copyFrom(src.getRange("O" + first.rq + ":AA" + first.rq), "Formats");
-    var tot = function (k) { return Math.round(rows.reduce(function (a, r) { return a + num(r[k]); }, 0) * 1000) / 1000; };
-    var gtRow = ["", "Grand Total Weight in KG :", "", "", tot("S"), "", tot("U"), "", "", "", "", "", ""];
-    cs.getRange("A" + gr + ":M" + gr).values = [gtRow];
-    cs.getRange("A" + rr + ":M" + rr).values = [first.vals[first.rq - 1].map(function (x) { return x === null ? "" : x; })];
 
-    // ---- every sheet's own purchase list to the right, one gap column between lists
-    for (var k = 0; k < nLists; k++) {
-      var d = datas[k], c0 = 1 + STRIDE * (k + 1);       // 15, 29, 43, ...
-      setW(c0);
-      if (k < nLists) cs.getRange(colLetter(c0 + BLOCK) + ":" + colLetter(c0 + BLOCK)).format.columnWidth = gapW;
-      var dst = cs.getRange(colLetter(c0) + (PAD + 1) + ":" + colLetter(c0 + BLOCK - 1) + (PAD + d.rq));
-      dst.copyFrom(d.ws.getRange("O1:AA" + d.rq), "Formats");
-      dst.values = d.vals.slice(0, d.rq).map(function (r) { return r.map(function (x) { return x === null ? "" : x; }); });
-      var lab = cs.getRange(colLetter(c0) + PAD);
-      lab.values = [[d.name]];
-      lab.format.font.bold = true;
-    }
-    await context.sync();
+    // header rows (static text, may contain merged cells -> copy as a whole, never write cell by cell)
+    await step(context, "header rows", function () {
+      cs.getRange("A" + (PAD + 1) + ":M" + (PAD + 4)).copyFrom(src.getRange("O1:AA4"), "All");
+      datas.forEach(function (d, k) {
+        var c0 = 1 + STRIDE * (k + 1);
+        cs.getRange(colLetter(c0) + (PAD + 1) + ":" + colLetter(c0 + BLOCK - 1) + (PAD + 4)).copyFrom(d.ws.getRange("O1:AA4"), "All");
+        var lab = cs.getRange(colLetter(c0) + PAD);
+        lab.values = [[d.name]];
+        lab.format.font.bold = true;
+      });
+      var title = String(first.vals[1][0] || "");
+      cs.getRange("A" + (PAD + 2)).values = [[title.indexOf("Remaining Purchase List") >= 0
+        ? title.replace("Remaining Purchase List", "Compiled Purchase List (all sheets)") : "Compiled Purchase List (all sheets)"]];
+    });
 
-    cs.getRange().conditionalFormats.clearAll();      // copied "grow with the list" formats are not needed on static data
-    blockBorders(cs, 1, n);
-    datas.forEach(function (d, k) { blockBorders(cs, 1 + STRIDE * (k + 1), d.items.length); });
-    var lastCol = colLetter(1 + STRIDE * nLists + BLOCK - 1);
-    var lastRow = Math.max(rr, PAD + Math.max.apply(null, datas.map(function (d) { return d.rq; })));
-    cs.pageLayout.orientation = "Landscape";
-    cs.pageLayout.setPrintArea("A1:" + lastCol + lastRow);
-    cs.activate();
-    await context.sync();
-    try {                                              // each list prints on its own page
-      for (var p = 0; p < nLists; p++) cs.verticalPageBreaks.add(cs.getRange(colLetter(1 + STRIDE * (p + 1)) + "1"));
-      await context.sync();
-    } catch (e) { log("Note: could not add print page breaks (" + (e.message || e) + "). Set them via Page Layout > Breaks."); }
-    log("Compiled sheet created: " + n + " materials from " + nLists + " sheet(s).");
+    var res = growing
+      ? await growingBody(context, cs, datas, master, { lastListEnd: lastListEnd })
+      : await staticBody(context, cs, datas, master, { lastListEnd: lastListEnd });
+
+    // printing: landscape, print area, one page per list (cosmetic - never aborts)
+    await soft(context, log, "landscape", function () { cs.pageLayout.orientation = "Landscape"; });
+    await soft(context, log, "print area", function () { cs.pageLayout.setPrintArea("A1:" + colLetter(lastListEnd) + res.lastRow); });
+    await soft(context, log, "page breaks", function () {
+      for (var p = 0; p < nL; p++) cs.verticalPageBreaks.add(cs.getRange(colLetter(1 + STRIDE * (p + 1)) + "1"));
+    });
+    await soft(context, log, "activate", function () { cs.activate(); });
+    log("Compiled sheet created (" + (growing ? "grows with the BOM" : "values only") + ") from " + nL + " sheet(s).");
   }
 
   /* ---------- workbook level ---------- */
@@ -531,7 +676,7 @@
       }
       if (opts.compiled) {
         log("Building the compiled purchase list sheet ...");
-        try { await buildCompiled(context, wb, sheets, master, log); }
+        try { await buildCompiled(context, wb, sheets, master, log, mode === "growing"); }
         catch (e) { warnings.push("Compiled sheet failed: " + (e.message || e)); }
       }
       log("Removing Master / Formulas / README sheets and named ranges ...");
