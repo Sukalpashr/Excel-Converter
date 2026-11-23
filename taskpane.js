@@ -87,7 +87,7 @@ async function convert() {
   state.busy = true; updateButtons();
   $("log").textContent = "";
   try {
-    var warnings = await BomConvert.convertWorkbook(mode, log);
+    var warnings = await BomConvert.convertWorkbook(mode, log, { compiled: $("compiled").checked });
     log("Done. Review the sheets, then use File > Save As to name the new file.");
     warnings.forEach(function (w) { log("WARNING: " + w); });
   } catch (e) {
