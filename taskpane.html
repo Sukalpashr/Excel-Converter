@@ -54,12 +54,15 @@
     <label class="opt"><input type="radio" name="mode" value="fixed">
       <b>Fixed purchase list</b>
       <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
+    <label class="opt"><input type="checkbox" id="compiled">
+      <b>Extra: compiled purchase list sheet</b>
+      <span>Adds a "Compiled Purchase List" sheet (values only, no formulas): all sheets combined on the left, each sheet's own list to the right with a gap, space on top for company details.</span></label>
     <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
     <button id="convert" class="primary" disabled>Convert</button>
     <div id="log" style="margin-top:10px"></div>
   </div>
 
-  <script src="convert.js"></script>
-  <script src="taskpane.js"></script>
+  <script src="convert.js?v=2"></script>
+  <script src="taskpane.js?v=2"></script>
 </body>
 </html>

@@ -9,11 +9,11 @@
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="BOM Converter"/>
   <Description DefaultValue="Converts the automated BOM workbook into a simplified, plain-formula workbook."/>
-  <IconUrl DefaultValue="https://sukalpashr.github.io/Excel-Converter//assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://sukalpashr.github.io/Excel-Converter//assets/icon-64.png"/>
-  <SupportUrl DefaultValue="https://sukalpashr.github.io/Excel-Converter//"/>
+  <IconUrl DefaultValue="https://YOUR-HOST/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://YOUR-HOST/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://YOUR-HOST/"/>
   <AppDomains>
-    <AppDomain>https://sukalpashr.github.io/Excel-Converter/</AppDomain>
+    <AppDomain>https://YOUR-HOST</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>
@@ -24,7 +24,7 @@
     </Sets>
   </Requirements>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://sukalpashr.github.io/Excel-Converter//taskpane.html"/>
+    <SourceLocation DefaultValue="https://YOUR-HOST/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -64,12 +64,12 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16" DefaultValue="https://sukalpashr.github.io/Excel-Converter//assets/icon-16.png"/>
-        <bt:Image id="Icon.32" DefaultValue="https://sukalpashr.github.io/Excel-Converter//assets/icon-32.png"/>
-        <bt:Image id="Icon.80" DefaultValue="https://sukalpashr.github.io/Excel-Converter//assets/icon-80.png"/>
+        <bt:Image id="Icon.16" DefaultValue="https://YOUR-HOST/assets/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="https://YOUR-HOST/assets/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="https://YOUR-HOST/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://sukalpashr.github.io/Excel-Converter//taskpane.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://YOUR-HOST/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Group.Label" DefaultValue="BOM Tools"/>

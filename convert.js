@@ -351,6 +351,140 @@
     return missing;
   }
 
+  /* ---------- EXTRA: compiled purchase list sheet (static values, no formulas) ---------- */
+  var COMPILED = "Compiled Purchase List";
+  var PAD = 4;                  // empty rows on top for company name etc.
+  var BLOCK = 13;               // purchase list is O..AA = 13 columns
+  var STRIDE = BLOCK + 1;       // one gap column between lists
+  var num = function (x) { return typeof x === "number" ? x : 0; };
+
+  async function readPurchaseData(context, ws) {
+    var pl = ws.getRange("O1:AA60").load("values");
+    var bom = ws.getRange("A5:L" + BOTTOM).load("values");
+    await context.sync();
+    var v = pl.values, items = [], gt = 0, rq = 0, i;
+    for (i = 4; i < v.length; i++) {
+      var nm = String(v[i][1]);
+      if (nm.indexOf("Grand Total") === 0) { gt = i + 1; break; }
+      if (nm !== "") items.push({ mat: nm, Q: v[i][2], R: v[i][3], S: v[i][4], T: v[i][5], U: v[i][6] });
+    }
+    if (!gt) throw new Error(ws.name + ": purchase list has no Grand Total row.");
+    for (i = gt; i < Math.min(v.length, gt + 6); i++) { if (String(v[i][1]) === "Requested by:") { rq = i + 1; break; } }
+    if (!rq) rq = gt + 2;
+    var L = {};
+    bom.values.forEach(function (row) {
+      var mat = String(row[2]);
+      if (mat !== "" && typeof row[11] === "number") L[mat] = (L[mat] || 0) + row[11];
+    });
+    return { name: ws.name, vals: v, items: items, gt: gt, rq: rq, L: L, ws: ws };
+  }
+
+  function compileMaterials(datas, master) {
+    var acc = {};
+    datas.forEach(function (d) {
+      d.items.forEach(function (it) {
+        var a = acc[it.mat] || (acc[it.mat] = { mat: it.mat, Q: it.Q, T: it.T, sumS: 0, sumR: 0, sumU: 0, sumL: 0, sw: null });
+        a.sumS += num(it.S); a.sumR += num(it.R); a.sumU += num(it.U);
+        if (a.sw === null && num(it.R) > 0) a.sw = num(it.U) / num(it.R);
+      });
+      Object.keys(d.L).forEach(function (m) { if (acc[m]) acc[m].sumL += d.L[m]; });
+    });
+    var r3 = function (x) { return Math.round(x * 1000) / 1000; };
+    var rows = Object.keys(acc).map(function (k) {
+      var a = acc[k], R, U;
+      if (typeof a.Q === "number" && a.sumL > 0) { R = Math.ceil(a.sumL / a.Q - 1e-9); U = a.Q / 1000 * R * num(a.T); }
+      else if (typeof a.Q === "string" && a.Q !== "" && a.sw) { R = Math.ceil(a.sumS / a.sw - 1e-9); U = R * a.sw; }
+      else { R = a.sumR; U = a.sumU; }
+      return { mat: a.mat, Q: a.Q, R: R, S: r3(a.sumS), T: a.T, U: r3(U) };
+    });
+    var ord = function (m) { return master && master[m] ? master[m].order : 1e6; };
+    rows.sort(function (a, b) { return ord(a.mat) - ord(b.mat); });
+    return rows;
+  }
+
+  function blockBorders(cs, c0, n) {          // item rows boxed, grand-total row boxed like the original
+    var L = function (c) { return colLetter(c0 + c); };
+    if (n > 0) setBorders(cs.getRange(L(0) + (PAD + 5) + ":" + L(BLOCK - 1) + (PAD + 4 + n)), true);
+    var gr = PAD + 5 + n;
+    setBorders(cs.getRange(L(0) + gr + ":" + L(3) + gr), true, true);
+    for (var c = 4; c < BLOCK; c++) setBorders(cs.getRange(L(c) + gr), true, true);
+  }
+
+  async function buildCompiled(context, wb, sheets, master, log) {
+    var datas = [];
+    for (var s = 0; s < sheets.length; s++) datas.push(await readPurchaseData(context, sheets[s]));
+    var rows = compileMaterials(datas, master), n = rows.length, first = datas[0];
+
+    var old = wb.worksheets.getItemOrNullObject(COMPILED);
+    await context.sync();
+    if (!old.isNullObject) { old.delete(); await context.sync(); }
+    var cs = wb.worksheets.add(COMPILED);
+    context.application.suspendApiCalculationUntilNextSync();
+
+    var srcCols = [];
+    for (var c = 0; c < BLOCK; c++) {
+      var cr = first.ws.getRange(colLetter(15 + c) + ":" + colLetter(15 + c));
+      cr.format.load("columnWidth");
+      srcCols.push(cr);
+    }
+    await context.sync();
+    var widths = srcCols.map(function (r) { return r.format.columnWidth; });
+    var gapW = 18, nLists = datas.length;
+    var setW = function (c0) { for (var c = 0; c < BLOCK; c++) cs.getRange(colLetter(c0 + c) + ":" + colLetter(c0 + c)).format.columnWidth = widths[c]; };
+    setW(1);
+    cs.getRange("N:N").format.columnWidth = gapW;
+
+    // ---- main compiled list (columns A..M), header rows copied from the first sheet
+    var src = first.ws;
+    var hdrDst = cs.getRange("A" + (PAD + 1) + ":M" + (PAD + 4));
+    hdrDst.copyFrom(src.getRange("O1:AA4"), "Formats");
+    hdrDst.copyFrom(src.getRange("O1:AA4"), "Values");
+    var title = String(first.vals[1][0] || "");
+    cs.getRange("A" + (PAD + 2)).values = [[title.indexOf("Remaining Purchase List") >= 0
+      ? title.replace("Remaining Purchase List", "Compiled Purchase List (all sheets)") : "Compiled Purchase List (all sheets)"]];
+    if (n > 0) cs.getRange("A" + (PAD + 5) + ":M" + (PAD + 4 + n)).copyFrom(src.getRange("O5:AA5"), "Formats");
+    var vals = rows.map(function (r, i) {
+      return [i + 1, r.mat, r.Q, r.R, r.S, r.T, r.U, "", "", "", "", "", ""];
+    });
+    if (n > 0) cs.getRange("A" + (PAD + 5) + ":M" + (PAD + 4 + n)).values = vals;
+    var gr = PAD + 5 + n, rr = gr + 2;
+    cs.getRange("A" + gr + ":M" + gr).copyFrom(src.getRange("O" + first.gt + ":AA" + first.gt), "Formats");
+    cs.getRange("A" + rr + ":M" + rr).copyFrom(src.getRange("O" + first.rq + ":AA" + first.rq), "Formats");
+    var tot = function (k) { return Math.round(rows.reduce(function (a, r) { return a + num(r[k]); }, 0) * 1000) / 1000; };
+    var gtRow = ["", "Grand Total Weight in KG :", "", "", tot("S"), "", tot("U"), "", "", "", "", "", ""];
+    cs.getRange("A" + gr + ":M" + gr).values = [gtRow];
+    cs.getRange("A" + rr + ":M" + rr).values = [first.vals[first.rq - 1].map(function (x) { return x === null ? "" : x; })];
+
+    // ---- every sheet's own purchase list to the right, one gap column between lists
+    for (var k = 0; k < nLists; k++) {
+      var d = datas[k], c0 = 1 + STRIDE * (k + 1);       // 15, 29, 43, ...
+      setW(c0);
+      if (k < nLists) cs.getRange(colLetter(c0 + BLOCK) + ":" + colLetter(c0 + BLOCK)).format.columnWidth = gapW;
+      var dst = cs.getRange(colLetter(c0) + (PAD + 1) + ":" + colLetter(c0 + BLOCK - 1) + (PAD + d.rq));
+      dst.copyFrom(d.ws.getRange("O1:AA" + d.rq), "Formats");
+      dst.values = d.vals.slice(0, d.rq).map(function (r) { return r.map(function (x) { return x === null ? "" : x; }); });
+      var lab = cs.getRange(colLetter(c0) + PAD);
+      lab.values = [[d.name]];
+      lab.format.font.bold = true;
+    }
+    await context.sync();
+
+    cs.getRange().conditionalFormats.clearAll();      // copied "grow with the list" formats are not needed on static data
+    blockBorders(cs, 1, n);
+    datas.forEach(function (d, k) { blockBorders(cs, 1 + STRIDE * (k + 1), d.items.length); });
+    var lastCol = colLetter(1 + STRIDE * nLists + BLOCK - 1);
+    var lastRow = Math.max(rr, PAD + Math.max.apply(null, datas.map(function (d) { return d.rq; })));
+    cs.pageLayout.orientation = "Landscape";
+    cs.pageLayout.setPrintArea("A1:" + lastCol + lastRow);
+    cs.activate();
+    await context.sync();
+    try {                                              // each list prints on its own page
+      for (var p = 0; p < nLists; p++) cs.verticalPageBreaks.add(cs.getRange(colLetter(1 + STRIDE * (p + 1)) + "1"));
+      await context.sync();
+    } catch (e) { log("Note: could not add print page breaks (" + (e.message || e) + "). Set them via Page Layout > Breaks."); }
+    log("Compiled sheet created: " + n + " materials from " + nLists + " sheet(s).");
+  }
+
   /* ---------- workbook level ---------- */
   async function cleanWorkbook(context, wb) {
     wb.names.load("items/name");
@@ -378,8 +512,9 @@
     return out;
   }
 
-  async function convertWorkbook(mode, log) {
+  async function convertWorkbook(mode, log, opts) {
     log = log || function () {};
+    opts = opts || {};
     var warnings = [];
     await Excel.run(async function (context) {
       var wb = context.workbook;
@@ -394,13 +529,18 @@
           : await convertSheetFixed(context, ws, master, log);
         w.forEach(function (x) { warnings.push(ws.name + ": " + x); });
       }
+      if (opts.compiled) {
+        log("Building the compiled purchase list sheet ...");
+        try { await buildCompiled(context, wb, sheets, master, log); }
+        catch (e) { warnings.push("Compiled sheet failed: " + (e.message || e)); }
+      }
       log("Removing Master / Formulas / README sheets and named ranges ...");
       await cleanWorkbook(context, wb);
     });
     return warnings;
   }
 
-  var api = { convertWorkbook: convertWorkbook, inspectWorkbook: inspectWorkbook, plFormulas: plFormulas, CAP: CAP, PL_LAST: PL_LAST };
+  var api = { convertWorkbook: convertWorkbook, inspectWorkbook: inspectWorkbook, plFormulas: plFormulas, compileMaterials: compileMaterials, CAP: CAP, PL_LAST: PL_LAST };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomConvert = api;
 })(typeof window !== "undefined" ? window : this);
