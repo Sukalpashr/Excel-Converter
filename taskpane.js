@@ -34,13 +34,73 @@ function setDot(id, kind) {
   if (el) el.className = "dot" + (kind ? " " + kind : "");
 }
 
+var REQ_ICON_INFO = '<svg class="req-hint-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>';
+var REQ_ICON_ISSUE = '<svg class="req-hint-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
+
+function setReqHint(id, msg, isIssue) {
+  var el = $(id);
+  if (!el) return;
+  if (!msg) {
+    el.hidden = true;
+    el.innerHTML = "";
+    el.className = "req-hint";
+    return;
+  }
+  el.hidden = false;
+  el.className = "req-hint" + (isIssue ? " issue" : "");
+  el.innerHTML = (isIssue ? REQ_ICON_ISSUE : REQ_ICON_INFO) + '<span class="req-hint-text"></span>';
+  el.lastChild.textContent = msg;
+}
+
+function setFieldIssue(id, hasIssue) {
+  var el = $(id);
+  if (!el) return;
+  if (hasIssue) el.classList.add("field-issue");
+  else el.classList.remove("field-issue");
+}
+
 function updateButtons() {
-  if ($("convert")) $("convert").disabled = state.busy || !state.ok || !$("iscopy").checked;
+  var isCopy = $("iscopy") ? $("iscopy").checked : false;
+  var restPicked = getPickedSheets("rest-sheets").length;
+  var shRepPicked = getPickedSheets("sh-repair-sheets").length;
+  var homeRepPicked = getPickedSheets("home-repair-sheets").length;
+
+  if ($("convert")) $("convert").disabled = state.busy || !state.ok || !isCopy;
   if ($("copy")) $("copy").disabled = state.busy;
   if ($("rest-copy")) $("rest-copy").disabled = state.busy;
-  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !getPickedSheets("rest-sheets").length;
-  if ($("sh-repair")) $("sh-repair").disabled = state.busy || !getPickedSheets("sh-repair-sheets").length;
-  if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy || !getPickedSheets("home-repair-sheets").length;
+  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !restPicked;
+  if ($("sh-repair")) $("sh-repair").disabled = state.busy || !shRepPicked;
+  if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy || !homeRepPicked;
+
+  if (!state.ok) {
+    setReqHint("conv-req-hint", "Open an automated BOM workbook to flatten.", false);
+  } else if (!isCopy) {
+    setReqHint("conv-req-hint", "Tick the copy confirmation box above to enable conversion.", false);
+  } else {
+    setReqHint("conv-req-hint", "", false);
+  }
+
+  if (!state.canRestore) {
+    setReqHint("rest-req-hint", "No converted BOM sheets found to restore.", false);
+  } else if (!restPicked) {
+    setReqHint("rest-req-hint", "Select at least one sheet above to restore.", true);
+  } else {
+    setReqHint("rest-req-hint", "", false);
+  }
+
+  var homeRepBox = $("home-repair-sheets");
+  if (homeRepBox && !homeRepBox.hidden && !homeRepPicked) {
+    setReqHint("home-repair-hint", "Select at least one BOM sheet to repair.", true);
+  } else {
+    setReqHint("home-repair-hint", "", false);
+  }
+
+  var shRepBox = $("sh-repair-sheets");
+  if (shRepBox && !shRepBox.hidden && !shRepPicked) {
+    setReqHint("sh-repair-hint", "Select at least one BOM sheet to repair.", true);
+  } else {
+    setReqHint("sh-repair-hint", "", false);
+  }
 }
 
 /* Reusable compact checklist for selecting detected sheets (used by Repair & Restore) */
@@ -211,111 +271,49 @@ async function refreshHome() {
 }
 
 /* =====================================================================
- * Local Master File (This Computer — Layman Friendly, No Token Needed)
+ * Built-in Computer Storage (Always Auto-Connected) + JSON Backup / Transfer
  * ===================================================================== */
 async function refreshLocalFileStatus() {
   var st = $("local-status");
   var tag = $("local-summary-tag");
   var homeSt = $("home-local-status");
-  var homeReRow = $("home-reconnect-row");
-  var shSt = $("sh-local-status"), shRe = $("sh-reconnect");
-  var reBtn = $("local-reconnect"), pullBtn = $("local-pull"), saveBtn = $("local-save"), unBtn = $("local-unlink");
-  var createBtn = $("local-create"), openBtn = $("local-open"), fb = $("local-fallback");
+  var shSt = $("sh-local-status");
+  var pullBtn = $("local-pull"), saveBtn = $("local-save");
 
   try {
+    if (BomSync.ensureSeededFromWorkbook) {
+      await BomSync.ensureSeededFromWorkbook();
+    }
     var info = await BomSync.getLocalFileStatus();
-    if (!info.supported) {
-      if (createBtn) createBtn.hidden = true;
-      if (openBtn) openBtn.hidden = true;
-      if (fb) fb.hidden = false;
-    } else {
-      if (createBtn) createBtn.hidden = false;
-      if (openBtn) openBtn.hidden = false;
-      if (fb) fb.hidden = true;
-    }
-
-    var needsPerm = info.linked && info.permission !== "granted";
-    if (reBtn) reBtn.hidden = !needsPerm;
-    if (shRe) shRe.hidden = !needsPerm;
-    if (homeReRow) homeReRow.hidden = !needsPerm;
-    if (unBtn) unBtn.hidden = !info.linked;
-
-    if (info.linked) {
-      if (needsPerm) {
-        if (st) { st.className = "status warn"; st.textContent = "Linked to \"" + info.fileName + "\" — click Reconnect once after restarting Excel."; }
-        if (tag) { tag.className = "sum-meta warn"; tag.textContent = "Reconnect"; }
-        if (homeSt) homeSt.textContent = "Saved materials file (\"" + info.fileName + "\") needs 1-click reconnect.";
-        if (shSt) shSt.textContent = "Saved file \"" + info.fileName + "\" needs reconnect to read latest edits.";
-      } else {
-        if (st) { st.className = "status ok"; st.textContent = "Auto-saving to \"" + info.fileName + "\" (" + info.cachedCount + " materials)."; }
-        if (tag) { tag.className = "sum-meta ok"; tag.textContent = info.fileName; }
-        if (homeSt) homeSt.textContent = "Master list auto-saves to \"" + info.fileName + "\" (" + info.cachedCount + " items).";
-        if (shSt) shSt.textContent = "Using saved file \"" + info.fileName + "\" (" + info.cachedCount + " items).";
+    if (info.hasCache) {
+      if (st) {
+        st.className = "status ok";
+        st.textContent = "Auto-saving in built-in storage (" + info.cachedCount + " materials) — never asks to reconnect.";
       }
-    } else if (info.hasCache) {
-      if (st) { st.className = "status ok"; st.textContent = "Remembered on this computer (" + info.cachedCount + " materials). Pick a folder below if you also want a visible file on disk."; }
       if (tag) { tag.className = "sum-meta ok"; tag.textContent = info.cachedCount + " saved"; }
-      if (homeSt) homeSt.textContent = "Master list saved on this computer (" + info.cachedCount + " items).";
-      if (shSt) shSt.textContent = "Using saved materials on this computer (" + info.cachedCount + " items).";
+      if (homeSt) homeSt.textContent = "Master list auto-saves on this computer (" + info.cachedCount + " items).";
+      if (shSt) shSt.textContent = "Auto-connected to built-in storage (" + info.cachedCount + " items).";
     } else {
-      if (st) { st.className = "status"; st.textContent = "Not linked to a file yet. Click \"Choose where to save...\" to start."; }
-      if (tag) { tag.className = "sum-meta"; tag.textContent = "Optional"; }
-      if (homeSt) homeSt.textContent = "Tip: You can save your Master list to a file on your computer under Materials.";
-      if (shSt) shSt.textContent = "No saved file on this computer yet (optional — set up under Materials).";
+      if (st) {
+        st.className = "status";
+        st.textContent = "Built-in storage is ready. Open a BOM workbook or import a JSON backup to populate it.";
+      }
+      if (tag) { tag.className = "sum-meta"; tag.textContent = "Auto-saved"; }
+      if (homeSt) homeSt.textContent = "Master list will auto-save on this computer once a BOM is opened.";
+      if (shSt) shSt.textContent = "Built-in storage ready — materials auto-save on this computer.";
     }
 
-    if (pullBtn) pullBtn.disabled = state.busy || (!info.linked && !info.hasCache);
+    if (pullBtn) pullBtn.disabled = state.busy || !info.hasCache || !mat.hasMaster;
     if (saveBtn) saveBtn.disabled = state.busy || !mat.rows.length;
   } catch (e) {
-    if (st) { st.className = "status warn"; st.textContent = "Could not check saved file: " + (e.message || e); }
+    if (st) { st.className = "status warn"; st.textContent = "Could not check built-in storage: " + (e.message || e); }
   }
-}
-
-async function localReconnect() {
-  state.busy = true;
-  try {
-    var ok = await BomSync.requestLocalPermission();
-    localLog(ok ? "Saved file reconnected." : "Permission was not granted.", true);
-    if (state.activeTab === "sheet") shLog(ok ? "Saved file reconnected." : "Permission was not granted.", true);
-  } catch (e) {
-    localLog("Could not reconnect: " + (e.message || e), true);
-  }
-  state.busy = false;
-  await refreshLocalFileStatus();
-}
-
-async function localCreateFile() {
-  state.busy = true; localLog("", true);
-  try {
-    var res = await BomSync.linkNewLocalFile(localLog);
-    if (res) localLog("Done! Your materials will now auto-save to \"" + res.fileName + "\" (" + res.count + " items).");
-  } catch (e) {
-    if (e && e.name !== "AbortError") localLog("Could not create file: " + (e.message || e));
-  }
-  state.busy = false;
-  await refreshLocalFileStatus();
-}
-
-async function localOpenFile() {
-  state.busy = true; localLog("", true);
-  try {
-    var res = await BomSync.linkExistingLocalFile(localLog, { applyToWorkbook: true });
-    if (res) {
-      var list = await BomSync.workbookList();
-      BomSync.updateWatchSnap(list);
-    }
-  } catch (e) {
-    if (e && e.name !== "AbortError") localLog("Could not open file: " + (e.message || e));
-  }
-  state.busy = false;
-  await refreshMaterials();
-  await refreshLocalFileStatus();
 }
 
 async function localPull() {
   state.busy = true; localLog("", true);
   try {
-    await BomSync.pullLocal(localLog, { allowPrompt: true, syncRemovals: true });
+    await BomSync.pullLocal(localLog, { syncRemovals: true });
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
   } catch (e) {
@@ -329,10 +327,7 @@ async function localPull() {
 async function localSave() {
   state.busy = true; localLog("", true);
   try {
-    var res = await BomSync.saveWorkbookToLocal(localLog, { allowPrompt: true });
-    if (!res.savedToFile && !res.needsPermission) {
-      localLog("Saved " + res.count + " materials on this computer. Click \"Choose where to save...\" to also store a visible file on disk.");
-    }
+    await BomSync.saveWorkbookToLocal(localLog, {});
   } catch (e) {
     localLog("Save failed: " + (e.message || e));
   }
@@ -340,25 +335,38 @@ async function localSave() {
   await refreshLocalFileStatus();
 }
 
-async function localUnlink() {
-  await BomSync.unlinkLocalFile();
-  localLog("Disconnected local file (materials remain remembered in this computer's cache).", true);
-  await refreshLocalFileStatus();
-}
-
 async function localExportDownload() {
+  localLog("", true);
   try {
-    var list = await BomSync.workbookList();
-    var json = BomSync.serialize(list);
-    var blob = new Blob([json], { type: "application/json;charset=utf-8" });
+    var exp = await BomSync.buildExportJson();
+    if (!exp.count) {
+      localLog("No materials to export yet. Open a BOM workbook or add materials first.");
+      return;
+    }
+    if (BomSync.supportsSavePicker && BomSync.supportsSavePicker()) {
+      try {
+        var handle = await window.showSaveFilePicker({
+          suggestedName: "master-materials.json",
+          types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
+        });
+        var writable = await handle.createWritable();
+        await writable.write(exp.json);
+        await writable.close();
+        localLog("Exported \"" + handle.name + "\" (" + exp.count + " materials) for backup or transfer.");
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+      }
+    }
+    var blob = new Blob([exp.json], { type: "application/json;charset=utf-8" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
     a.href = url; a.download = "master-materials.json";
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    localLog("Downloaded master-materials.json (" + list.length + " materials).", true);
+    localLog("Exported master-materials.json (" + exp.count + " materials) for backup or transfer.");
   } catch (e) {
-    localLog("Download failed: " + (e.message || e), true);
+    localLog("Export failed: " + (e.message || e));
   }
 }
 
@@ -368,9 +376,13 @@ async function localImportFile(ev) {
   state.busy = true; localLog("", true);
   try {
     var text = await file.text();
-    await BomSync.importLocalJsonText(text, file.name, localLog);
-    var list = await BomSync.workbookList();
-    BomSync.updateWatchSnap(list);
+    var res = await BomSync.importLocalJsonText(text, file.name, localLog);
+    if (!res || !res.savedOnly) {
+      try {
+        var list = await BomSync.workbookList();
+        BomSync.updateWatchSnap(list);
+      } catch (e2) { /* ignore if workbook has no Master sheet */ }
+    }
   } catch (e) {
     localLog("Import failed: " + (e.message || e));
   }
@@ -444,11 +456,41 @@ async function refreshSheets() {
 }
 
 function updateSheetButton() {
-  $("sh-add").disabled = state.busy || !sheetInfo || (!sheetInfo.bomSheets.length && !sheetInfo.needsTemplate) || !$("sh-name").value.trim();
+  var addBtn = $("sh-add");
+  setFieldIssue("sh-name", false);
+
+  if (!sheetInfo || (!sheetInfo.bomSheets.length && !sheetInfo.needsTemplate)) {
+    if (addBtn) addBtn.disabled = true;
+    setReqHint("sh-req-hint", "Open a BOM workbook or restore converted sheets first.", false);
+    updateButtons();
+    return;
+  }
+
+  var raw = $("sh-name") ? $("sh-name").value : "";
+  if (!raw.trim()) {
+    if (addBtn) addBtn.disabled = true;
+    setReqHint("sh-req-hint", "Enter a sheet name to continue.", false);
+    updateButtons();
+    return;
+  }
+
+  var nameErr = BomTools.checkSheetName(raw, sheetInfo.allSheets);
+  if (nameErr) {
+    if (addBtn) addBtn.disabled = true;
+    setFieldIssue("sh-name", true);
+    setReqHint("sh-req-hint", nameErr, true);
+    updateButtons();
+    return;
+  }
+
+  setReqHint("sh-req-hint", "", false);
+  if (addBtn) addBtn.disabled = state.busy;
   updateButtons();
 }
 
 async function addSheet() {
+  updateSheetButton();
+  if ($("sh-add").disabled) return;
   state.busy = true; updateSheetButton(); updateButtons();
   shLog("", true);
   try {
@@ -459,12 +501,12 @@ async function addSheet() {
     }
     if ($("sh-sync").checked) {
       try {
-        var localRes = await BomSync.pullLocal(shLog, { allowPrompt: true, syncRemovals: true });
+        var localRes = await BomSync.pullLocal(shLog, { syncRemovals: true });
         if (localRes && localRes.empty && BomSync.hasToken()) {
           await BomSync.pull(shLog);
         }
       } catch (e) {
-        shLog("Note: could not load local materials file (" + (e.message || e) + "). Using workbook list.");
+        shLog("Note: could not load saved materials (" + (e.message || e) + "). Using workbook list.");
       }
     }
     var r = await BomTools.addBomSheet({
@@ -507,6 +549,7 @@ async function repairWorkbook(logger, pickerId) {
 var TOAST_DURATION_MS = 5500;
 var mat = {
   rows: [],
+  hasMaster: false,
   mode: "add",
   selected: null,
   sessionLog: [],
@@ -726,9 +769,7 @@ function showChangeToast(evt) {
   }
 
   if (whereEl) {
-    whereEl.textContent = evt.savedToFile && evt.fileName
-      ? ("Saved to " + evt.fileName + " & Master sheet")
-      : (evt.needsPermission ? "Saved to Master sheet & cache (reconnect file)" : "Saved to Master sheet & local cache");
+    whereEl.textContent = "Saved to Master sheet & this computer";
   }
   if (hintEl) hintEl.textContent = anyClickable ? "Click to edit" : "";
 
@@ -870,9 +911,7 @@ function recordAutoSave(evt) {
   var normalizedEvt = {
     source: evt.source || "panel",
     time: nowIso,
-    savedToFile: !!evt.savedToFile,
-    fileName: evt.fileName || "",
-    needsPermission: !!evt.needsPermission,
+    savedToBuiltIn: true,
     items: normalizedItems
   };
 
@@ -905,6 +944,80 @@ function resetDeleteConfirm() {
   if ($("m-delete")) $("m-delete").textContent = "Remove";
 }
 
+function updateMatValidation() {
+  var saveBtn = $("m-save");
+  ["m-name", "m-unit", "m-lin", "m-area", "m-sl", "m-sw", "m-piece"].forEach(function (id) {
+    setFieldIssue(id, false);
+  });
+
+  if (!mat.hasMaster) {
+    if (saveBtn) saveBtn.disabled = true;
+    setReqHint("mat-req-hint", "Open a workbook with a Master sheet (or add a BOM sheet first).", false);
+    return { ready: false };
+  }
+
+  var missing = [];
+  var issues = [];
+
+  var rawName = $("m-name") ? $("m-name").value.trim() : "";
+  if (!rawName) {
+    missing.push("Material name");
+  } else if (rawName.charAt(0) === "=") {
+    issues.push("Material name cannot start with '='.");
+    setFieldIssue("m-name", true);
+  } else if (mat.mode === "add") {
+    var exists = mat.rows.some(function (r) {
+      return r.material.toLowerCase() === rawName.toLowerCase();
+    });
+    if (exists) {
+      issues.push("\"" + rawName + "\" already exists. Click it above to edit.");
+      setFieldIssue("m-name", true);
+    }
+  }
+
+  var u = $("m-unit") ? $("m-unit").value : "";
+  var checkPosField = function (id, label) {
+    var val = $(id) ? $(id).value.trim() : "";
+    if (!val) {
+      missing.push(label);
+      return;
+    }
+    var n = Number(val.replace(/,/g, ""));
+    if (!isFinite(n) || n <= 0) {
+      issues.push(label + " must be greater than 0.");
+      setFieldIssue(id, true);
+    }
+  };
+
+  if (!u) {
+    missing.push("Primary unit");
+  } else if (u === "kg/m") {
+    checkPosField("m-lin", "Linear weight (kg/m)");
+  } else if (u === "kg/each") {
+    checkPosField("m-piece", "Piece weight (kg/each)");
+  } else if (u === "kg/m²") {
+    checkPosField("m-area", "Area weight (kg/m²)");
+    checkPosField("m-sl", "Sheet length (mm)");
+    checkPosField("m-sw", "Sheet width (mm)");
+  }
+
+  if (issues.length) {
+    if (saveBtn) saveBtn.disabled = true;
+    setReqHint("mat-req-hint", issues[0], true);
+    return { ready: false };
+  }
+  if (missing.length) {
+    if (saveBtn) saveBtn.disabled = true;
+    var prefix = mat.mode === "edit" ? "Required to save: " : "Required to add: ";
+    setReqHint("mat-req-hint", prefix + missing.join(", "), false);
+    return { ready: false };
+  }
+
+  setReqHint("mat-req-hint", "", false);
+  if (saveBtn) saveBtn.disabled = state.busy;
+  return { ready: true };
+}
+
 function setMatMode(mode, row) {
   mat.mode = mode; mat.selected = row || null;
   resetDeleteConfirm();
@@ -922,6 +1035,7 @@ function setMatMode(mode, row) {
   unitFields();
   updateMoreOptionsMeta();
   renderMatList();
+  updateMatValidation();
 }
 
 function renderMatList() {
@@ -987,6 +1101,7 @@ async function refreshMaterials(keepName) {
   try {
     var res = await BomTools.listMaterials();
     mat.rows = res.rows;
+    mat.hasMaster = true;
     var dl = $("m-cats"); dl.innerHTML = "";
     res.categories.forEach(function (c) { var o = document.createElement("option"); o.value = c; dl.appendChild(o); });
     var incompleteCount = res.rows.filter(function (r) { return !BomTools.getMaterialValidationStatus(r).valid; }).length;
@@ -994,13 +1109,13 @@ async function refreshMaterials(keepName) {
     var again = keepName && res.rows.filter(function (r) { return r.material.toLowerCase() === keepName.toLowerCase(); })[0];
     if (again) setMatMode("edit", again);
     else if (mat.mode === "edit" && mat.selected) setMatMode("add");
-    else renderMatList();
-    $("m-save").disabled = false;
+    else { renderMatList(); updateMatValidation(); }
   } catch (e) {
     mat.rows = [];
+    mat.hasMaster = false;
     st.textContent = "No Master sheet in workbook";
     renderMatList();
-    $("m-save").disabled = true;
+    updateMatValidation();
   }
 }
 
@@ -1011,12 +1126,16 @@ function readMatForm() {
 }
 
 async function saveMaterial() {
+  if (!updateMatValidation().ready) return;
   var raw = readMatForm();
   matLog("", true);
   var norm = BomTools.normalizeMaterial(raw);
   var pre = BomTools.validateMaterial(norm,
     mat.rows.map(function (r) { return r.material; }), mat.mode);
-  if (pre.length) { pre.forEach(function (m) { matLog(m); }); return; }
+  if (pre.length) {
+    setReqHint("mat-req-hint", pre[0], true);
+    return;
+  }
   state.busy = true; $("m-save").disabled = true;
   try {
     var wasEdit = mat.mode === "edit";
@@ -1030,7 +1149,6 @@ async function saveMaterial() {
     var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
 
     var list = await BomSync.workbookList();
-    // Preserve ISO timestamp on the changed item in JSON
     list.forEach(function (item) {
       if (item.material.toLowerCase() === r.material.toLowerCase()) {
         item.lastAction = changeType;
@@ -1038,19 +1156,17 @@ async function saveMaterial() {
       }
     });
     BomSync.updateWatchSnap(list);
-    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true, lastChange: lastChange });
+    await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
 
     recordAutoSave({
       source: "panel",
       time: nowIso,
-      savedToFile: !!(writeRes && writeRes.savedToFile),
-      fileName: (writeRes && writeRes.fileName) || "",
-      needsPermission: !!(writeRes && writeRes.needsPermission),
+      savedToBuiltIn: true,
       items: changeItems
     });
     if (BomSync.hasToken()) {
       try { await BomSync.push(matLog, { only: r.material }); }
-      catch (e) { matLog("Saved locally; GitHub publish skipped (" + (e.message || e) + ")."); }
+      catch (e) { matLog("Saved on this computer; GitHub publish skipped (" + (e.message || e) + ")."); }
     }
     var keep = wasEdit ? r.material : null;
     state.busy = false;
@@ -1060,7 +1176,8 @@ async function saveMaterial() {
   } catch (e) {
     matLog("Failed: " + (e.message || JSON.stringify(e)));
   }
-  state.busy = false; $("m-save").disabled = false;
+  state.busy = false;
+  updateMatValidation();
 }
 
 async function removeMaterial() {
@@ -1083,13 +1200,11 @@ async function removeMaterial() {
     var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
-    var writeRes = await BomSync.writeLocalMaster(list, matLog, { allowPrompt: true, lastChange: lastChange });
+    await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
     recordAutoSave({
       source: "panel",
       time: nowIso,
-      savedToFile: !!(writeRes && writeRes.savedToFile),
-      fileName: (writeRes && writeRes.fileName) || "",
-      needsPermission: !!(writeRes && writeRes.needsPermission),
+      savedToBuiltIn: true,
       items: changeItems
     });
     state.busy = false;
@@ -1099,8 +1214,10 @@ async function removeMaterial() {
   } catch (e) {
     matLog("Remove failed: " + (e.message || JSON.stringify(e)));
   }
-  state.busy = false; $("m-save").disabled = false; $("m-delete").disabled = false;
+  state.busy = false;
+  if ($("m-delete")) $("m-delete").disabled = false;
   resetDeleteConfirm();
+  updateMatValidation();
 }
 
 /* =====================================================================
@@ -1263,7 +1380,7 @@ async function refreshSync() {
     var canPush = d.onlyWb.length + d.changed.length > 0;
     if (d.remoteMissing || !d.remoteCount) {
       st.className = "status";
-      st.textContent = "No GitHub materials.json published (use Save Master List on This Computer above instead).";
+      st.textContent = "No GitHub materials.json published (built-in computer storage is already active above).";
     } else if (!canPull && !canPush) {
       st.className = "status ok";
       st.textContent = "In sync with GitHub (" + d.remoteCount + " materials).";
@@ -1310,19 +1427,23 @@ Office.onReady(function (info) {
   $("qa-mat").onclick = function () { showTab("mat"); };
   $("qa-flatten").onclick = function () { showTab("convert", { submode: "flatten" }); };
   $("qa-restore").onclick = function () { showTab("convert", { submode: "restore" }); };
-  $("home-reconnect").onclick = localReconnect;
   $("home-repair-btn").onclick = function () { repairWorkbook(homeRepairLog, "home-repair-sheets"); };
 
   // Add sheet
   $("sh-add").onclick = addSheet;
   $("sh-repair").onclick = function () { repairWorkbook(shLog, "sh-repair-sheets"); };
-  $("sh-reconnect").onclick = localReconnect;
   $("sh-name").oninput = updateSheetButton;
   $("sh-source").onchange = setSheetClearDefault;
 
-  // Materials
+  // Materials (live primary-requirement validation)
   $("mat-search").oninput = renderMatList;
-  $("m-unit").onchange = unitFields;
+  $("m-name").oninput = updateMatValidation;
+  $("m-unit").onchange = function () { unitFields(); updateMatValidation(); };
+  $("m-lin").oninput = updateMatValidation;
+  $("m-area").oninput = updateMatValidation;
+  $("m-sl").oninput = updateMatValidation;
+  $("m-sw").oninput = updateMatValidation;
+  $("m-piece").oninput = updateMatValidation;
   $("m-cat").oninput = updateMoreOptionsMeta;
   $("m-rem").oninput = updateMoreOptionsMeta;
   $("m-save").onclick = saveMaterial;
@@ -1343,13 +1464,9 @@ Office.onReady(function (info) {
     renderMatList();
   };
 
-  // Local master file controls
-  $("local-reconnect").onclick = localReconnect;
-  $("local-create").onclick = localCreateFile;
-  $("local-open").onclick = localOpenFile;
+  // Built-in storage + JSON backup / transfer controls
   $("local-pull").onclick = localPull;
   $("local-save").onclick = localSave;
-  $("local-unlink").onclick = localUnlink;
   $("local-export-btn").onclick = localExportDownload;
   $("local-import-btn").onclick = function () { $("local-import-input").click(); };
   $("local-import-input").onchange = localImportFile;

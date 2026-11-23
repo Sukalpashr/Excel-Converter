@@ -1,12 +1,13 @@
-/* sync.js - local computer master file (no token required) + optional GitHub sync + template import for BOM Tools.
+/* sync.js - always-on Built-in Add-in Storage (OPFS + IndexedDB + localStorage, zero reconnects)
+ * + JSON backup/transfer + optional GitHub sync + clean template import for BOM Tools.
  *
- * Local Master File flow:
- * 1. Pick or create a local JSON file (e.g. master-materials.json) on your computer via the File System Access API
- *    (supported in Excel for Windows WebView2 and Excel on the Web in Edge/Chrome).
- * 2. The file handle is remembered in IndexedDB and a backup snapshot is stored in local computer storage.
- * 3. Every add, edit, or removal updates the local file automatically (including edits made directly on the Master sheet).
- * 4. Whenever you create a new BOM sheet or add a BOM to a non-BOM workbook, the workbook's Master Unique Materials
- *    table is updated automatically from your local file (additions, edits, and removals) before the sheet is added.
+ * Built-in Computer Storage flow:
+ * 1. Materials are saved automatically inside Excel's persistent add-in storage on this computer
+ *    (Origin Private File System + IndexedDB + localStorage) — no file picker, no reconnect prompts, no token.
+ * 2. Every add, edit, or removal updates built-in storage automatically (including edits made directly on the Master sheet).
+ * 3. Whenever you create a new BOM sheet, add a BOM to a non-BOM workbook, or restore a converted BOM,
+ *    the workbook's Master Unique Materials table syncs automatically from built-in storage.
+ * 4. Export / Import JSON anytime to back up your list or transfer it to another computer.
  */
 (function (root) {
   "use strict";
@@ -24,6 +25,7 @@
   var IDB_STORE = "kv";
   var IDB_HANDLE_KEY = "localMasterHandle";
   var IDB_JSON_KEY = "localMasterJson";
+  var OPFS_FILE = "master-materials.json";
 
   var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
   var INPUT_KEYS = ["material"].concat(FIELDS);
@@ -137,15 +139,49 @@
     return btoa(s);
   }
 
-  /* ---------------- IndexedDB & Local Computer Master File ---------------- */
-  function supportsLocalFileApi() {
-    return typeof window !== "undefined" &&
-      typeof window.showOpenFilePicker === "function" &&
-      typeof window.showSaveFilePicker === "function";
+  /* ---------------- Built-in Add-in Storage (OPFS + IndexedDB + localStorage — Zero Reconnects) ---------------- */
+  function supportsOpfs() {
+    return typeof navigator !== "undefined" &&
+      navigator.storage &&
+      typeof navigator.storage.getDirectory === "function";
+  }
+
+  function supportsSavePicker() {
+    return typeof window !== "undefined" && typeof window.showSaveFilePicker === "function";
+  }
+
+  function requestPersistentStorage() {
+    try {
+      if (typeof navigator !== "undefined" && navigator.storage && typeof navigator.storage.persist === "function") {
+        navigator.storage.persist().catch(noop);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  async function opfsWriteJson(json) {
+    if (!supportsOpfs()) return false;
+    try {
+      var dir = await navigator.storage.getDirectory();
+      var fh = await dir.getFileHandle(OPFS_FILE, { create: true });
+      var w = await fh.createWritable();
+      await w.write(json);
+      await w.close();
+      return true;
+    } catch (e) { return false; }
+  }
+
+  async function opfsReadJson() {
+    if (!supportsOpfs()) return null;
+    try {
+      var dir = await navigator.storage.getDirectory();
+      var fh = await dir.getFileHandle(OPFS_FILE);
+      var f = await fh.getFile();
+      return await f.text();
+    } catch (e) { return null; }
   }
 
   function openLocalDb() {
-    return new Promise(function (resolve, reject) {
+    return new Promise(function (resolve) {
       if (typeof indexedDB === "undefined") return resolve(null);
       try {
         var req = indexedDB.open(IDB_NAME, 1);
@@ -205,232 +241,145 @@
     } catch (e) { return null; }
   }
 
-  async function saveLocalCache(list, fileName, lastChange) {
+  async function saveLocalCache(list, lastChange) {
+    requestPersistentStorage();
     var existingMeta = getCachedMeta();
-    var lcMeta = lastChange ? buildLastChangeMeta(lastChange) || lastChange : (existingMeta && existingMeta.lastChange) || null;
+    var lcMeta = lastChange ? (buildLastChangeMeta(lastChange) || lastChange) : (existingMeta && existingMeta.lastChange) || null;
     var json = serialize(list, lcMeta);
     var meta = {
       count: list.length,
       updated: new Date().toISOString(),
-      fileName: fileName || (existingMeta && existingMeta.fileName) || "",
       lastChange: lcMeta
     };
     try {
       localStorage.setItem(LOCAL_CACHE_KEY, json);
       localStorage.setItem(LOCAL_META_KEY, JSON.stringify(meta));
     } catch (e) { /* storage may be restricted */ }
-    await idbSet(IDB_JSON_KEY, json);
+    await Promise.all([
+      idbSet(IDB_JSON_KEY, json),
+      opfsWriteJson(json)
+    ]);
+    // Clean up any legacy external file handle from earlier versions so Excel never asks to reconnect
+    try { await idbDel(IDB_HANDLE_KEY); } catch (e) { /* ignore */ }
     return { json: json, meta: meta };
   }
 
   async function readLocalCache() {
-    var json = null;
-    try { json = localStorage.getItem(LOCAL_CACHE_KEY); } catch (e) { json = null; }
+    var json = await opfsReadJson();
     if (!json) json = await idbGet(IDB_JSON_KEY);
+    if (!json) {
+      try { json = localStorage.getItem(LOCAL_CACHE_KEY); } catch (e) { json = null; }
+    }
     if (!json) return null;
     try {
       var parsed = parsePayload(json);
-      return { list: parsed.list, lastChange: parsed.lastChange, meta: getCachedMeta() };
+      return { list: parsed.list, updated: parsed.updated, lastChange: parsed.lastChange, meta: getCachedMeta() };
     } catch (e) { return null; }
   }
 
-  async function getLocalFileHandle() {
-    if (!supportsLocalFileApi()) return null;
-    try { return await idbGet(IDB_HANDLE_KEY); } catch (e) { return null; }
-  }
-
-  async function queryHandlePermission(handle, mode) {
-    if (!handle || typeof handle.queryPermission !== "function") return "prompt";
-    try { return await handle.queryPermission({ mode: mode || "readwrite" }); }
-    catch (e) { return "prompt"; }
-  }
-
-  async function requestHandlePermission(handle, mode) {
-    if (!handle || typeof handle.requestPermission !== "function") return "denied";
-    try { return await handle.requestPermission({ mode: mode || "readwrite" }); }
-    catch (e) { return "denied"; }
-  }
-
   async function getLocalFileStatus() {
-    var supported = supportsLocalFileApi();
-    var handle = await getLocalFileHandle();
     var cache = await readLocalCache();
-    var perm = handle ? await queryHandlePermission(handle, "readwrite") : "none";
+    var count = cache && cache.list ? cache.list.length : 0;
     return {
-      supported: supported,
-      linked: !!handle,
-      fileName: handle ? handle.name : ((cache && cache.meta && cache.meta.fileName) || ""),
-      permission: perm,
-      hasCache: !!(cache && cache.list && cache.list.length),
-      cachedCount: cache && cache.list ? cache.list.length : 0,
-      cachedUpdated: (cache && cache.meta && cache.meta.updated) || ""
+      ready: true,
+      hasCache: count > 0,
+      cachedCount: count,
+      cachedUpdated: (cache && (cache.updated || (cache.meta && cache.meta.updated))) || "",
+      lastChange: (cache && cache.lastChange) || (cache && cache.meta && cache.meta.lastChange) || null,
+      opfsSupported: supportsOpfs()
     };
   }
 
-  async function requestLocalPermission() {
-    var handle = await getLocalFileHandle();
-    if (!handle) return false;
-    var p = await requestHandlePermission(handle, "readwrite");
-    return p === "granted";
-  }
-
-  async function unlinkLocalFile() {
-    await idbDel(IDB_HANDLE_KEY);
-    return true;
-  }
-
-  /* Save a list directly to the linked local file on disk + local computer cache */
+  /* Always saves automatically to Built-in Add-in Storage (OPFS + IndexedDB + localStorage) with zero prompts */
   async function writeLocalMaster(list, log, opts) {
     log = log || noop;
     opts = opts || {};
     var normalized = list.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
-    var handle = await getLocalFileHandle();
-    var saved = await saveLocalCache(normalized, handle ? handle.name : "", opts.lastChange || null);
-
-    if (!handle) {
-      return { savedToFile: false, savedToCache: true, fileName: "", needsPermission: false, count: normalized.length };
-    }
-
-    var perm = await queryHandlePermission(handle, "readwrite");
-    if (perm !== "granted" && opts.allowPrompt) {
-      perm = await requestHandlePermission(handle, "readwrite");
-    }
-    if (perm !== "granted") {
-      log("Saved in local add-in cache (" + normalized.length + " materials). Click \"Reconnect local file\" to write directly to " + handle.name + ".");
-      return { savedToFile: false, savedToCache: true, fileName: handle.name, needsPermission: true, count: normalized.length };
-    }
-
-    try {
-      var writable = await handle.createWritable();
-      await writable.write(saved.json);
-      await writable.close();
-      log("Saved " + normalized.length + " materials to local file \"" + handle.name + "\".");
-      return { savedToFile: true, savedToCache: true, fileName: handle.name, needsPermission: false, count: normalized.length };
-    } catch (e) {
-      log("Saved in local cache, but writing to \"" + handle.name + "\" failed: " + (e.message || e));
-      return { savedToFile: false, savedToCache: true, fileName: handle.name, needsPermission: false, error: e.message || String(e), count: normalized.length };
-    }
+    var saved = await saveLocalCache(normalized, opts.lastChange || null);
+    return {
+      savedToBuiltIn: true,
+      count: normalized.length,
+      json: saved.json
+    };
   }
 
-  /* Read the authoritative local master list (prefers linked disk file, falls back to computer cache) */
-  async function readLocalMaster(opts) {
-    opts = opts || {};
-    var handle = await getLocalFileHandle();
-    if (handle) {
-      var perm = await queryHandlePermission(handle, "read");
-      if (perm !== "granted" && opts.allowPrompt) {
-        perm = await requestHandlePermission(handle, "readwrite");
-      }
-      if (perm === "granted") {
-        try {
-          var file = await handle.getFile();
-          var text = await file.text();
-          var parsed = parsePayload(text);
-          await saveLocalCache(parsed.list, handle.name, parsed.lastChange);
-          return { list: parsed.list, lastChange: parsed.lastChange, source: "file", fileName: handle.name, needsPermission: false };
-        } catch (e) {
-          // fall through to cache if file temporarily unreadable
-        }
-      } else {
-        var cached = await readLocalCache();
-        return {
-          list: cached ? cached.list : [],
-          lastChange: cached ? cached.lastChange : null,
-          source: cached ? "cache" : "none",
-          fileName: handle.name,
-          needsPermission: true
-        };
-      }
-    }
+  /* Reads the authoritative Built-in Add-in Storage list (auto-connected, never prompts) */
+  async function readLocalMaster() {
     var c = await readLocalCache();
-    if (c && c.list) {
-      return { list: c.list, lastChange: c.lastChange || null, source: "cache", fileName: (c.meta && c.meta.fileName) || "", needsPermission: false };
+    if (c && c.list && c.list.length) {
+      return { list: c.list, lastChange: c.lastChange || null, source: "builtin" };
     }
-    return { list: [], lastChange: null, source: "none", fileName: "", needsPermission: false };
+    return { list: [], lastChange: null, source: "none" };
   }
 
-  /* Create/link a new local master-materials.json file on disk from the current workbook */
-  async function linkNewLocalFile(log) {
-    log = log || noop;
-    if (!supportsLocalFileApi()) {
-      throw new Error("This version of Excel does not allow direct file saving. Use Download JSON / Load JSON below instead.");
-    }
-    var handle = await window.showSaveFilePicker({
-      suggestedName: "master-materials.json",
-      types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
-    });
-    await idbSet(IDB_HANDLE_KEY, handle);
-    var wb = await workbookList();
-    var res = await writeLocalMaster(wb, log, { allowPrompt: true });
-    return { fileName: handle.name, count: res.count };
+  /* Seeds Built-in Storage once from the open workbook if storage is currently empty */
+  async function ensureSeededFromWorkbook() {
+    var c = await readLocalCache();
+    if (c && c.list && c.list.length) return { seeded: false, count: c.list.length };
+    try {
+      var wb = await workbookList();
+      if (wb.length) {
+        await writeLocalMaster(wb, noop, {});
+        return { seeded: true, count: wb.length };
+      }
+    } catch (e) { /* workbook may not have Master sheet yet */ }
+    return { seeded: false, count: 0 };
   }
 
-  /* Link an existing master-materials.json file on disk and optionally sync it into the workbook */
-  async function linkExistingLocalFile(log, opts) {
-    log = log || noop;
-    opts = opts || {};
-    if (!supportsLocalFileApi()) {
-      throw new Error("This version of Excel does not allow direct file linking. Use Load JSON below instead.");
-    }
-    var picks = await window.showOpenFilePicker({
-      multiple: false,
-      types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
-    });
-    var handle = picks && picks[0];
-    if (!handle) return null;
-    await requestHandlePermission(handle, "readwrite");
-    await idbSet(IDB_HANDLE_KEY, handle);
-
-    var file = await handle.getFile();
-    var text = await file.text();
-    var parsed = parsePayload(text);
-    await saveLocalCache(parsed.list, handle.name, parsed.lastChange);
-    log("Linked local master file \"" + handle.name + "\" (" + parsed.list.length + " materials).");
-    if (opts.applyToWorkbook !== false && parsed.list.length) {
-      var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
-      log("Workbook updated from \"" + handle.name + "\": " + r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
-    }
-    return { fileName: handle.name, count: parsed.list.length };
-  }
-
-  /* Save current workbook's Master Unique Materials into the local file & cache */
+  /* Save current workbook's Master Unique Materials into Built-in Storage */
   async function saveWorkbookToLocal(log, opts) {
     log = log || noop;
     var wb = await workbookList();
-    return writeLocalMaster(wb, log, opts);
+    var res = await writeLocalMaster(wb, log, opts);
+    log("Saved " + res.count + " materials to this computer's built-in storage.");
+    return res;
   }
 
-  /* Sync current workbook's Master Unique Materials from the local file (or local computer cache) */
+  /* Sync current workbook's Master Unique Materials from Built-in Storage */
   async function pullLocal(log, opts) {
     log = log || noop;
     opts = opts || {};
-    var local = await readLocalMaster({ allowPrompt: !!opts.allowPrompt });
+    var local = await readLocalMaster();
     if (!local.list.length) {
-      if (local.needsPermission) {
-        log("Local file \"" + local.fileName + "\" needs permission. Open Materials tab and click Reconnect local file.");
-      }
-      return { added: 0, updated: 0, removed: 0, skipped: [], source: local.source, fileName: local.fileName, empty: true };
+      return { added: 0, updated: 0, removed: 0, skipped: [], source: "none", empty: true };
     }
-    var label = local.source === "file" ? ("local file \"" + local.fileName + "\"") : "local computer master list";
-    log("Syncing master list from " + label + " (" + local.list.length + " materials) ...");
+    log("Syncing master list from built-in computer storage (" + local.list.length + " materials) ...");
     var r = await applyList(local.list, log, { syncRemovals: opts.syncRemovals !== false, lastChange: local.lastChange });
-    log("Master list synced from " + label + ": " + r.added + " added, " + r.updated + " changed" + (r.removed ? ", " + r.removed + " removed" : "") + ".");
+    log("Master list synced: " + r.added + " added, " + r.updated + " changed" + (r.removed ? ", " + r.removed + " removed" : "") + ".");
     r.skipped.forEach(function (s) { log("Skipped " + s); });
-    r.source = local.source;
-    r.fileName = local.fileName;
+    r.source = "builtin";
     return r;
   }
 
-  /* Fallback: import raw JSON text (e.g. from <input type="file">) into local computer cache & workbook */
+  /* Build JSON text for backup/transfer export (prefers live workbook list + latest lastChange) */
+  async function buildExportJson() {
+    var cache = await readLocalCache();
+    var lastChange = (cache && cache.lastChange) || (cache && cache.meta && cache.meta.lastChange) || null;
+    var list = [];
+    try {
+      list = await workbookList();
+    } catch (e) {
+      list = (cache && cache.list) || [];
+    }
+    if (!list.length && cache && cache.list) list = cache.list;
+    return { json: serialize(list, lastChange), count: list.length };
+  }
+
+  /* Import a JSON backup/transfer file into Built-in Storage and apply to the workbook (if Master sheet exists) */
   async function importLocalJsonText(text, fileName, log) {
     log = log || noop;
     var parsed = parsePayload(text);
     if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
-    await saveLocalCache(parsed.list, fileName || "master-materials.json", parsed.lastChange);
-    var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
-    log("Loaded \"" + (fileName || "master-materials.json") + "\" into this computer and workbook: " +
-      r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
-    return r;
+    await saveLocalCache(parsed.list, parsed.lastChange);
+    try {
+      var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
+      log("Imported \"" + (fileName || "master-materials.json") + "\" (" + parsed.list.length + " materials): " +
+        r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
+      return r;
+    } catch (e) {
+      log("Saved " + parsed.list.length + " materials from \"" + (fileName || "master-materials.json") + "\" to this computer's built-in storage. They will load automatically into your next BOM.");
+      return { added: 0, updated: 0, removed: 0, skipped: [], savedOnly: true };
+    }
   }
 
   /* ---------------- GitHub (optional) ---------------- */
@@ -507,11 +456,9 @@
 
   async function compareLocal() {
     var wb = await workbookList();
-    var local = await readLocalMaster({ allowPrompt: false });
+    var local = await readLocalMaster();
     var d = diff(wb, local.list);
     d.localSource = local.source;
-    d.localFileName = local.fileName;
-    d.needsPermission = local.needsPermission;
     d.localCount = local.list.length;
     d.wbCount = wb.length;
     return d;
@@ -861,9 +808,7 @@
                   watcher.onSaved({
                     source: "sheet",
                     time: nowIso,
-                    savedToFile: !!(writeRes && writeRes.savedToFile),
-                    fileName: (writeRes && writeRes.fileName) || "",
-                    needsPermission: !!(writeRes && writeRes.needsPermission),
+                    savedToBuiltIn: true,
                     items: items
                   });
                 }
@@ -880,18 +825,17 @@
 
   var api = {
     watch: watch, updateWatchSnap: updateWatchSnap, suppressWatch: suppressWatch, CFG: CFG,
-    // local computer master file API (no token required)
-    supportsLocalFileApi: supportsLocalFileApi,
+    // built-in computer storage (always auto-connected, zero reconnects) + JSON backup/transfer
+    supportsOpfs: supportsOpfs,
+    supportsSavePicker: supportsSavePicker,
     getLocalFileStatus: getLocalFileStatus,
-    requestLocalPermission: requestLocalPermission,
-    unlinkLocalFile: unlinkLocalFile,
-    linkNewLocalFile: linkNewLocalFile,
-    linkExistingLocalFile: linkExistingLocalFile,
+    ensureSeededFromWorkbook: ensureSeededFromWorkbook,
     readLocalMaster: readLocalMaster,
     writeLocalMaster: writeLocalMaster,
     saveWorkbookToLocal: saveWorkbookToLocal,
     pullLocal: pullLocal,
     compareLocal: compareLocal,
+    buildExportJson: buildExportJson,
     importLocalJsonText: importLocalJsonText,
     // GitHub optional API
     hasToken: hasToken, getToken: getToken, setToken: setToken,

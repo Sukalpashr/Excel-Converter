@@ -345,7 +345,43 @@
     box-shadow: 0 0 0 2.5px rgba(29, 111, 66, 0.14);
   }
   input[readonly] { background: #F4F6F5; color: var(--muted); }
+  input.field-issue, select.field-issue {
+    border-color: #E3B35C;
+    background: #FFFDF7;
+  }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* ---- Calm, Non-Annoying Primary Requirement Hint ---- */
+  .req-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 7px 9px;
+    margin: 2px 0 8px;
+    border-radius: 8px;
+    background: #F6F8F7;
+    border: 1px solid #E2E8E4;
+    color: #4D5E55;
+    font-size: 11.5px;
+    line-height: 1.4;
+    transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  }
+  .req-hint.issue {
+    background: #FFFBF0;
+    border-color: #F2DB9D;
+    color: #8A5300;
+  }
+  .req-hint-icon {
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    flex-shrink: 0;
+    opacity: 0.85;
+  }
+  .req-hint-text {
+    flex: 1;
+    min-width: 0;
+  }
 
   .chk {
     display: flex;
@@ -849,9 +885,6 @@
             <div id="home-local-status" class="note" style="margin-top:3px"></div>
           </div>
         </div>
-        <div id="home-reconnect-row" class="btnrow" style="margin-top:8px" hidden>
-          <button id="home-reconnect" class="primary">Reconnect saved materials file</button>
-        </div>
       </div>
 
       <div class="quick-grid">
@@ -912,6 +945,7 @@
             Pick which BOM sheets to check and repair (dropdowns, named ranges, formulas &amp; layout).
           </p>
           <div id="home-repair-sheets" class="sheet-pick" hidden></div>
+          <div id="home-repair-hint" class="req-hint" hidden></div>
           <button id="home-repair-btn" style="width:100%" disabled>Repair selected sheets</button>
           <div id="home-repair-log" class="log"></div>
         </div>
@@ -933,6 +967,7 @@
           <input type="text" id="sh-name" maxlength="31" placeholder="e.g. D3-a or Main Frame" autocomplete="off">
         </label>
 
+        <div id="sh-req-hint" class="req-hint" hidden></div>
         <button id="sh-add" class="primary" disabled>Add BOM Sheet</button>
         <div id="sh-log" class="log"></div>
       </div>
@@ -961,9 +996,6 @@
             <span>Load latest saved materials from this computer first</span>
           </label>
           <div id="sh-local-status" class="note"></div>
-          <div class="btnrow" style="margin-top:6px">
-            <button id="sh-reconnect" hidden>Reconnect saved file</button>
-          </div>
         </div>
       </details>
 
@@ -977,6 +1009,7 @@
             Choose which BOM sheets to repair (missing dropdowns, named ranges, helper columns, and print headers).
           </p>
           <div id="sh-repair-sheets" class="sheet-pick" hidden></div>
+          <div id="sh-repair-hint" class="req-hint" hidden></div>
           <button id="sh-repair" style="width:100%" disabled>Repair selected sheets</button>
         </div>
       </details>
@@ -1085,46 +1118,39 @@
           </div>
         </details>
 
+        <div id="mat-req-hint" class="req-hint" hidden></div>
         <div class="btnrow">
-          <button id="m-save" class="primary">Add Material</button>
+          <button id="m-save" class="primary" disabled>Add Material</button>
           <button id="m-delete" class="danger" hidden>Remove</button>
         </div>
         <div id="mat-log" class="log"></div>
       </div>
 
-      <!-- Collapsible Drawer: Save Master List on This Computer (Layman-friendly) -->
+      <!-- Collapsible Drawer: Built-in Computer Storage + JSON Backup / Transfer -->
       <details class="drawer subtle" id="local-drawer">
         <summary>
-          <span class="sum-left"><span>Save Master List on This Computer</span></span>
-          <span id="local-summary-tag" class="sum-meta">Optional</span>
+          <span class="sum-left"><span>Backup &amp; Transfer (JSON)</span></span>
+          <span id="local-summary-tag" class="sum-meta ok">Auto-saved</span>
           <span class="sum-caret" aria-hidden="true">&#9656;</span>
         </summary>
         <div class="drawer-body">
           <p class="note" style="margin-top:8px;color:var(--text)">
-            <b>Keep one master list across all your Excel files — no GitHub account or password needed.</b>
+            <b>Always auto-connected on this computer — no reconnecting or GitHub needed.</b>
           </p>
-          <ol class="steps">
-            <li><b>Pick a folder once:</b> click <em>Choose where to save</em> to create a file (like <code style="font-family:Consolas,monospace">master-materials.json</code>) in Documents or OneDrive.</li>
-            <li><b>Updates automatically:</b> whenever you add, edit, or remove a material above, that file updates by itself.</li>
-            <li><b>Ready for new BOMs:</b> whenever you add a BOM sheet—even in a brand-new workbook—your latest list loads automatically.</li>
-          </ol>
+          <p class="note" style="margin-top:4px;margin-bottom:8px">
+            Every change saves automatically in Excel's built-in storage and loads into new BOMs. Export a <code style="font-family:Consolas,monospace">.json</code> file anytime to keep a backup or copy your list to another computer.
+          </p>
 
-          <div id="local-status" class="status" style="margin-bottom:8px">Checking...</div>
+          <div id="local-status" class="status ok" style="margin-bottom:8px">Auto-saving on this computer...</div>
 
           <div class="btnrow">
-            <button id="local-reconnect" class="primary" hidden>Reconnect my saved file</button>
-            <button id="local-create">Choose where to save...</button>
-            <button id="local-open">Use an existing file...</button>
+            <button id="local-export-btn" class="primary" style="flex:1">Export JSON backup</button>
+            <button id="local-import-btn">Import JSON...</button>
+            <input type="file" id="local-import-input" accept=".json,application/json" hidden>
           </div>
           <div class="btnrow" style="margin-top:6px">
-            <button id="local-pull" disabled>Reload from file</button>
-            <button id="local-save" disabled>Save now</button>
-            <button id="local-unlink" hidden>Disconnect</button>
-          </div>
-          <div id="local-fallback" class="btnrow" style="margin-top:6px" hidden>
-            <button id="local-import-btn">Load saved file...</button>
-            <button id="local-export-btn">Download backup file</button>
-            <input type="file" id="local-import-input" accept=".json,application/json" hidden>
+            <button id="local-pull" disabled>Reload workbook from saved</button>
+            <button id="local-save" disabled>Save workbook to PC</button>
           </div>
           <div id="local-log" class="log"></div>
         </div>
@@ -1201,6 +1227,7 @@
             <input type="checkbox" id="iscopy">
             <span><b>This workbook is a copy</b>, not my original automated file.</span>
           </label>
+          <div id="conv-req-hint" class="req-hint" hidden></div>
           <button id="convert" class="primary" disabled>Convert to Plain Excel</button>
           <div id="log" class="log"></div>
         </div>
@@ -1238,6 +1265,7 @@
             <input type="checkbox" id="rest-drop-compiled">
             <span>Remove "Compiled Purchase List" sheet (if present)</span>
           </label>
+          <div id="rest-req-hint" class="req-hint" hidden></div>
           <button id="restore-btn" class="primary" disabled>Restore Selected Sheets</button>
           <div id="rest-log" class="log"></div>
         </div>
@@ -1245,10 +1273,10 @@
     </section>
   </main>
 
-  <script src="convert.js?v=13"></script>
-  <script src="tools.js?v=13"></script>
-  <script src="template-data.js?v=13"></script>
-  <script src="sync.js?v=13"></script>
-  <script src="taskpane.js?v=13"></script>
+  <script src="convert.js?v=14"></script>
+  <script src="tools.js?v=14"></script>
+  <script src="template-data.js?v=14"></script>
+  <script src="sync.js?v=14"></script>
+  <script src="taskpane.js?v=14"></script>
 </body>
 </html>
