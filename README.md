@@ -1,36 +1,45 @@
-# BOM Tools - Excel add-in (ribbon button + side panel)
+# BOM Converter - Excel add-in (ribbon button + side panel)
 
-One panel, three tabs:
+Adds a **BOM Converter** button on Excel's Home tab. It opens a side panel with:
+1. **Open a copy of this workbook** - opens a copy in a new window, so the original is never changed.
+2. Two options: **Auto-growing purchase list** (your FlattenBOM.bas) or **Fixed purchase list** (your FlattenBOM1.bas), then **Convert**.
 
-| Tab | What it does |
-|---|---|
-| **Add sheet** | Adds a take-off (BOM) sheet + purchase list to ANY workbook, from the built-in template (`template.xlsx`) or by copying a sheet already in the workbook. If the workbook has no master list, one is added too, filled with your latest materials. |
-| **Materials** | Add / edit materials in the workbook's master list. Shows a "Latest master list" card when the shared list has materials this workbook lacks. |
-| **Convert** | The original converter (automated workbook -> plain workbook). |
+Everything runs inside Excel. No data is sent anywhere. The only thing hosted online is this static web page.
 
-## Files to host (same folder on GitHub Pages)
-`taskpane.html`, `taskpane.js`, `tools.js`, `sync.js`, `convert.js`, `template.xlsx`  (+ `assets/` icons as before)
-`manifest.xml` is unchanged (optionally rename the labels to "BOM Tools").
+## 1. Host the files (once)
+An Office add-in's panel is a web page, so it needs an https address. Any free static host works:
+- **GitHub Pages**: put this folder in a repo, enable Pages. Your address is `https://<you>.github.io/<repo>`.
+- **Netlify Drop**: drag this folder onto https://app.netlify.com/drop.
 
-## Updating the template
-`template.xlsx` is your `.xltx` saved as a normal workbook. To change the template: edit the `.xltx`, **Save As .xlsx**
-(keep the sheet names `Take-off` and `Master Unique Materials`, table names `bom_*`, `pl_*`, `tblMat`), upload it over `template.xlsx`,
-and bump the `?v=` in `tools.js` (`TEMPLATE_URL`) so browsers fetch the new copy.
+Then replace `https://YOUR-HOST` in `manifest.xml` with your address (no trailing slash):
 
-## How the shared master list works
-* The add-in keeps ONE "latest master list" in this browser's local storage (per computer, shared by all workbooks).
-* Whenever the panel opens on a workbook that has a master list, that workbook's materials are folded into the latest list
-  (new materials are added; a material edited in that workbook replaces the older version).
-* **Brand-new workbook** (nothing typed in any take-off sheet): its master list is refreshed automatically when the panel opens
-  (new materials added; stale ones refreshed only if the workbook was synced before and has not changed them).
-* **Workbook with items already entered**: never changed automatically. The Materials tab shows what is missing / different and an
-  *Update* button (adds missing materials; a checkbox also overwrites differing values).
-* **Add sheet in a workbook with no master list**: the master list sheet is inserted and filled with the latest list.
-* Each workbook stores, inside the file, a record of what each material looked like when it was last in sync (workbook setting `bomMasterBase`).
+    sed -i 's#https://YOUR-HOST#https://<you>.github.io/<repo>#g' manifest.xml
 
-## Limits
-* Per computer: another PC has its own latest list. It rebuilds itself from any workbook you open with the panel.
-* Clearing Office's web cache / browser data resets the latest list (workbooks keep their own master sheets).
-* Deleting a material is not synced: it comes back from the latest list. Renaming is not supported (add the new name instead).
-* Inserting the built-in template needs Excel 2021 / Microsoft 365 (ExcelApi 1.13). Copying an existing BOM sheet works on older versions.
-* The panel must be open for the sync to run (click the ribbon button once per workbook; the pin icon on the panel keeps it open).
+## 2. Install the manifest
+- **Excel on the web**: Insert > Add-ins > Manage My Add-ins > Upload My Add-in > pick `manifest.xml`.
+- **Excel for Windows (office / company)**: put `manifest.xml` in a shared network folder, then
+  File > Options > Trust Center > Trust Center Settings > Trusted Add-in Catalogs, add the folder path, tick *Show in Menu*.
+  Restart Excel, then Insert > My Add-ins > Shared Folder > BOM Converter.
+- **Whole company**: a Microsoft 365 admin can push it under Admin center > Settings > Integrated apps > Upload custom apps.
+  Staff then get the button with no install steps.
+
+## Notes
+- Needs ExcelApi 1.9 (Excel 2019 or Microsoft 365).
+- The converters are ports of the VBA macros. Formula text for the growing list was checked against `flatten_bom.py`; it matches.
+- Not tested inside Excel yet: try it on a copy of a real BOM first and compare with the VBA result.
+
+## Shared materials list and template (new)
+
+Put these two files in the repo root next to `taskpane.html`:
+- `template.xlsx` - your automated template (must contain `BOM Blank`, `Master Unique Materials`, `Formulas`). The Add sheet tab imports it into any workbook that has no BOM template.
+- `materials.json` - the shared master list (starts empty).
+
+**Everyone** (no setup): Materials tab > *Update this workbook*, or leave "Update the master list from GitHub first" ticked on Add sheet. It adds missing materials and updates changed ones; it never deletes.
+
+**Publisher computer(s) only**: create a fine-grained token (GitHub > Settings > Developer settings > Fine-grained tokens), repository access = this repo only, permission Contents = Read and write. Paste it under Materials > Publisher settings. After that, adding/editing a material in the add-in publishes it automatically, and *Publish to GitHub* sends anything you typed straight into the Master sheet.
+
+Notes
+- Changes reach other computers about a minute after publishing (Pages rebuild).
+- To delete a material for everyone, edit `materials.json` on GitHub.
+- A public repo makes `materials.json` and `template.xlsx` public.
+- Template import needs ExcelApi 1.13 (Microsoft 365 / Excel 2021). Test it first on an empty workbook: check dropdowns and named ranges on the new sheet.

@@ -55,11 +55,10 @@
 
   <!-- ===================== ADD SHEET ===================== -->
   <section id="page-sheet" hidden>
-    <p class="sub">Add a take-off (BOM) sheet, with its purchase list, formulas and dropdowns, to any workbook. If the workbook has no master list, the latest one is added too.</p>
+    <p class="sub">Add a new take-off (BOM) sheet with its purchase list, formulas and dropdowns already in place.</p>
     <div class="card">
       <h2>Workbook</h2>
       <div id="sh-status" class="status">Checking...</div>
-      <div id="sh-master" class="status" style="margin-top:4px"></div>
     </div>
     <div class="card">
       <h2>New sheet</h2>
@@ -67,28 +66,36 @@
       <label class="field"><span>Project name (shown in the title)</span><input type="text" id="sh-project" autocomplete="off"></label>
       <label class="field"><span>Copy from</span><select id="sh-source"></select></label>
       <label class="chk"><input type="checkbox" id="sh-clear"> <span>Clear entered data (tick this when copying a sheet that already has items)</span></label>
+      <label class="chk"><input type="checkbox" id="sh-sync" checked> <span>Update the master list from GitHub first</span></label>
       <button id="sh-add" class="primary" disabled>Add sheet</button>
       <div id="sh-log" class="log"></div>
     </div>
-    <p class="note" id="sh-note"></p>
+    <p class="note">Works on any workbook. If it has no BOM template yet, the master list and a hidden <b>BOM Blank</b> sheet are imported first, then your sheet is added.</p>
   </section>
 
   <!-- ===================== MATERIALS ===================== -->
   <section id="page-mat" hidden>
     <p class="sub">Add a material to the master list or change an existing one. Every take-off sheet in this workbook updates straight away.</p>
     <div class="card">
+      <h2>Shared list (GitHub)</h2>
+      <div id="sync-status" class="status">Checking...</div>
+      <div id="sync-detail" class="note"></div>
+      <div class="btnrow" style="margin-top:8px">
+        <button id="sync-pull" class="primary" disabled>Update this workbook</button>
+        <button id="sync-push" class="primary" disabled hidden>Publish to GitHub</button>
+      </div>
+      <details style="margin-top:8px"><summary class="note">Publisher settings</summary>
+        <label class="field" style="margin-top:6px"><span>GitHub token (only on computers that may publish)</span><input type="password" id="gh-token" autocomplete="off"></label>
+        <div class="btnrow"><button id="gh-save">Save token</button><button id="gh-clear">Remove token</button></div>
+        <p class="note">Everyone can update from GitHub without a token. Publishing needs a fine-grained token limited to this one repository with Contents: Read and write.</p>
+      </details>
+      <div id="sync-log" class="log"></div>
+    </div>
+    <div class="card">
       <h2>Master list</h2>
       <div id="mat-status" class="status">Checking...</div>
       <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
       <div id="mat-list"></div>
-    </div>
-    <div class="card" id="mat-sync" hidden>
-      <h2 id="sync-title">Latest master list</h2>
-      <div id="sync-text" class="status"></div>
-      <label class="chk" id="sync-allrow"><input type="checkbox" id="sync-all"> <span>Also update materials whose values differ (can change weights already used in this workbook)</span></label>
-      <button id="sync-apply" class="primary">Update this workbook's master list</button>
-      <button id="sync-addmaster" class="primary">Add master list sheet</button>
-      <div id="sync-log" class="log"></div>
     </div>
     <div class="card">
       <h2 id="mat-mode">New material</h2>
@@ -110,8 +117,7 @@
       </div>
       <div id="mat-log" class="log"></div>
     </div>
-    <p class="note" id="mat-store"></p>
-    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. </p>
+    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
   </section>
 
   <!-- ===================== CONVERT ===================== -->
@@ -149,8 +155,8 @@
   </section>
 
   <script src="convert.js?v=5"></script>
-  <script src="sync.js?v=5"></script>
   <script src="tools.js?v=5"></script>
+  <script src="sync.js?v=5"></script>
   <script src="taskpane.js?v=5"></script>
 </body>
 </html>

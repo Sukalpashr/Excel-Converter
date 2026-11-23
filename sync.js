@@ -1,161 +1,332 @@
-/* sync.js - keeps ONE "latest master materials list" on this computer and reconciles it with
- * the master sheet (table tblMat) of whichever workbook is open.
- *
- *  - store  : browser localStorage of the add-in's origin (shared by all workbooks on this PC)
- *  - base   : per-workbook record (workbook settings, saved inside the file) of what each material
- *             looked like the last time that workbook was in sync. It tells "edited here" from "stale".
- * Pure logic first (unit-tested in node), Excel I/O at the bottom.
+/* sync.js - shared materials list on GitHub + template import for BOM Tools.
+ * Reads materials.json / template.xlsx from the same GitHub Pages site the add-in is served from.
+ * Publishing (writing materials.json) uses the GitHub API and needs a token, kept only in this computer's add-in storage.
  */
 (function (root) {
   "use strict";
 
-  var STORE_KEY = "bomMasterStore.v1";
-  var BASE_KEY = "bomMasterBase";
-  var mem = null;                         // fallback when localStorage is unavailable (or in tests)
-  var persistentOk = true;
+  var CFG = {
+    owner: "", repo: "",            // leave empty: detected from the page address (<owner>.github.io/<repo>/)
+    branch: "main",
+    list: "materials.json",
+    template: "template.xlsx"
+  };
+  var TOKEN_KEY = "bomGhToken";
+  var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
+  var INPUT_KEYS = ["material"].concat(FIELDS);
 
+  function noop() {}
   function lc(s) { return String(s).trim().toLowerCase(); }
-  function str(v) { return v === null || v === undefined ? "" : String(v).trim(); }
-  function n6(v) {
-    if (v === null || v === undefined || v === "") return null;
-    var n = typeof v === "number" ? v : Number(String(v).replace(/,/g, ""));
-    return isFinite(n) ? Math.round(n * 1e6) / 1e6 : null;
+  function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
+  function isNil(v) { return v === null || v === undefined || (typeof v === "number" && isNaN(v)); }
+
+  /* ---------------- pure helpers (node-testable) ---------------- */
+  function sameVal(a, b) {
+    if (isNil(a) || a === "") a = null;
+    if (isNil(b) || b === "") b = null;
+    if (a === null || b === null) return a === b;
+    if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) < 1e-9;
+    return String(a).trim() === String(b).trim();
   }
 
-  function canon(r) {
-    return { material: str(r.material), category: str(r.category), unit: str(r.unit),
-             lin: n6(r.lin), area: n6(r.area), piece: n6(r.piece), sl: n6(r.sl), sw: n6(r.sw), remarks: str(r.remarks) };
-  }
-  function hash(r) {
-    var c = canon(r);
-    var s = JSON.stringify([c.material, c.category, c.unit, c.lin, c.area, c.piece, c.sl, c.sw, c.remarks]);
-    var h = 5381;
-    for (var i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-    return (h >>> 0).toString(36);
+  function changedFields(a, b) {
+    return FIELDS.filter(function (k) { return !sameVal(a[k], b[k]); });
   }
 
-  /* Fold a workbook's materials into the store. Never touches the workbook.
-   *  new name                              -> added to the store
-   *  same name, same values                -> nothing
-   *  same name, different values:
-   *      workbook unchanged since last sync -> store is newer, skip
-   *      store unchanged since last sync    -> edited in this workbook, store takes the workbook's version
-   *      both changed / never synced        -> skip (reported as conflict only when both changed) */
-  function capture(store, rows, base) {
-    var idx = {};
-    store.rows.forEach(function (r, i) { idx[lc(r.material)] = i; });
-    var bh = (base && base.h) || {};
-    var res = { added: 0, updated: 0, skipped: 0, conflicts: [] };
-    var seen = {};
-    rows.forEach(function (raw) {
-      var w = canon(raw), k = lc(w.material);
-      if (!k || seen[k]) return;
-      seen[k] = 1;
-      var i = idx[k];
-      if (i === undefined) { store.rows.push(w); idx[k] = store.rows.length - 1; res.added++; return; }
-      var s = store.rows[i], hw = hash(w), hs = hash(s);
-      if (hw === hs) return;
-      var b = bh[k];
-      if (b === undefined || hw === b) { res.skipped++; return; }
-      if (hs === b) { store.rows[i] = w; res.updated++; return; }
-      res.conflicts.push(w.material);
+  /* wb / remote: arrays of normalized materials. */
+  function diff(wb, remote) {
+    var w = new Map(), r = new Map();
+    wb.forEach(function (m) { if (!w.has(lc(m.material))) w.set(lc(m.material), m); });
+    remote.forEach(function (m) { if (!r.has(lc(m.material))) r.set(lc(m.material), m); });
+    var d = { onlyWb: [], onlyRemote: [], changed: [] };
+    w.forEach(function (m, k) {
+      if (!r.has(k)) { d.onlyWb.push(m); return; }
+      var f = changedFields(m, r.get(k));
+      if (f.length) d.changed.push({ material: m.material, fields: f, wb: m, remote: r.get(k) });
     });
-    if (res.added || res.updated) store.updatedAt = Date.now();
+    r.forEach(function (m, k) { if (!w.has(k)) d.onlyRemote.push(m); });
+    return d;
+  }
+
+  function clean(m) {
+    var o = { material: m.material, category: m.category || "", unit: m.unit };
+    ["lin", "area", "piece", "sl", "sw"].forEach(function (k) { o[k] = isNil(m[k]) ? null : m[k]; });
+    o.remarks = m.remarks || "";
+    return o;
+  }
+
+  function serialize(list) {
+    return '{\n "version": 1,\n "updated": "' + new Date().toISOString() + '",\n "materials": [\n' +
+      list.map(function (m) { return "  " + JSON.stringify(clean(m)); }).join(",\n") + "\n ]\n}\n";
+  }
+
+  function parseList(text) {
+    var j = JSON.parse(text);
+    var arr = Array.isArray(j) ? j : (j.materials || []);
+    return arr.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+  }
+
+  function toB64(str) {
+    var b = new TextEncoder().encode(str), s = "";
+    for (var i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+  function fromB64(b64) {
+    var s = atob(String(b64).replace(/\s/g, "")), u = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+    return new TextDecoder().decode(u);
+  }
+  function bufToB64(buf) {
+    var u = new Uint8Array(buf), s = "";
+    for (var i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+    return btoa(s);
+  }
+
+  /* ---------------- GitHub ---------------- */
+  function repoInfo() {
+    var o = CFG.owner, r = CFG.repo;
+    if ((!o || !r) && typeof location !== "undefined" && /\.github\.io$/i.test(location.hostname)) {
+      var host = location.hostname.split(".")[0];
+      var seg = location.pathname.split("/").filter(Boolean)[0];
+      o = o || host;
+      r = r || (seg && seg.indexOf(".") < 0 ? seg : host + ".github.io");
+    }
+    return { owner: o, repo: r, branch: CFG.branch };
+  }
+
+  function getToken() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (e) { return ""; } }
+  function setToken(t) {
+    try { if (t) localStorage.setItem(TOKEN_KEY, t.trim()); else localStorage.removeItem(TOKEN_KEY); return true; }
+    catch (e) { return false; }
+  }
+  function hasToken() { return !!getToken(); }
+
+  function apiUrl() {
+    var ri = repoInfo();
+    if (!ri.owner || !ri.repo) throw new Error("Could not work out the GitHub repository. Set owner and repo at the top of sync.js.");
+    return "https://api.github.com/repos/" + ri.owner + "/" + ri.repo + "/contents/" + CFG.list;
+  }
+  function apiHeaders() {
+    return { "Accept": "application/vnd.github+json", "Authorization": "Bearer " + getToken() };
+  }
+
+  /* what everyone reads: the file as served by GitHub Pages */
+  async function fetchPages() {
+    var url = new URL(CFG.list, location.href).href + "?t=" + Date.now();
+    var res = await fetch(url, { cache: "no-store" });
+    if (res.status === 404) return { list: [], missing: true };
+    if (!res.ok) throw new Error("GitHub Pages answered " + res.status + " for " + CFG.list + ".");
+    return { list: parseList(await res.text()), missing: false };
+  }
+
+  /* what the publisher reads before writing: the file straight from the repository (always the latest commit) */
+  async function fetchApi() {
+    var ri = repoInfo();
+    var res = await fetch(apiUrl() + "?ref=" + encodeURIComponent(ri.branch) + "&t=" + Date.now(), { headers: apiHeaders(), cache: "no-store" });
+    if (res.status === 404) return { list: [], sha: null };
+    if (res.status === 401 || res.status === 403) throw new Error("GitHub rejected the token (needs Contents: Read and write on " + ri.owner + "/" + ri.repo + ").");
+    if (!res.ok) throw new Error("GitHub API answered " + res.status + ".");
+    var j = await res.json();
+    return { list: parseList(fromB64(j.content)), sha: j.sha };
+  }
+
+  async function putApi(text, sha, message) {
+    var ri = repoInfo();
+    var body = { message: message, content: toB64(text), branch: ri.branch };
+    if (sha) body.sha = sha;
+    var h = apiHeaders(); h["Content-Type"] = "application/json";
+    return fetch(apiUrl(), { method: "PUT", headers: h, body: JSON.stringify(body) });
+  }
+
+  /* ---------------- workbook <-> list ---------------- */
+  async function workbookList() {
+    var res = await root.BomTools.listMaterials();
+    return res.rows.map(function (r) { return root.BomTools.normalizeMaterial(r); });
+  }
+
+  async function compare() {
+    var wb = await workbookList();
+    var rem = await fetchPages();
+    var d = diff(wb, rem.list);
+    d.remoteMissing = rem.missing;
+    d.remoteCount = rem.list.length;
+    d.wbCount = wb.length;
+    return d;
+  }
+
+  function writeRow(body, i, r, idx) {
+    INPUT_KEYS.forEach(function (k) {
+      if (idx[k] < 0) return;
+      var v = r[k];
+      body.getCell(i, idx[k]).values = [[isNil(v) ? "" : v]];
+    });
+  }
+
+  /* bring the workbook's master list up to date with `list` (adds missing, updates different; never deletes) */
+  async function applyList(list, log) {
+    log = log || noop;
+    var T = root.BomTools, res = { added: 0, updated: 0, skipped: [] };
+    await Excel.run(async function (context) {
+      var m = await T._openMaster(context);
+      var idx = m.idx;
+      var body = m.t.getDataBodyRange().load("values,formulas");
+      await context.sync();
+
+      var byName = new Map(), blanks = [];
+      body.values.forEach(function (row, i) {
+        var n = String(row[idx.material]).trim();
+        if (!n) blanks.push(i); else if (!byName.has(n.toLowerCase())) byName.set(n.toLowerCase(), i);
+      });
+
+      var toAdd = [];
+      list.forEach(function (r) {
+        var i = byName.get(r.material.toLowerCase());
+        if (i === undefined) { toAdd.push(r); return; }
+        var cur = T.normalizeMaterial(T._rowToObj(body.values[i], i, idx));
+        var ch = changedFields(cur, r), did = false;
+        ch.forEach(function (k) {
+          if (idx[k] < 0) return;
+          if (isFormula(body.formulas[i][idx[k]])) { res.skipped.push(r.material + " (" + k + " is a formula here)"); return; }
+          body.getCell(i, idx[k]).values = [[isNil(r[k]) ? "" : r[k]]];
+          did = true;
+        });
+        if (did) res.updated++;
+      });
+
+      // use empty rows of the table first, then add rows
+      var useBlank = toAdd.slice(0, blanks.length), extra = toAdd.slice(blanks.length);
+      useBlank.forEach(function (r, k) { writeRow(body, blanks[k], r, idx); });
+      await context.sync();
+
+      if (extra.length) {
+        for (var k = 0; k < extra.length; k++) m.t.rows.add();
+        await context.sync();
+        var b2 = m.t.getDataBodyRange().load("rowCount");
+        await context.sync();
+        var n = b2.rowCount, first = n - extra.length;
+        extra.forEach(function (r, j) { writeRow(b2, first + j, r, idx); });
+        await context.sync();
+
+        // calculated columns (sheet area / weight): copy from the row above if Excel did not fill them
+        if (first >= 1) {
+          var f = m.t.getDataBodyRange().load("formulas");
+          await context.sync();
+          var isInput = {};
+          INPUT_KEYS.forEach(function (key) { if (idx[key] >= 0) isInput[idx[key]] = 1; });
+          for (var j2 = 0; j2 < extra.length; j2++)
+            for (var c = 0; c < m.ncols; c++) {
+              if (isInput[c]) continue;
+              if (isFormula(f.formulas[first - 1][c]) && !isFormula(f.formulas[first + j2][c]))
+                b2.getCell(first + j2, c).copyFrom(b2.getCell(first - 1, c), Excel.RangeCopyType.formulas);
+            }
+          await context.sync();
+        }
+      }
+      res.added = toAdd.length;
+    });
     return res;
   }
 
-  /* What to write into the workbook. rows = [{row: bodyIndex, ...fields}]
-   *  mode "new"  : append materials the workbook does not have
-   *  mode "auto" : "new" + refresh materials the workbook has not changed since its last sync
-   *  mode "all"  : "new" + overwrite every differing material with the store's version */
-  function plan(store, rows, base, mode) {
-    var wIdx = {};
-    rows.forEach(function (r) { var k = lc(r.material); if (k && wIdx[k] === undefined) wIdx[k] = r; });
-    var bh = (base && base.h) || {};
-    var out = { appends: [], updates: [] };
-    store.rows.forEach(function (s) {
-      var k = lc(s.material), w = wIdx[k];
-      if (!w) { out.appends.push(canon(s)); return; }
-      var hw = hash(w);
-      if (hw === hash(s)) return;
-      if (mode === "all" || (mode === "auto" && bh[k] !== undefined && bh[k] === hw)) out.updates.push({ row: w.row, rec: canon(s) });
-    });
-    return out;
+  /* ---------------- pull / push ---------------- */
+  async function pull(log) {
+    log = log || noop;
+    log("Reading the shared list from GitHub ...");
+    var rem = await fetchPages();
+    if (!rem.list.length) { log("The shared list is empty or not published yet. Nothing to update."); return { added: 0, updated: 0, skipped: [] }; }
+    var r = await applyList(rem.list, log);
+    log("Master list updated: " + r.added + " added, " + r.updated + " changed.");
+    r.skipped.forEach(function (s) { log("Skipped " + s); });
+    return r;
   }
 
-  function pending(store, rows) {
-    var wIdx = {};
-    rows.forEach(function (r) { var k = lc(r.material); if (k && wIdx[k] === undefined) wIdx[k] = r; });
-    var n = 0, d = 0;
-    store.rows.forEach(function (s) {
-      var w = wIdx[lc(s.material)];
-      if (!w) n++; else if (hash(w) !== hash(s)) d++;
-    });
-    return { newCount: n, diffCount: d };
-  }
-
-  function newBase(store, rows, old) {
-    var sIdx = {};
-    store.rows.forEach(function (s) { sIdx[lc(s.material)] = s; });
-    var oh = (old && old.h) || {}, h = {};
-    rows.forEach(function (r) {
-      var k = lc(r.material); if (!k) return;
-      var s = sIdx[k];
-      if (s && hash(s) === hash(r)) h[k] = hash(r);
-      else if (oh[k] !== undefined) h[k] = oh[k];
-    });
-    return { v: 1, h: h };
-  }
-
-  function upsert(store, rec) {          // explicit add/edit made through the add-in
-    var c = canon(rec), k = lc(c.material), at = -1;
-    store.rows.forEach(function (r, i) { if (at < 0 && lc(r.material) === k) at = i; });
-    if (at < 0) store.rows.push(c); else store.rows[at] = c;
-    store.updatedAt = Date.now();
-  }
-
-  /* ---------------- store (localStorage) ---------------- */
-  function emptyStore() { return { v: 1, rows: [], updatedAt: 0 }; }
-  function loadStore() {
-    try {
-      if (typeof localStorage !== "undefined") {
-        var s = JSON.parse(localStorage.getItem(STORE_KEY));
-        if (s && Array.isArray(s.rows)) return s;
-        return emptyStore();
+  /* opts.only: publish just this material name (used right after a save) */
+  async function push(log, opts) {
+    log = log || noop;
+    opts = opts || {};
+    if (!hasToken()) throw new Error("No GitHub token on this computer. Add one under Publisher settings.");
+    var wb = await workbookList();
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var cur = await fetchApi();
+      var d = diff(wb, cur.list);
+      var only = opts.only ? lc(opts.only) : null;
+      var add = d.onlyWb.filter(function (m) { return !only || lc(m.material) === only; });
+      var chg = d.changed.filter(function (c) { return !only || lc(c.material) === only; });
+      if (!add.length && !chg.length) { log("GitHub already has this."); return { added: 0, changed: 0 }; }
+      var swap = new Map();
+      chg.forEach(function (c) { swap.set(lc(c.material), c.wb); });
+      var merged = cur.list.map(function (m) { return swap.get(lc(m.material)) || m; }).concat(add);
+      var msg = "Materials: " + add.length + " added, " + chg.length + " changed";
+      var res = await putApi(serialize(merged), cur.sha, msg);
+      if (res.ok) {
+        log("Published to GitHub (" + add.length + " added, " + chg.length + " changed). Other computers see it in about a minute.");
+        return { added: add.length, changed: chg.length };
       }
-    } catch (e) { persistentOk = false; }
-    return mem ? JSON.parse(JSON.stringify(mem)) : emptyStore();
-  }
-  function saveStore(s) {
-    try {
-      if (typeof localStorage !== "undefined") { localStorage.setItem(STORE_KEY, JSON.stringify(s)); return true; }
-    } catch (e) { persistentOk = false; }
-    mem = JSON.parse(JSON.stringify(s));
-    if (typeof localStorage === "undefined") persistentOk = false;
-    return false;
-  }
-  function persistent() { return persistentOk && typeof localStorage !== "undefined"; }
-  function resetMemory() { mem = null; persistentOk = true; }
-
-  /* ---------------- per-workbook base (workbook settings) ---------------- */
-  async function readBase(context) {
-    var it = context.workbook.settings.getItemOrNullObject(BASE_KEY);
-    it.load("value");
-    await context.sync();
-    if (it.isNullObject) return null;
-    try { var b = JSON.parse(it.value); return b && b.h ? b : null; } catch (e) { return null; }
-  }
-  async function writeBase(context, obj) {
-    var it = context.workbook.settings.getItemOrNullObject(BASE_KEY);
-    await context.sync();
-    var v = JSON.stringify(obj);
-    if (it.isNullObject) context.workbook.settings.add(BASE_KEY, v); else it.value = v;
-    await context.sync();
+      if ((res.status === 409 || res.status === 422) && attempt === 0) continue;   // someone else published meanwhile: re-read and retry
+      if (res.status === 401 || res.status === 403 || res.status === 404)
+        throw new Error("GitHub refused the write (" + res.status + "). Check the token has Contents: Read and write on this repository.");
+      throw new Error("GitHub answered " + res.status + " while publishing.");
+    }
+    throw new Error("Could not publish after retrying. Try again.");
   }
 
-  var api = { canon: canon, hash: hash, capture: capture, plan: plan, pending: pending, newBase: newBase, upsert: upsert,
-              loadStore: loadStore, saveStore: saveStore, persistent: persistent, resetMemory: resetMemory,
-              readBase: readBase, writeBase: writeBase, lc: lc };
+  /* ---------------- template import ---------------- */
+  async function importTemplate(log) {
+    log = log || noop;
+    var T = root.BomTools;
+    if (!Office.context.requirements.isSetSupported("ExcelApi", "1.13"))
+      throw new Error("Importing the template needs Microsoft 365 or Excel 2021 (ExcelApi 1.13). Use a workbook that already has the template instead.");
+    log("Downloading the template ...");
+    var res = await fetch(new URL(CFG.template, location.href).href + "?t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error(CFG.template + " was not found next to the add-in (" + res.status + ").");
+    var b64 = bufToB64(await res.arrayBuffer());
+
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      wb.worksheets.load("items/name");
+      await context.sync();
+      var before = wb.worksheets.items.map(function (w) { return w.name; });
+
+      log("Importing the master list and the blank BOM sheet ...");
+      wb.insertWorksheetsFromBase64(b64, { positionType: Excel.WorksheetPositionType.end });
+      await context.sync();
+      wb.worksheets.load("items/name");
+      await context.sync();
+      var added = wb.worksheets.items.filter(function (w) { return before.indexOf(w.name) < 0; });
+
+      var undo = async function (msg) {
+        added.forEach(function (w) { w.delete(); });
+        try { await context.sync(); } catch (e) { /* ignore */ }
+        throw new Error(msg);
+      };
+
+      var blank = wb.worksheets.getItemOrNullObject(T.BLANK);
+      var master = wb.worksheets.getItemOrNullObject(T.MASTER);
+      await context.sync();
+      if (blank.isNullObject || master.isNullObject)
+        await undo("template.xlsx must contain sheets named \"" + T.BLANK + "\" and \"" + T.MASTER + "\". The import was undone.");
+
+      var rng = blank.getRange("A1:Z80").load("formulas");
+      await context.sync();
+      var broken = rng.formulas.some(function (row) {
+        return row.some(function (f) { return typeof f === "string" && (f.indexOf("#REF!") >= 0 || /\[\d+\]/.test(f)); });
+      });
+      if (broken)
+        await undo("The imported blank sheet has broken formulas (#REF! or a link to another file). The import was undone; see the README note on named ranges.");
+
+      added.forEach(function (w) { if (/^README/i.test(w.name)) w.delete(); });   // the template's help sheet is not needed in project files
+      blank.visibility = Excel.SheetVisibility.hidden;
+      await context.sync();
+      await T._openMaster(context);                                                // confirms tblMat is there
+    });
+    log("Template imported.");
+  }
+
+  var api = {
+    CFG: CFG, hasToken: hasToken, getToken: getToken, setToken: setToken,
+    compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
+    // pure helpers
+    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.BomSync = api;
 })(typeof window !== "undefined" ? window : this);
