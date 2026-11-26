@@ -940,9 +940,7 @@
       if (plChanged) plBody.formulas = plOut;
     }
 
-    // 2. Enforce hidden table header row (row 5), hidden helper cols (M & AB), gridlines off, and freeze on VISIBLE Row 4.
-    //    Important: freezePanes and showGridlines are window-view properties in Excel Desktop — setting them on a hidden or
-    //    never-activated sheet (such as a fresh copy of hidden BOM Blank) can corrupt Excel's in-cell editor view state.
+    // 2. Enforce hidden table header row (row 5) and hidden helper cols (M & AB)
     try {
       ws.getRange("5:5").rowHidden = true;
       ws.getRange("M:M").columnHidden = true;
@@ -950,6 +948,27 @@
       await context.sync();
     } catch (e) { /* non-fatal */ }
 
+    // 3. Replace volatile OFFSET Print_Area & trim any legacy 2000-row CF bloat
+    await fixVolatilePrintArea(context, ws);
+    await trimBloatedBomCf(context, ws, tableEnd);
+
+    // 4. Re-apply Materials dropdown tightly on C6:C<tableEnd>
+    await applyBomDataValidation(context, ws, matInfo, log, tableEnd);
+
+    // 5. Enforce landscape print setup & repeating header rows 3:4 BEFORE finalizing active window view / freeze panes
+    try {
+      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
+      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
+      ws.pageLayout.setPrintTitleRows("3:4");
+      await context.sync();
+    } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
+
+    // 6. Re-commit scalar BOM table formulas on Row 6 when requested so Excel's live formula engine binds cleanly
+    if (opts.resyncFormulas) {
+      await resyncBomFormulas(context, ws);
+    }
+
+    // 7. Apply window-view properties (showGridlines & freezeRows(4)) ONLY on a visible active sheet.
     if (!opts.skipFreezePanes) {
       var prevActiveName = "";
       var switchedActive = false;
@@ -985,21 +1004,89 @@
         }
       }
     }
+  }
 
-    // 3. Replace volatile OFFSET Print_Area & trim any legacy 2000-row CF bloat
-    await fixVolatilePrintArea(context, ws);
-    await trimBloatedBomCf(context, ws, tableEnd);
-
-    // 4. Re-apply Materials dropdown tightly on C6:C<tableEnd>
-    await applyBomDataValidation(context, ws, matInfo, log, tableEnd);
-
-    // 5. Enforce landscape print setup & repeating header rows 3:4
+  /* Re-commits scalar table formula cells on Row 6 so Excel Desktop binds the copied table's live formula engine
+   * (equivalent to opening and closing a formula cell, preventing 1-character in-cell typing display lag on blank-created sheets). */
+  async function resyncBomFormulas(context, ws) {
     try {
-      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
-      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-      ws.pageLayout.setPrintTitleRows("3:4");
+      var addrs = ["A6", "I6", "J6", "L6", "M6"];
+      var ranges = addrs.map(function (a) { return ws.getRange(a).load("formulas"); });
       await context.sync();
-    } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
+      var touched = false;
+      ranges.forEach(function (r) {
+        var f = r.formulas && r.formulas[0] && r.formulas[0][0];
+        if (isFormula(f)) {
+          r.formulas = [[f]];
+          touched = true;
+        }
+      });
+      if (touched) await context.sync();
+    } catch (e) { /* non-fatal */ }
+  }
+
+  /* Rebuilds Excel's dependency tree & calculation chain (fullRebuild with fallback to full) + worksheet-level calculate(true). */
+  async function recalculateWorkbook(context, wb, ws) {
+    try {
+      if (ws && typeof ws.calculate === "function") ws.calculate(true);
+    } catch (eWs) { /* ignore on older ExcelApi hosts */ }
+    try {
+      if (Excel.CalculationType && Excel.CalculationType.fullRebuild) {
+        wb.application.calculate(Excel.CalculationType.fullRebuild);
+      } else {
+        wb.application.calculate(Excel.CalculationType.full);
+      }
+      await context.sync();
+    } catch (eRb) {
+      try {
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+      } catch (eFull) { /* ignore */ }
+    }
+  }
+
+  /* Runs in a standalone Excel.run AFTER all background add-in reads finish so Excel Desktop flushes its
+   * Direct2D/Win32 sheet view & Formula Bar binding before the user starts typing in cell B6. */
+  async function finalizeSheetView(sheetName) {
+    if (!sheetName) return;
+    try {
+      await runExcel(async function (context) {
+        var wb = context.workbook;
+        wb.worksheets.load("items/name,items/visibility");
+        await context.sync();
+        var target = wb.worksheets.items.filter(function (w) { return lc(w.name) === lc(sheetName) && w.visibility === "Visible"; })[0];
+        if (!target) return;
+
+        // Toggle briefly to another visible sheet and back to force a clean Win32/Direct2D worksheet viewport repaint
+        var other = wb.worksheets.items.filter(function (w) { return w.visibility === "Visible" && lc(w.name) !== lc(sheetName); })[0];
+        if (other) {
+          other.activate();
+          await context.sync();
+        }
+        target.activate();
+        await context.sync();
+
+        // Bind & flush Formula Bar on a real formula cell (A6), recalculate sheet, then select B6 for immediate lag-free entry
+        var rA6 = target.getRange("A6").load("formulas");
+        await context.sync();
+        var fA6 = rA6.formulas && rA6.formulas[0] && rA6.formulas[0][0];
+        if (isFormula(fA6)) {
+          rA6.select();
+          await context.sync();
+          rA6.formulas = [[fA6]];
+          await context.sync();
+        }
+        try {
+          if (typeof target.calculate === "function") {
+            target.calculate(true);
+            await context.sync();
+          }
+        } catch (eCalc) { /* ignore */ }
+
+        target.getRange("B6").select();
+        await context.sync();
+      });
+    } catch (e) { /* non-fatal */ }
   }
 
   /* Repairs named ranges, dropdowns, formatting, and formulas across selected (or all) BOM sheets. */
@@ -1013,6 +1100,7 @@
       opts.sheets.forEach(function (n) { selectedSet[lc(n)] = true; });
     }
     var count = 0;
+    var lastVisibleSheet = "";
     await runExcel(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
@@ -1040,19 +1128,19 @@
           if (!firstTable(ws.tables.items, "bom_")) continue;
           if (selectedSet && !selectedSet[lc(ws.name)]) continue;
           log("Verifying dropdowns, layout and formulas on \"" + ws.name + "\" ...");
-          await repairBomSheet(context, wb, ws, matInfo, {}, log);
+          await repairBomSheet(context, wb, ws, matInfo, { resyncFormulas: true }, log);
+          if (ws.visibility === "Visible") lastVisibleSheet = ws.name;
           count++;
         }
       } finally {
         try {
           if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
-          wb.application.calculate(Excel.CalculationType.full);
-          await context.sync();
+          await recalculateWorkbook(context, wb, null);
         } catch (e) { /* ignore */ }
       }
     });
     log("Repaired " + count + " BOM sheet(s) and Master named ranges.");
-    return { sheetsRepaired: count };
+    return { sheetsRepaired: count, lastVisibleSheet: lastVisibleSheet };
   }
 
   /* ================= Add BOM sheet ================= */
@@ -1166,6 +1254,16 @@
           await context.sync();
           src.activate();
           await context.sync();
+          // Heal legacy hidden BOM Blank templates in older workbooks once while visible so future copies start clean
+          try {
+            await fixVolatilePrintArea(context, src);
+            await trimBloatedBomCf(context, src, 305);
+            src.showGridlines = false;
+            src.freezePanes.unfreeze();
+            await context.sync();
+            src.freezePanes.freezeRows(4);
+            await context.sync();
+          } catch (eHeal) { /* non-fatal */ }
         }
         copy = src.copy(Excel.WorksheetPositionType.after, rel);
         await context.sync();
@@ -1219,11 +1317,11 @@
       await repairBomSheet(context, wb, copy, matInfo, {
         srcBomName: srcBom.name,
         srcPlName: srcPl ? srcPl.name : "",
-        isActive: true
+        isActive: true,
+        resyncFormulas: srcWasHidden || lc(opts.source) === lc(BLANK)
       }, log);
 
-      wb.application.calculate(Excel.CalculationType.full);
-      await context.sync();
+      await recalculateWorkbook(context, wb, copy);
 
       var f3 = copy.getRange("A6").load("formulas");
       var checkM4 = copy.getRange("M4").load("values");
@@ -1415,10 +1513,13 @@
     _ensureMasterNames: ensureMasterNames,
     _applyBomDataValidation: applyBomDataValidation,
     _repairBomSheet: repairBomSheet,
+    _resyncBomFormulas: resyncBomFormulas,
+    _recalculateWorkbook: recalculateWorkbook,
     _refreshAllBomDropdownsIfRangeBased: refreshAllBomDropdownsIfRangeBased,
     _replaceTableRef: replaceTableRef,
     _canonical: { O2: canonicalO2, M4: canonicalM4, AB4: canonicalAB4, AD2: canonicalAD2 },
     inspectSheets: inspectSheets, addBomSheet: addBomSheet, repairWorkbook: repairWorkbook,
+    finalizeSheetView: finalizeSheetView,
     listMaterials: listMaterials, addMaterial: addMaterial, updateMaterial: updateMaterial,
     deleteMaterial: deleteMaterial, stampMasterChanges: stampMasterChanges,
     getMasterMode: getMasterMode, setProjectMaterialMode: setProjectMaterialMode,

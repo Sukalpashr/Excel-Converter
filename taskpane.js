@@ -1,7 +1,7 @@
 /* taskpane.js - UI controller for BOM Tools task pane */
 "use strict";
 
-var ADDIN_VERSION = "2.4";
+var ADDIN_VERSION = "2.5";
 var $ = function (id) { return document.getElementById(id); };
 var state = {
   ok: false,
@@ -583,11 +583,16 @@ function updateSheetButton() {
   updateButtons();
 }
 
+async function yieldForExcelPaint(ms) {
+  await new Promise(function (resolve) { setTimeout(resolve, ms || 120); });
+}
+
 async function addSheet() {
   updateSheetButton();
   if ($("sh-add").disabled) return;
   state.busy = true; updateSheetButton(); updateButtons();
   shLog("", true);
+  var addedName = "";
   try {
     var source = $("sh-source").value, clear = $("sh-clear").checked;
     if (sheetInfo && sheetInfo.needsTemplate) {
@@ -608,15 +613,21 @@ async function addSheet() {
       name: $("sh-name").value, project: $("sh-project").value,
       source: source, clear: clear
     }, shLog);
-    shLog("Added sheet \"" + r.name + "\".");
+    addedName = r.name || "";
     r.warnings.forEach(function (w) { shLog("WARNING: " + w); });
     $("sh-name").value = "";
   } catch (e) {
     shLog("Could not add sheet: " + (e.message || JSON.stringify(e)));
   }
-  state.busy = false; updateButtons();
+  // Finish all background workbook reads BEFORE releasing the sheet for typing, then flush Excel's active view & Formula Bar
   await refreshSheets();
   await refreshLocalFileStatus();
+  if (addedName && BomTools.finalizeSheetView) {
+    await yieldForExcelPaint(120);
+    await BomTools.finalizeSheetView(addedName);
+    shLog("Added sheet \"" + addedName + "\".");
+  }
+  state.busy = false; updateSheetButton(); updateButtons();
 }
 
 async function repairWorkbook(logger, pickerId) {
@@ -628,14 +639,20 @@ async function repairWorkbook(logger, pickerId) {
   }
   state.busy = true; updateSheetButton(); updateButtons();
   logger("", true);
+  var repairedSheet = "";
   try {
-    await BomTools.repairWorkbook(logger, picked ? { sheets: picked } : {});
+    var res = await BomTools.repairWorkbook(logger, picked ? { sheets: picked } : {});
+    repairedSheet = (res && res.lastVisibleSheet) || "";
   } catch (e) {
     logger("Repair failed: " + (e.message || JSON.stringify(e)));
   }
-  state.busy = false; updateButtons();
   await refreshSheets();
   if (state.activeTab === "home") await refreshHome();
+  if (repairedSheet && BomTools.finalizeSheetView) {
+    await yieldForExcelPaint(120);
+    await BomTools.finalizeSheetView(repairedSheet);
+  }
+  state.busy = false; updateSheetButton(); updateButtons();
 }
 
 /* =====================================================================
@@ -2086,6 +2103,7 @@ async function restoreAutomated() {
   }
   state.busy = true; updateButtons();
   restLog("", true);
+  var firstRestored = "";
   try {
     var res = await BomConvert.restoreAutomatedWorkbook(restLog, {
       sheets: picked,
@@ -2094,14 +2112,19 @@ async function restoreAutomated() {
       projectMaterials: projData,
       removeCompiled: $("rest-drop-compiled").checked
     });
+    firstRestored = (res && res.firstSheetName) || "";
     restLog("Done! Restored " + res.restoredCount + " sheet(s) back to automated BOM format.");
     res.warnings.forEach(function (w) { restLog("NOTE: " + w); });
   } catch (e) {
     restLog("Restore failed: " + (e.message || JSON.stringify(e)));
   }
-  state.busy = false;
   await check(false);
   await refreshHome();
+  if (firstRestored && BomTools.finalizeSheetView) {
+    await yieldForExcelPaint(120);
+    await BomTools.finalizeSheetView(firstRestored);
+  }
+  state.busy = false; updateButtons();
 }
 
 /* =====================================================================

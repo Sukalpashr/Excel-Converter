@@ -64,9 +64,18 @@
   async function restoreCalcAndRecalc(context, wb, prevCalcMode) {
     try {
       if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
-      wb.application.calculate(Excel.CalculationType.full);
+      if (Excel.CalculationType && Excel.CalculationType.fullRebuild) {
+        wb.application.calculate(Excel.CalculationType.fullRebuild);
+      } else {
+        wb.application.calculate(Excel.CalculationType.full);
+      }
       await context.sync();
-    } catch (e) { /* ignore */ }
+    } catch (e) {
+      try {
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+      } catch (e2) { /* ignore */ }
+    }
   }
 
   /* Write Excel 365 dynamic array formulas (SORT/UNIQUE/FILTER/# spill refs).
@@ -1304,12 +1313,13 @@
           if (wrotePo) await context.sync();
         }
 
-        // Apply window-view properties (showGridlines & freezePanes) while each restored sheet is active
+        // Apply window-view properties (showGridlines & freezePanes) & resync live table formulas while each restored sheet is active
         for (var vj = jobs.length - 1; vj >= 0; vj--) {
           try {
             var rws = jobs[vj].restored;
             rws.activate();
             await context.sync();
+            if (T && T._resyncBomFormulas) await T._resyncBomFormulas(context, rws);
             rws.showGridlines = false;
             rws.freezePanes.unfreeze();
             await context.sync();
@@ -1329,7 +1339,11 @@
     });
 
     log("Restored " + extracted.length + " sheet(s) back to automated BOM format.");
-    return { restoredCount: extracted.length, warnings: warnings };
+    return {
+      restoredCount: extracted.length,
+      firstSheetName: extracted.length ? extracted[0].name : "",
+      warnings: warnings
+    };
   }
 
   async function inspectWorkbook() {
