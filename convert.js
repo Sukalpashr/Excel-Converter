@@ -1058,6 +1058,7 @@
         var masterLookup = await readMaster(context, wb);
 
         var blankWs = wb.worksheets.getItem(BLANK);
+        blankWs.load("visibility");
         blankWs.tables.load("items/name");
         wb.worksheets.load("items/name");
         wb.tables.load("items/name");
@@ -1070,27 +1071,50 @@
         var existingNames = wb.worksheets.items.map(function (w) { return w.name; });
         var takenTables = wb.tables.items.map(function (t) { return t.name; });
 
-        // Batch A: Rename all original sheets to temp names & copy BOM Blank for each
+        // Batch A: Temporarily unhide BOM Blank before copying (copying a hidden sheet corrupts Excel's in-cell editor view)
         log("Rebuilding " + extracted.length + " sheet(s) from template ...");
-        pauseExcel(context);
-        var jobs = extracted.map(function (data, idx) {
-          data.usedMaterials.forEach(function (matName) {
-            if (!masterLookup[matName] && !masterLookup[matName.trim()]) {
-              warnings.push(data.name + ": \"" + matName + "\" is not in Master Unique Materials (add it in the Materials tab so weights calculate).");
-            }
-          });
-          var oldWs = wb.worksheets.getItem(data.name);
-          var tmpName = T.uniqueName("__tmp_" + idx, existingNames).slice(0, 31);
-          existingNames.push(tmpName);
-          oldWs.name = tmpName;
+        var blankOrigVis = blankWs.visibility;
+        var blankWasHidden = blankOrigVis !== "Visible";
+        var jobs = [];
+        try {
+          if (blankWasHidden) {
+            blankWs.visibility = Excel.SheetVisibility.visible;
+            await context.sync();
+            blankWs.activate();
+            await context.sync();
+          }
+          pauseExcel(context);
+          jobs = extracted.map(function (data, idx) {
+            data.usedMaterials.forEach(function (matName) {
+              if (!masterLookup[matName] && !masterLookup[matName.trim()]) {
+                warnings.push(data.name + ": \"" + matName + "\" is not in Master Unique Materials (add it in the Materials tab so weights calculate).");
+              }
+            });
+            var oldWs = wb.worksheets.getItem(data.name);
+            var tmpName = T.uniqueName("__tmp_" + idx, existingNames).slice(0, 31);
+            existingNames.push(tmpName);
+            oldWs.name = tmpName;
 
-          var restored = blankWs.copy(Excel.WorksheetPositionType.after, oldWs);
-          restored.name = data.name;
-          restored.visibility = Excel.SheetVisibility.visible;
-          restored.tables.load("items/name");
-          return { data: data, oldWs: oldWs, restored: restored };
-        });
-        await context.sync();
+            var restored = blankWs.copy(Excel.WorksheetPositionType.after, oldWs);
+            return { data: data, oldWs: oldWs, restored: restored };
+          });
+          await context.sync();
+
+          jobs.forEach(function (job) {
+            job.restored.name = job.data.name;
+            job.restored.visibility = Excel.SheetVisibility.visible;
+            job.restored.tables.load("items/name");
+          });
+          if (jobs.length) jobs[0].restored.activate();
+          await context.sync();
+        } finally {
+          if (blankWasHidden) {
+            try {
+              blankWs.visibility = blankOrigVis === "VeryHidden" ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
+              await context.sync();
+            } catch (eVis) { /* ignore */ }
+          }
+        }
 
         // Batch B: Rename tables, set titles/AE1, and load bomBody rowCount for all sheets
         pauseExcel(context);
@@ -1205,9 +1229,6 @@
           ws.getRange("5:5").rowHidden = true;
           ws.getRange("M:M").columnHidden = true;
           ws.getRange("AB:AB").columnHidden = true;
-          ws.showGridlines = false;
-          ws.freezePanes.unfreeze();
-          ws.freezePanes.freezeRows(4);
 
           job.oldWs.delete();
         });
@@ -1283,7 +1304,25 @@
           if (wrotePo) await context.sync();
         }
 
-        if (jobs.length) jobs[0].restored.activate();
+        // Apply window-view properties (showGridlines & freezePanes) while each restored sheet is active
+        for (var vj = jobs.length - 1; vj >= 0; vj--) {
+          try {
+            var rws = jobs[vj].restored;
+            rws.activate();
+            await context.sync();
+            rws.showGridlines = false;
+            rws.freezePanes.unfreeze();
+            await context.sync();
+            rws.freezePanes.freezeRows(4);
+            await context.sync();
+          } catch (eView) { /* non-fatal */ }
+        }
+        if (jobs.length) {
+          jobs[0].restored.activate();
+          await context.sync();
+          jobs[0].restored.getRange("B6").select();
+          await context.sync();
+        }
       } finally {
         await restoreCalcAndRecalc(context, wb, prevCalcMode);
       }

@@ -940,17 +940,51 @@
       if (plChanged) plBody.formulas = plOut;
     }
 
-    // 2. Enforce hidden table header row (row 5), hidden helper cols (M & AB), gridlines off, and freeze on VISIBLE Row 4
-    //    (Freezing Row 5 while Row 5 is hidden places the freeze split on a 0-height row and causes in-cell typing display glitches!)
+    // 2. Enforce hidden table header row (row 5), hidden helper cols (M & AB), gridlines off, and freeze on VISIBLE Row 4.
+    //    Important: freezePanes and showGridlines are window-view properties in Excel Desktop — setting them on a hidden or
+    //    never-activated sheet (such as a fresh copy of hidden BOM Blank) can corrupt Excel's in-cell editor view state.
     try {
       ws.getRange("5:5").rowHidden = true;
       ws.getRange("M:M").columnHidden = true;
       ws.getRange("AB:AB").columnHidden = true;
-      ws.showGridlines = false;
-      ws.freezePanes.unfreeze();
-      ws.freezePanes.freezeRows(4);
+      await context.sync();
     } catch (e) { /* non-fatal */ }
-    await context.sync();
+
+    if (!opts.skipFreezePanes) {
+      var prevActiveName = "";
+      var switchedActive = false;
+      try {
+        var isVisible = !!opts.isActive;
+        if (!isVisible) {
+          ws.load("visibility,name");
+          var actWs = wb.worksheets.getActiveWorksheet();
+          actWs.load("name");
+          await context.sync();
+          isVisible = ws.visibility === "Visible";
+          prevActiveName = actWs.name || "";
+          if (isVisible && lc(prevActiveName) !== lc(ws.name)) {
+            ws.activate();
+            await context.sync();
+            switchedActive = true;
+          }
+        }
+        if (isVisible) {
+          ws.showGridlines = false;
+          ws.freezePanes.unfreeze();
+          await context.sync();
+          ws.freezePanes.freezeRows(4);
+          await context.sync();
+        }
+      } catch (e) { /* non-fatal */ } finally {
+        if (switchedActive && opts.restoreActive !== false && prevActiveName) {
+          try {
+            var back = wb.worksheets.getItemOrNullObject(prevActiveName);
+            await context.sync();
+            if (!back.isNullObject) { back.activate(); await context.sync(); }
+          } catch (eBack) { /* ignore */ }
+        }
+      }
+    }
 
     // 3. Replace volatile OFFSET Print_Area & trim any legacy 2000-row CF bloat
     await fixVolatilePrintArea(context, ws);
@@ -1092,7 +1126,7 @@
       var wb = context.workbook;
       var matInfo = await ensureMasterNames(context, wb, log);
 
-      wb.worksheets.load("items/name,items/position");
+      wb.worksheets.load("items/name,items/position,items/visibility");
       wb.tables.load("items/name");
       await context.sync();
 
@@ -1117,12 +1151,37 @@
         if (ws.name !== BLANK && firstTable(ws.tables.items, "bom_") && ws.position > lastPos) { rel = ws; lastPos = ws.position; }
       });
 
+      var srcOrigVis = srcSheet.visibility;
+      var srcWasHidden = srcOrigVis !== "Visible";
       log("Copying \"" + opts.source + "\" ...");
-      var copy = src.copy(Excel.WorksheetPositionType.after, rel);
-      copy.name = newName;
-      copy.visibility = Excel.SheetVisibility.visible;
-      copy.tables.load("items/name");
-      await context.sync();
+
+      // Excel Desktop bug fix: copying a HIDDEN worksheet (BOM Blank) directly via Office.js leaves
+      // the copied sheet's window/editor view state uninitialized, causing in-cell typing display glitches
+      // (e.g. second digit invisible while typing until Enter). Always temporarily unhide the source sheet
+      // before calling .copy(), isolate .copy() in its own sync, then restore the source sheet's visibility.
+      var copy;
+      try {
+        if (srcWasHidden) {
+          src.visibility = Excel.SheetVisibility.visible;
+          await context.sync();
+          src.activate();
+          await context.sync();
+        }
+        copy = src.copy(Excel.WorksheetPositionType.after, rel);
+        await context.sync();
+        copy.name = newName;
+        copy.visibility = Excel.SheetVisibility.visible;
+        copy.activate();
+        copy.tables.load("items/name");
+        await context.sync();
+      } finally {
+        if (srcWasHidden) {
+          try {
+            src.visibility = srcOrigVis === "VeryHidden" ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
+            await context.sync();
+          } catch (eVis) { /* ignore */ }
+        }
+      }
 
       var bomT = firstTable(copy.tables.items, "bom_"), plT = firstTable(copy.tables.items, "pl_");
       if (!bomT) { copy.delete(); await context.sync(); throw new Error("The copy has no BOM table. It was removed."); }
@@ -1151,10 +1210,16 @@
         if (plT) await clearInputs(context, plT, PL_INPUT, true);
       }
 
+      // Activate the new visible sheet BEFORE applying window-view settings (showGridlines & freezePanes)
+      // so Excel Desktop initializes a clean active viewport & in-cell editor for the new sheet.
+      copy.activate();
+      await context.sync();
+
       // Ensure dropdowns, table formulas, hidden helper row/cols, freeze panes, and print setup are all working
       await repairBomSheet(context, wb, copy, matInfo, {
         srcBomName: srcBom.name,
-        srcPlName: srcPl ? srcPl.name : ""
+        srcPlName: srcPl ? srcPl.name : "",
+        isActive: true
       }, log);
 
       wb.application.calculate(Excel.CalculationType.full);
@@ -1171,6 +1236,7 @@
       }
 
       copy.activate();
+      await context.sync();
       copy.getRange("B6").select();
       await context.sync();
       result.name = newName;

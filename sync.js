@@ -1259,6 +1259,14 @@
 
       var added = [];
       try {
+        var prevActiveName = "";
+        try {
+          var prevAct = wb.worksheets.getActiveWorksheet();
+          prevAct.load("name");
+          await context.sync();
+          prevActiveName = prevAct.name || "";
+        } catch (eAct) { prevActiveName = ""; }
+
         wb.worksheets.load("items/name");
         await context.sync();
         var before = wb.worksheets.items.map(function (w) { return w.name; });
@@ -1304,8 +1312,10 @@
         log("Setting up named ranges and dropdowns ...");
         var matInfo = await T._ensureMasterNames(context, wb, log);
 
-        // Repair BOM Blank formulas, dropdown (C6:C2000), hidden row 5 / cols M & AB, freeze panes, and print setup
-        await T._repairBomSheet(context, wb, blank, matInfo, {}, log);
+        // Activate BOM Blank briefly while visible so Excel initializes its native view/freeze panes cleanly
+        blank.activate();
+        await context.sync();
+        await T._repairBomSheet(context, wb, blank, matInfo, { isActive: true, restoreActive: false }, log);
 
         // Verify no broken external links or #REF! remain on BOM Blank
         var rng = blank.getRange("A1:AB35").load("formulas");
@@ -1317,6 +1327,14 @@
           await undo("The imported blank sheet has broken formulas (#REF! or an external link). The import was undone.");
         }
 
+        // Switch away from BOM Blank before hiding it so Excel keeps an active visible sheet
+        if (prevActiveName) {
+          try {
+            var prevWs = wb.worksheets.getItemOrNullObject(prevActiveName);
+            await context.sync();
+            if (!prevWs.isNullObject) { prevWs.activate(); await context.sync(); }
+          } catch (ePrev) { /* ignore */ }
+        }
         blank.visibility = Excel.SheetVisibility.hidden;
         await context.sync();
         await T._openMaster(context);
