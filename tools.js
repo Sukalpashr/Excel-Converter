@@ -274,6 +274,8 @@
     var stamp = formatSheetTimestamp(timeIso);
     var text = buildBannerSummary(entries, stamp);
     if (!text) return;
+    var proj = root.BomSync && root.BomSync.getProject ? root.BomSync.getProject() : null;
+    if (proj && proj.active) text = "PROJECT-ONLY list: " + proj.name + " - " + text;
     try {
       var cell = ws.getRange("A3");
       cell.values = [[text]];

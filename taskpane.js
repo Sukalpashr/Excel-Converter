@@ -28,6 +28,9 @@ var matLog = makeLog("mat-log");
 var localLog = makeLog("local-log");
 var syncLog = makeLog("sync-log");
 var homeRepairLog = makeLog("home-repair-log");
+var projLog = makeLog("proj-log");
+var restProjLog = makeLog("rest-proj-log");
+var fixLog = makeLog("fixnames-log");
 
 function setDot(id, kind) {
   var el = $(id);
@@ -71,6 +74,9 @@ function updateButtons() {
   if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !restPicked;
   if ($("sh-repair")) $("sh-repair").disabled = state.busy || !shRepPicked;
   if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy || !homeRepPicked;
+
+  if ($("fixnames-btn")) $("fixnames-btn").disabled = state.busy || !state.canRestore;
+  updateProjectButtons();
 
   if (!state.ok) {
     setReqHint("conv-req-hint", "Open an automated BOM workbook to flatten.", false);
@@ -208,9 +214,11 @@ function showTab(name, opts) {
     refreshLocalFileStatus();
     refreshSync();
     renderSessionChanges();
+    refreshProject();
     BomSync.watch(localLog, handleAutoSaveEvent);
   }
   if (name === "convert") {
+    refreshProject();
     if (opts.submode) setConvertSubmode(opts.submode);
     check(!opts.submode);
   }
@@ -285,7 +293,15 @@ async function refreshLocalFileStatus() {
       await BomSync.ensureSeededFromWorkbook();
     }
     var info = await BomSync.getLocalFileStatus();
-    if (info.hasCache) {
+    if (info.project) {
+      if (st) {
+        st.className = "status ok";
+        st.textContent = "Project list \"" + info.project + "\" auto-saves in its own slot (" + info.cachedCount + " materials). The shared master list is untouched.";
+      }
+      if (tag) { tag.className = "sum-meta ok"; tag.textContent = "Project list"; }
+      if (homeSt) homeSt.textContent = "This workbook uses the project-only list \"" + info.project + "\" (" + info.cachedCount + " items).";
+      if (shSt) shSt.textContent = "Project-only list \"" + info.project + "\" in use (" + info.cachedCount + " items).";
+    } else if (info.hasCache) {
       if (st) {
         st.className = "status ok";
         st.textContent = "Auto-saving in built-in storage (" + info.cachedCount + " materials) — never asks to reconnect.";
@@ -335,6 +351,31 @@ async function localSave() {
   await refreshLocalFileStatus();
 }
 
+/* Saves text as a file (Save As dialog where available, otherwise a normal download). */
+async function saveTextFile(suggestedName, text, description) {
+  if (BomSync.supportsSavePicker && BomSync.supportsSavePicker()) {
+    try {
+      var handle = await window.showSaveFilePicker({
+        suggestedName: suggestedName,
+        types: [{ description: description || "JSON", accept: { "application/json": [".json"] } }]
+      });
+      var writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      return { saved: true, cancelled: false, name: handle.name };
+    } catch (err) {
+      if (err && err.name === "AbortError") return { saved: false, cancelled: true, name: suggestedName };
+    }
+  }
+  var blob = new Blob([text], { type: "application/json;charset=utf-8" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = suggestedName;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  return { saved: true, cancelled: false, name: suggestedName };
+}
+
 async function localExportDownload() {
   localLog("", true);
   try {
@@ -346,7 +387,7 @@ async function localExportDownload() {
     if (BomSync.supportsSavePicker && BomSync.supportsSavePicker()) {
       try {
         var handle = await window.showSaveFilePicker({
-          suggestedName: "master-materials.json",
+          suggestedName: exp.fileName || "master-materials.json",
           types: [{ description: "BOM Master Materials JSON", accept: { "application/json": [".json"] } }]
         });
         var writable = await handle.createWritable();
@@ -361,10 +402,10 @@ async function localExportDownload() {
     var blob = new Blob([exp.json], { type: "application/json;charset=utf-8" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
-    a.href = url; a.download = "master-materials.json";
+    a.href = url; a.download = exp.fileName || "master-materials.json";
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    localLog("Exported master-materials.json (" + exp.count + " materials) for backup or transfer.");
+    localLog("Exported " + (exp.fileName || "master-materials.json") + " (" + exp.count + " materials) for backup or transfer.");
   } catch (e) {
     localLog("Export failed: " + (e.message || e));
   }
@@ -1105,7 +1146,9 @@ async function refreshMaterials(keepName) {
     var dl = $("m-cats"); dl.innerHTML = "";
     res.categories.forEach(function (c) { var o = document.createElement("option"); o.value = c; dl.appendChild(o); });
     var incompleteCount = res.rows.filter(function (r) { return !BomTools.getMaterialValidationStatus(r).valid; }).length;
-    st.textContent = res.rows.length + " items" + (incompleteCount ? (" · " + incompleteCount + " incomplete") : " · all ready");
+    st.textContent = res.rows.length + " items" + (incompleteCount ? (" · " + incompleteCount + " incomplete") : " · all ready") +
+      (state.project && state.project.active ? " · project list" : "");
+    renderProjectPicker();
     var again = keepName && res.rows.filter(function (r) { return r.material.toLowerCase() === keepName.toLowerCase(); })[0];
     if (again) setMatMode("edit", again);
     else if (mat.mode === "edit" && mat.selected) setMatMode("add");
@@ -1318,6 +1361,17 @@ async function convert() {
   state.busy = true; updateButtons();
   log("", true);
   try {
+    try { await BomSync.loadProjectState(); } catch (e0) { /* ignore */ }
+    if (BomSync.getProject().active && $("conv-save-project").checked) {
+      try {
+        var pexp = await BomSync.buildProjectExport();
+        var psv = await saveTextFile(pexp.fileName, pexp.json, "BOM project materials JSON");
+        if (psv.cancelled) log("Project list file was not saved (cancelled). It is still kept in this computer's built-in storage.");
+        else log("Saved project list \"" + pexp.name + "\" (" + pexp.count + " materials) as " + psv.name + ".");
+      } catch (e1) {
+        log("Could not save the project list file (" + (e1.message || e1) + "). It is still kept in built-in storage. Continuing ...");
+      }
+    }
     var warnings = await BomConvert.convertWorkbook(mode, log, { compiled: $("compiled").checked });
     log("Done! Review the sheets, then use File > Save As to save.");
     warnings.forEach(function (w) { log("WARNING: " + w); });
@@ -1351,6 +1405,180 @@ async function restoreAutomated() {
   state.busy = false;
   await check(false);
   await refreshHome();
+}
+
+/* =====================================================================
+ * Project-only materials list (one-time materials for a single job)
+ * ===================================================================== */
+function projectCopyMode() {
+  var r = document.querySelector('input[name="projcopy"]:checked');
+  return r ? r.value : "all";
+}
+
+function renderProjectPicker() {
+  var active = state.project && state.project.active;
+  if (!active && projectCopyMode() === "pick" && mat.rows.length) {
+    renderSheetPicker("proj-pick", mat.rows.map(function (r) { return { name: r.material, tag: r.category }; }),
+      "Materials to copy (" + mat.rows.length + ")");
+  } else {
+    renderSheetPicker("proj-pick", [], "");
+  }
+}
+
+function updateProjectButtons() {
+  var start = $("proj-start");
+  if (!start) return;
+  var active = state.project && state.project.active;
+  var name = ($("proj-name").value || "").trim();
+  var pick = projectCopyMode() === "pick";
+  var picked = getPickedSheets("proj-pick").length;
+  start.disabled = state.busy || active || !mat.hasMaster || !name || (pick && !picked);
+  if ($("proj-save-btn")) $("proj-save-btn").disabled = state.busy || !active;
+  if ($("proj-stop")) $("proj-stop").disabled = state.busy || !active;
+  if ($("proj-load-btn")) $("proj-load-btn").disabled = state.busy;
+  if ($("rest-proj-load-btn")) $("rest-proj-load-btn").disabled = state.busy;
+
+  var drawerOff = $("proj-off") && $("proj-off").hidden;
+  if (drawerOff) { setReqHint("proj-req-hint", "", false); return; }
+  if (!mat.hasMaster) setReqHint("proj-req-hint", "Open an automated BOM workbook (with the Master Unique Materials sheet) to start a project list.", false);
+  else if (!name) setReqHint("proj-req-hint", "Type a name for the project list.", false);
+  else if (pick && !picked) setReqHint("proj-req-hint", "Select at least one material to copy.", true);
+  else setReqHint("proj-req-hint", "", false);
+}
+
+async function refreshProject() {
+  var info;
+  try { info = await BomSync.loadProjectState(); } catch (e) { info = { active: false, name: "" }; }
+  state.project = info;
+  var st = $("proj-status"), tag = $("proj-summary-tag");
+  if (!st) return;
+  $("proj-off").hidden = info.active;
+  $("proj-on").hidden = !info.active;
+  $("conv-proj-row").hidden = !info.active;
+  if (info.active) {
+    st.className = "status ok";
+    st.textContent = "Project list \"" + info.name + "\" is active. Edits stay in this workbook and its own saved copy; the shared master list is untouched.";
+    tag.className = "sum-meta ok"; tag.textContent = "Active";
+  } else {
+    st.className = "status";
+    st.textContent = "Using the shared master list.";
+    tag.className = "sum-meta"; tag.textContent = "Off";
+  }
+
+  // Restore tab: say which list will be used and whether a saved copy exists on this computer
+  var rs = $("rest-proj-status");
+  if (rs) {
+    if (info.active) {
+      var ls = null;
+      try { ls = await BomSync.getLocalFileStatus(); } catch (e) { ls = null; }
+      if (ls && ls.hasCache) {
+        rs.className = "status ok";
+        rs.textContent = "Project list \"" + info.name + "\" will be used (" + ls.cachedCount + " materials saved on this computer).";
+      } else {
+        rs.className = "status warn";
+        rs.textContent = "Project list \"" + info.name + "\" has no saved copy on this computer. Load its file below before restoring.";
+      }
+    } else {
+      rs.className = "status";
+      rs.textContent = "Shared master list in use. Load a project list file to use that instead.";
+    }
+  }
+  renderProjectPicker();
+  updateButtons();
+}
+
+async function projectStart() {
+  updateProjectButtons();
+  if ($("proj-start").disabled) return;
+  var name = $("proj-name").value.trim();
+  var keep = projectCopyMode() === "pick" ? getPickedSheets("proj-pick") : null;
+  if (keep && keep.length >= mat.rows.length) keep = null;      // everything picked = full copy
+  state.busy = true; updateButtons(); projLog("", true);
+  try {
+    if (keep) projLog("Removing " + (mat.rows.length - keep.length) + " unpicked material(s) from this workbook's list only ...");
+    var r = await BomSync.startProject(name, { keep: keep });
+    projLog("Project list \"" + r.name + "\" started with " + r.count + " materials. From now on changes stay in this workbook and its own saved copy.");
+    projLog("Tip: click \"Save project list to file\" to keep a copy you can reload later.");
+  } catch (e) {
+    projLog("Could not start the project list: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false;
+  await refreshMaterials();
+  await refreshProject();
+  await refreshLocalFileStatus();
+}
+
+async function projectSave() {
+  state.busy = true; updateButtons(); projLog("", true);
+  try {
+    var exp = await BomSync.buildProjectExport();
+    var res = await saveTextFile(exp.fileName, exp.json, "BOM project materials JSON");
+    projLog(res.cancelled ? "Save cancelled." : "Saved \"" + res.name + "\" (" + exp.count + " materials).");
+  } catch (e) {
+    projLog("Could not save the project list: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false; updateButtons();
+}
+
+async function projectLoadFile(ev, logger) {
+  var file = ev.target && ev.target.files && ev.target.files[0];
+  if (!file) return;
+  state.busy = true; updateButtons(); logger("", true);
+  try {
+    var res = await BomSync.importProjectJson(await file.text(), file.name, logger);
+    if (res.applied) {
+      logger("Loaded project list \"" + res.name + "\" (" + res.count + " materials) into this workbook. The shared master list is untouched.");
+    } else {
+      logger("Loaded project list \"" + res.name + "\" (" + res.count + " materials). It will be used when you restore the converted sheets.");
+    }
+  } catch (e) {
+    logger("Could not load the file: " + (e.message || JSON.stringify(e)));
+  }
+  ev.target.value = "";
+  state.busy = false;
+  await refreshMaterials();
+  await refreshProject();
+  await refreshLocalFileStatus();
+}
+
+async function projectStop() {
+  if (!state.confirmStop) {
+    state.confirmStop = true;
+    $("proj-stop").textContent = "Confirm: switch back to shared master list";
+    projLog("This reloads the shared master list into this workbook. Materials that exist only in the project list are removed from the sheet (your saved project file keeps them), and BOM rows using them lose their weights. Click again to confirm.", true);
+    setTimeout(function () {
+      if (state.confirmStop) { state.confirmStop = false; $("proj-stop").textContent = "Switch back to shared master list"; }
+    }, 8000);
+    return;
+  }
+  state.confirmStop = false;
+  $("proj-stop").textContent = "Switch back to shared master list";
+  state.busy = true; updateButtons(); projLog("", true);
+  try {
+    var r = await BomSync.stopProject(projLog);
+    projLog(r.restored
+      ? "Back on the shared master list (" + r.added + " added, " + r.removed + " project-only removed). Project list \"" + r.name + "\" is still saved on this computer."
+      : "Back on the shared master list. Project list \"" + r.name + "\" is still saved on this computer.");
+  } catch (e) {
+    projLog("Could not switch back: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false;
+  await refreshMaterials();
+  await refreshProject();
+  await refreshLocalFileStatus();
+}
+
+async function fixNames() {
+  state.busy = true; updateButtons(); fixLog("", true);
+  try {
+    var r = await BomConvert.repairGrowingNames(fixLog);
+    fixLog(r.fixed.length
+      ? "Done. Every material in the BOM now shows its name in the purchase list."
+      : "Nothing needed repairing.");
+  } catch (e) {
+    fixLog("Repair failed: " + (e.message || JSON.stringify(e)));
+  }
+  state.busy = false; updateButtons();
 }
 
 /* =====================================================================
@@ -1471,6 +1699,20 @@ Office.onReady(function (info) {
   $("local-import-btn").onclick = function () { $("local-import-input").click(); };
   $("local-import-input").onchange = localImportFile;
 
+  // Project-only materials list + repair of plain sheets
+  $("proj-start").onclick = projectStart;
+  $("proj-save-btn").onclick = projectSave;
+  $("proj-stop").onclick = projectStop;
+  $("proj-name").oninput = updateButtons;
+  Array.prototype.forEach.call(document.getElementsByName("projcopy"), function (r) {
+    r.onchange = function () { renderProjectPicker(); updateButtons(); };
+  });
+  $("proj-load-btn").onclick = function () { $("proj-load-input").click(); };
+  $("proj-load-input").onchange = function (ev) { projectLoadFile(ev, projLog); };
+  $("rest-proj-load-btn").onclick = function () { $("rest-proj-load-input").click(); };
+  $("rest-proj-load-input").onchange = function (ev) { projectLoadFile(ev, restProjLog); };
+  $("fixnames-btn").onclick = fixNames;
+
   // Optional GitHub sync
   $("sync-pull").onclick = syncPull;
   $("sync-push").onclick = syncPush;
@@ -1497,6 +1739,7 @@ Office.onReady(function (info) {
 
   // Top nav tabs — always opens to Home tab!
   TABS.forEach(function (t) { $("tab-" + t).onclick = function () { showTab(t); }; });
+  BomSync.loadProjectState().then(function () { refreshProject(); }, function () {});
   showTab("home");
   BomSync.watch(localLog, handleAutoSaveEvent);
 });

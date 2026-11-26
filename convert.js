@@ -73,8 +73,13 @@
     };
     var f = {};
     f.O = '=IF(' + item + ',' + k + ',"")';
-    f.AB = '=IF(' + item + ',IFERROR(SMALL(' + M + ',COUNTIF(' + M + ',"<="&' + prev + ')+1),""),"")';
-    f.P = '=IF(' + item + ',IFERROR(INDEX(' + C + ',MATCH(AB' + r + ',' + M + ',0)),""),' +
+    // Names no longer depend on a per-row helper column (M): any row typed or inserted into the BOM is picked up.
+    // rank(name) = how many entries sort before it; the next distinct name has rank COUNTIF(C,"<="&previous name).
+    var rankArr = 'INDEX(COUNTIF(' + C + ',"<"&' + C + ')+(' + C + '="")*1000000,0)';
+    f.AB = r === 5
+      ? '=IF(' + item + ',0,"")'
+      : '=IF(' + item + ',IF(P' + (r - 1) + '="","",COUNTIF(' + C + ',"<="&P' + (r - 1) + ')),"")';
+    f.P = '=IF(' + item + ',IFERROR(INDEX(' + C + ',MATCH(AB' + r + ',' + rankArr + ',0)),""),' +
           'IF(' + gt + ',"Grand Total Weight in KG :",IF(' + rq + ',"Requested by:","")))';
     f.Q = '=IF(' + rq + ',"Procurement",IF(' + after + ',"",IF(' + bar + ',$AE$1,"")))';
     f.R = '=IF(' + after + ',"",IF(' + bar + ',ROUNDUP(SUMIF(' + C + ',P' + r + ',' + L + ')/Q' + r + ',0),' +
@@ -339,7 +344,7 @@
     setBorders(ws.getRange("O5:AA" + PL_LAST), false);
 
     if (last >= first) setBorders(ws.getRange("A" + first + ":L" + last), true);
-    var missing = writeBomBlockBatched(ws, S, master, { first: first, last: last, tot: tot, helperM: true });
+    var missing = writeBomBlockBatched(ws, S, master, { first: first, last: last, tot: tot, helperM: false });
 
     setBorders(ws.getRange("A" + tot + ":L" + tot), true, true);
     ws.getRange("I" + tot + ":J" + tot).formulas = [[
@@ -891,6 +896,11 @@
     var warnings = [];
     var extracted = [];
 
+    // Project-only list? Then the restore uses that list (never the shared master).
+    try { await S.loadProjectState(); } catch (e) { /* ignore */ }
+    var proj = S.getProject();
+    if (proj.active) log("Using project list \"" + proj.name + "\" (not the shared master list).");
+
     var selectedSet = null;
     if (Array.isArray(opts.sheets)) {
       if (!opts.sheets.length) throw new Error("Select at least one converted sheet to restore.");
@@ -953,7 +963,10 @@
     // 3. Optionally sync the latest local computer master list before restoring formulas
     if (opts.syncLocal !== false) {
       try {
-        await S.pullLocal(log, { allowPrompt: true, syncRemovals: true });
+        var pulled = await S.pullLocal(log, { allowPrompt: true, syncRemovals: true });
+        if (proj.active && pulled && pulled.empty) {
+          warnings.push("No saved copy of project list \"" + proj.name + "\" was found on this computer. Load its project file (Restore tab > Project materials list) and restore again so the custom materials get their weights.");
+        }
       } catch (e) {
         log("Note: skipped local master file sync (" + (e.message || e) + ").");
       }
@@ -1234,6 +1247,55 @@
     return out;
   }
 
+  /* Repairs already-converted (plain, auto-growing) sheets: rewrites the purchase-list name formulas (columns P and AB)
+   * so every material typed or inserted into the BOM shows up, without needing the old hidden helper column M.
+   * Only P5:P32 and AB5:AB32 are touched; typed Stock / PO values and formatting stay as they are. */
+  async function repairGrowingNames(log) {
+    log = log || function () {};
+    var fixed = [], skipped = [];
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      wb.worksheets.load("items/name,items/visibility");
+      await context.sync();
+      wb.worksheets.items.forEach(function (ws) { ws.tables.load("items/name"); });
+      await context.sync();
+      var conv = await findConvertedSheets(context, wb, wb.worksheets.items);
+      if (!conv.length) throw new Error("No converted (plain) BOM sheets found in this workbook.");
+
+      var loads = conv.map(function (ws) {
+        return { ws: ws, colI: ws.getRange("I1:I" + BOTTOM).load("values"), p5: ws.getRange("P5").load("formulas") };
+      });
+      await context.sync();
+
+      pauseExcel(context);
+      loads.forEach(function (L) {
+        var f5 = String(L.p5.formulas[0][0] || "");
+        if (f5.indexOf("$AE$2") < 0) { skipped.push(L.ws.name + " (fixed purchase list - nothing to repair)"); return; }
+        var tot = 0, v = L.colI.values;
+        for (var i = 4; i < v.length; i++) {
+          if (String(v[i][0]).trim().toLowerCase() === "total:") { tot = i + 1; break; }
+        }
+        if (!tot) { skipped.push(L.ws.name + " (no Total: row found)"); return; }
+        var pCol = [], abCol = [];
+        for (var r = 5; r <= PL_LAST; r++) {
+          var f = plFormulas(r, tot);
+          pCol.push([f.P]); abCol.push([f.AB]);
+        }
+        L.ws.getRange("P5:P" + PL_LAST).formulas = pCol;
+        L.ws.getRange("AB5:AB" + PL_LAST).formulas = abCol;
+        fixed.push(L.ws.name);
+      });
+      await context.sync();
+      if (fixed.length) {
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+      }
+    });
+    fixed.forEach(function (n) { log("Repaired purchase-list names on \"" + n + "\"."); });
+    skipped.forEach(function (n) { log("Skipped " + n + "."); });
+    return { fixed: fixed, skipped: skipped };
+  }
+
   /* High-speed batched Flatten conversion across all BOM sheets under Manual calculation mode */
   async function convertWorkbook(mode, log, opts) {
     log = log || function () {};
@@ -1357,6 +1419,7 @@
     convertWorkbook: convertWorkbook,
     restoreAutomatedWorkbook: restoreAutomatedWorkbook,
     inspectWorkbook: inspectWorkbook,
+    repairGrowingNames: repairGrowingNames,
     plFormulas: plFormulas,
     compileMaterials: compileMaterials,
     CAP: CAP,

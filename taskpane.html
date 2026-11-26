@@ -1126,6 +1126,54 @@
         <div id="mat-log" class="log"></div>
       </div>
 
+      <!-- Collapsible Drawer: Project-only materials (one-time list for a single job) -->
+      <details class="drawer" id="proj-drawer">
+        <summary>
+          <span class="sum-left"><span>Project-only materials</span></span>
+          <span id="proj-summary-tag" class="sum-meta">Off</span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <p class="note" style="margin-top:8px;margin-bottom:8px">
+            Need custom materials for one job without touching the shared master list? Give this workbook its <b>own list</b>.
+            Add, edit or remove anything in it &mdash; the master list never changes. It is saved separately, so you can
+            reload it from a file later (for example after converting to plain Excel and back).
+          </p>
+          <div id="proj-status" class="status" style="margin-bottom:8px">Checking...</div>
+
+          <div id="proj-off">
+            <label class="field">
+              <span>Project list name</span>
+              <input type="text" id="proj-name" placeholder="e.g. Ravibhawan Block D" autocomplete="off">
+            </label>
+            <label class="opt">
+              <input type="radio" name="projcopy" value="all" checked>
+              <b>Start with a copy of the whole master list</b>
+              <span>Every material below is copied; then add your one-time materials.</span>
+            </label>
+            <label class="opt">
+              <input type="radio" name="projcopy" value="pick">
+              <b>Only copy the materials I pick</b>
+              <span>Unpicked ones are removed from this workbook's list only (the master list is not touched).</span>
+            </label>
+            <div id="proj-pick" class="sheet-pick" hidden></div>
+            <div id="proj-req-hint" class="req-hint" hidden></div>
+            <button id="proj-start" class="primary" disabled>Start project-only list</button>
+          </div>
+
+          <div id="proj-on" hidden>
+            <button id="proj-save-btn" class="primary" style="width:100%">Save project list to file</button>
+            <button id="proj-stop" style="width:100%;margin-top:6px">Switch back to shared master list</button>
+          </div>
+
+          <div class="btnrow" style="margin-top:6px">
+            <button id="proj-load-btn" style="flex:1">Load project list file...</button>
+            <input type="file" id="proj-load-input" accept=".json,application/json" hidden>
+          </div>
+          <div id="proj-log" class="log"></div>
+        </div>
+      </details>
+
       <!-- Collapsible Drawer: Built-in Computer Storage + JSON Backup / Transfer -->
       <details class="drawer subtle" id="local-drawer">
         <summary>
@@ -1223,6 +1271,10 @@
             <input type="checkbox" id="compiled">
             <span>Also add a "Compiled Purchase List" sheet combining all BOMs</span>
           </label>
+          <label class="chk" id="conv-proj-row" hidden>
+            <input type="checkbox" id="conv-save-project" checked>
+            <span>Save the <b>project materials list</b> as a separate file first (the Master sheet is removed when converting)</span>
+          </label>
           <label class="chk">
             <input type="checkbox" id="iscopy">
             <span><b>This workbook is a copy</b>, not my original automated file.</span>
@@ -1269,14 +1321,36 @@
           <button id="restore-btn" class="primary" disabled>Restore Selected Sheets</button>
           <div id="rest-log" class="log"></div>
         </div>
+
+        <div class="card">
+          <div class="card-title"><span>Project materials list</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Used a project-only list before converting? Load its saved file here and it is used when you restore, so your one-time materials get their weights back.
+          </p>
+          <div id="rest-proj-status" class="status" style="margin-bottom:8px">Shared master list in use.</div>
+          <div class="btnrow">
+            <button id="rest-proj-load-btn" style="flex:1">Load project list file...</button>
+            <input type="file" id="rest-proj-load-input" accept=".json,application/json" hidden>
+          </div>
+          <div id="rest-proj-log" class="log"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Names missing in a purchase list?</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Fixes plain sheets made earlier, where a row you added shows in the purchase list without its material name. Typed Stock / PO values are not touched.
+          </p>
+          <button id="fixnames-btn" style="width:100%" disabled>Repair purchase-list names</button>
+          <div id="fixnames-log" class="log"></div>
+        </div>
       </div>
     </section>
   </main>
 
-  <script src="convert.js?v=14"></script>
-  <script src="tools.js?v=14"></script>
-  <script src="template-data.js?v=14"></script>
-  <script src="sync.js?v=14"></script>
-  <script src="taskpane.js?v=14"></script>
+  <script src="convert.js?v=15"></script>
+  <script src="tools.js?v=15"></script>
+  <script src="template-data.js?v=15"></script>
+  <script src="sync.js?v=15"></script>
+  <script src="taskpane.js?v=15"></script>
 </body>
 </html>
