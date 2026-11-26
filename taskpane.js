@@ -1,7 +1,7 @@
 /* taskpane.js - UI controller for BOM Tools task pane */
 "use strict";
 
-var ADDIN_VERSION = "2.2";
+var ADDIN_VERSION = "2.3";
 var $ = function (id) { return document.getElementById(id); };
 var state = {
   ok: false,
@@ -1947,7 +1947,7 @@ async function openCopy(logger, tipText) {
   logger("Reading this workbook...", true);
   try {
     var b64 = await getFileBase64();
-    await Excel.run(async function (context) {
+    await (BomTools.runExcel || Excel.run)(async function (context) {
       Excel.createWorkbook(b64).open();
       await context.sync();
     });

@@ -85,6 +85,16 @@
   var AUDIT_KEYS = ["lastAction", "lastModified"];
 
   function noop() {}
+  function runExcel(fn) {
+    if (root.BomTools && typeof root.BomTools.runExcel === "function") return root.BomTools.runExcel(fn);
+    try {
+      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
+          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
+        return Excel.run({ delayForCellEdit: true }, fn);
+      }
+    } catch (e) { /* fall through */ }
+    return Excel.run(fn);
+  }
   function lc(s) { return String(s).trim().toLowerCase(); }
   function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
   function isNil(v) { return v === null || v === undefined || (typeof v === "number" && isNaN(v)); }
@@ -1076,7 +1086,7 @@
     var syncRemovals = !!opts.syncRemovals;
     var T = root.BomTools, res = { added: 0, updated: 0, removed: 0, skipped: [] };
     suppressWatch(3500);
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var m = await T._openMaster(context);
       var hasAuditMeta = list.some(function (r) { return r.lastAction || r.lastModified; });
@@ -1236,7 +1246,7 @@
       b64 = bufToB64(await res.arrayBuffer());
     }
 
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
@@ -1338,13 +1348,15 @@
     if (watcher.on) return;
     var T = root.BomTools;
     try {
-      await Excel.run(async function (context) {
+      await runExcel(async function (context) {
         var ws = context.workbook.worksheets.getItemOrNullObject(T.MASTER);
         await context.sync();
         if (ws.isNullObject) return;
         watcher.snap = await workbookList();
-        ws.onChanged.add(function () {
+        ws.onChanged.add(function (ev) {
           if (Date.now() < watcher.ignoreUntil) return;
+          if (ev && ev.source && String(ev.source) !== "Local") return;
+          if (ev && ev.changeType && ev.changeType !== "RangeEdited" && ev.changeType !== "RowInserted" && ev.changeType !== "RowDeleted") return;
           clearTimeout(watcher.timer);
           watcher.timer = setTimeout(async function () {
             if (watcher.busy || Date.now() < watcher.ignoreUntil) return;
@@ -1416,7 +1428,7 @@
               }
             } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;
-          }, 1400);
+          }, 1800);
         });
         await context.sync();
         watcher.on = true;

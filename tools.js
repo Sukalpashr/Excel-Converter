@@ -42,6 +42,17 @@
   function lc(s) { return String(s).trim().toLowerCase(); }
   function noop() {}
 
+  /* Uses ExcelApi 1.9 delayForCellEdit so background add-in calls never interrupt active cell typing. */
+  function runExcel(fn) {
+    try {
+      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
+          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
+        return Excel.run({ delayForCellEdit: true }, fn);
+      }
+    } catch (e) { /* fall through */ }
+    return Excel.run(fn);
+  }
+
   /* ---------------- pure helpers (unit-tested in node) ---------------- */
   function safeId(s) {
     return String(s).trim().replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "Sheet";
@@ -414,7 +425,7 @@
   async function getMasterMode() {
     var out = { isProject: false, active: false, projectName: "", name: "", created: "" };
     try {
-      await Excel.run(async function (context) {
+      await runExcel(async function (context) {
         var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
         await context.sync();
         out = await readMasterMode(context, ws.isNullObject ? null : ws);
@@ -426,7 +437,7 @@
   async function setProjectMaterialMode(projectName) {
     var cleanName = String(projectName || "").trim() || "Project Custom Materials";
     var out = { isProject: true, active: true, projectName: cleanName, name: cleanName };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
       await context.sync();
       out = await writeMasterMode(context, ws.isNullObject ? null : ws, cleanName);
@@ -436,7 +447,7 @@
 
   async function exitProjectMaterialMode() {
     var out = { isProject: false, active: false, projectName: "", name: "" };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
       await context.sync();
       out = await writeMasterMode(context, ws.isNullObject ? null : ws, null);
@@ -458,7 +469,7 @@
     var source = opts.source || "clone";
     var remaining = 0;
 
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
 
@@ -565,7 +576,7 @@
   async function stampMasterChanges(entries, timeIso) {
     if (!entries || !entries.length) return;
     var stamp = formatSheetTimestamp(timeIso);
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var m = await openMaster(context);
       var rowEntries = entries.filter(function (e) { return normalizeActionType(e.type) !== "removed" && e.material; });
       if (rowEntries.length) {
@@ -734,10 +745,11 @@
     };
   }
 
-  /* Explicitly sets the Materials dropdown on C6:C2000 of a BOM sheet so it works reliably after template import & sheet copy. */
-  async function applyBomDataValidation(context, ws, matInfo, log) {
+  /* Explicitly sets the Materials dropdown on the BOM table rows (C6:C<endRow>) and clears stale C<endRow+1>:C2000 bloat. */
+  async function applyBomDataValidation(context, ws, matInfo, log, maxRow) {
     log = log || noop;
-    var target = ws.getRange("C6:C2000");
+    var endRow = Math.max(305, Number(maxRow) || 305);
+    var target = ws.getRange("C6:C" + endRow);
     var alertCfg = {
       showAlert: true,
       style: Excel.DataValidationAlertStyle.stop,
@@ -746,6 +758,9 @@
     };
 
     try {
+      if (endRow < 2000) {
+        try { ws.getRange("C" + (endRow + 1) + ":C2000").dataValidation.clear(); } catch (eClr) { /* ignore */ }
+      }
       target.dataValidation.clear();
       target.dataValidation.rule = {
         list: {
@@ -778,6 +793,76 @@
     }
   }
 
+  /* Replaces volatile OFFSET(...) Print_Area with non-volatile INDEX(...) Print_Area so typing never triggers volatile layout recalculations. */
+  async function fixVolatilePrintArea(context, ws) {
+    try {
+      ws.names.load("items/name,items/formula");
+      await context.sync();
+      var pa = ws.names.items.filter(function (nm) {
+        var n = lc(nm.name || "");
+        return n === "_xlnm.print_area" || n === "print_area";
+      })[0];
+      if (!pa) return;
+      var curF = String(pa.formula || "");
+      if (curF.toUpperCase().indexOf("OFFSET(") < 0) return;
+      var q = "'" + String(ws.name).replace(/'/g, "''") + "'";
+      var nonVolatile = "=" + q + "!$A$1:INDEX(" + q + "!$AA:$AA,MAX(" + q + "!$M$4+2," + q + "!$AB$4+8))";
+      pa.delete();
+      await context.sync();
+      try {
+        ws.names.add("_xlnm.Print_Area", nonVolatile);
+        await context.sync();
+      } catch (eAdd) {
+        try {
+          ws.pageLayout.setPrintArea("A1:AA306");
+          await context.sync();
+        } catch (eFb) { /* ignore */ }
+      }
+    } catch (e) { /* non-fatal on hosts without sheet-scoped names */ }
+  }
+
+  /* Tightens legacy 2,000-row Conditional Formatting rules (31,920 cells!) down to the exact BOM table height so typing stays snappy. */
+  async function trimBloatedBomCf(context, ws, tableEnd) {
+    if (tableEnd >= 2000) return;
+    try {
+      var probe = ws.getRange("A" + (tableEnd + 1) + ":L" + (tableEnd + 1));
+      probe.conditionalFormats.load("items/id");
+      await context.sync();
+      if (!probe.conditionalFormats.items.length) return;
+
+      // Clear ONLY rules that extend past the BOM table (rows 6..tableEnd rules are untouched!)
+      probe.conditionalFormats.clearAll();
+
+      // Re-apply the 5 BOM helper CF rules tightly bounded to 6..tableEnd
+      var cfSec = ws.getRange("A6:L" + tableEnd).conditionalFormats.add("Custom");
+      cfSec.custom.rule.formula = '=AND($C6="",$B6<>"")';
+      cfSec.custom.format.font.bold = true;
+      cfSec.stopIfTrue = false;
+
+      var cfUnk = ws.getRange("C6:C" + tableEnd).conditionalFormats.add("Custom");
+      cfUnk.custom.rule.formula = '=AND($C6<>"",$M6="")';
+      cfUnk.custom.format.font.color = "#9C0006";
+      cfUnk.custom.format.fill.color = "#FFC7CE";
+      cfUnk.stopIfTrue = false;
+
+      var addReqCf = function (addr, formula) {
+        var cf = ws.getRange(addr).conditionalFormats.add("Custom");
+        cf.custom.rule.formula = formula;
+        cf.custom.format.font.color = "#9C0006";
+        cf.custom.format.fill.color = "#FFC7CE";
+        ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom"].forEach(function (e) {
+          cf.custom.format.borders.getItem(e).style = "Continuous";
+        });
+        cf.stopIfTrue = false;
+      };
+      addReqCf("D6:D" + tableEnd, '=IF(ISNUMBER($M6),AND(OR(INDEX(WtUnit,$M6)="kg/m",INDEX(WtUnit,$M6)="kg/m²"),$D6=""),FALSE)');
+      addReqCf("E6:E" + tableEnd, '=IF(ISNUMBER($M6),AND(INDEX(WtUnit,$M6)="kg/m²",$E6=""),FALSE)');
+      addReqCf("G6:G" + tableEnd, '=AND(ISNUMBER($M6),$G6="")');
+
+      await context.sync();
+    } catch (e) { /* non-fatal */ }
+  }
+
   /* Restores/verifies layout, hidden helper rows/cols, header formulas, print setup, and dropdown on a BOM sheet. */
   async function repairBomSheet(context, wb, ws, matInfo, opts, log) {
     opts = opts || {};
@@ -792,17 +877,20 @@
     var bomName = bomT.name;
     var plName = plT ? plT.name : "";
 
-    // 1. Load top-level formulas + optional stale table bodies in ONE sync
+    // 1. Load top-level formulas + table rowCount + optional stale table bodies in ONE sync
     var rO2 = ws.getRange("O2").load("formulas");
     var rM4 = ws.getRange("M4").load("formulas");
     var rAB4 = ws.getRange("AB4").load("formulas");
     var rAD2 = ws.getRange("AD2").load("formulas");
     var rAE1 = ws.getRange("AE1").load("values");
+    var bomMeta = bomT.getDataBodyRange().load("rowCount");
     var bomBody = (opts.srcBomName && opts.srcBomName !== bomName) ? bomT.getDataBodyRange().load("formulas") : null;
     var plBody = (plT && ((opts.srcBomName && opts.srcBomName !== bomName) || (opts.srcPlName && opts.srcPlName !== plName)))
       ? plT.getDataBodyRange().load("formulas")
       : null;
     await context.sync();
+
+    var tableEnd = 5 + Math.max(300, bomMeta.rowCount || 300);
 
     var fO2 = String(rO2.formulas[0][0] || "");
     if (!isFormula(fO2) || fO2.indexOf("#REF!") >= 0) rO2.formulas = [[canonicalO2()]];
@@ -852,21 +940,26 @@
       if (plChanged) plBody.formulas = plOut;
     }
 
-    // 2. Enforce hidden table header row (row 5), hidden helper columns (M & AB), gridlines off, freeze panes in same sync
+    // 2. Enforce hidden table header row (row 5), hidden helper cols (M & AB), gridlines off, and freeze on VISIBLE Row 4
+    //    (Freezing Row 5 while Row 5 is hidden places the freeze split on a 0-height row and causes in-cell typing display glitches!)
     try {
       ws.getRange("5:5").rowHidden = true;
       ws.getRange("M:M").columnHidden = true;
       ws.getRange("AB:AB").columnHidden = true;
       ws.showGridlines = false;
       ws.freezePanes.unfreeze();
-      ws.freezePanes.freezeRows(5);
+      ws.freezePanes.freezeRows(4);
     } catch (e) { /* non-fatal */ }
     await context.sync();
 
-    // 3. Re-apply Materials dropdown on C6:C2000
-    await applyBomDataValidation(context, ws, matInfo, log);
+    // 3. Replace volatile OFFSET Print_Area & trim any legacy 2000-row CF bloat
+    await fixVolatilePrintArea(context, ws);
+    await trimBloatedBomCf(context, ws, tableEnd);
 
-    // 4. Enforce landscape print setup & repeating header rows 3:4
+    // 4. Re-apply Materials dropdown tightly on C6:C<tableEnd>
+    await applyBomDataValidation(context, ws, matInfo, log, tableEnd);
+
+    // 5. Enforce landscape print setup & repeating header rows 3:4
     try {
       ws.pageLayout.orientation = Excel.PageOrientation.landscape;
       ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
@@ -886,7 +979,7 @@
       opts.sheets.forEach(function (n) { selectedSet[lc(n)] = true; });
     }
     var count = 0;
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
@@ -934,7 +1027,7 @@
       bomSheets: [], allSheets: [], hasBlank: false, hasMaster: false,
       needsTemplate: false, project: "", masterMode: { isProject: false, active: false, projectName: "", name: "", created: "" }
     };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -995,7 +1088,7 @@
   async function addBomSheet(opts, log) {
     log = log || noop;
     var result = { name: "", warnings: [] };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var matInfo = await ensureMasterNames(context, wb, log);
 
@@ -1088,7 +1181,7 @@
   /* ================= Materials master ================= */
   async function listMaterials() {
     var out = { rows: [], categories: [], masterMode: { isProject: false, active: false, projectName: "", name: "", created: "" } };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var m = await openMaster(context);
       var body = m.t.getDataBodyRange().load("values");
       await context.sync();
@@ -1125,7 +1218,7 @@
     var stamp = formatSheetTimestamp(nowIso);
     r.lastAction = "added";
     r.lastModified = nowIso;
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
       await ensureAuditColumns(context, m);
@@ -1184,7 +1277,7 @@
     var stamp = formatSheetTimestamp(nowIso);
     r.lastAction = "modified";
     r.lastModified = nowIso;
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
       await ensureAuditColumns(context, m);
@@ -1214,7 +1307,7 @@
     var targetName = String(materialName || "").trim();
     if (!targetName) throw new Error("Choose a material to remove.");
     var nowIso = new Date().toISOString();
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var m = await openMaster(context);
       var body = m.t.getDataBodyRange().load(["values", "rowCount"]);
@@ -1265,7 +1358,8 @@
     getMasterMode: getMasterMode, setProjectMaterialMode: setProjectMaterialMode,
     createProjectMaterialList: createProjectMaterialList, exitProjectMaterialMode: exitProjectMaterialMode,
     PROJECT_PROP: PROJECT_PROP,
-    // pure helpers
+    // pure helpers & Excel runner
+    runExcel: runExcel,
     checkSheetName: checkSheetName, safeId: safeId, uniqueName: uniqueName,
     normalizeMaterial: normalizeMaterial, validateMaterial: validateMaterial,
     getMaterialValidationStatus: getMaterialValidationStatus,

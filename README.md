@@ -21,7 +21,10 @@ Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then r
 2. Whenever you create a **new BOM sheet**, add a BOM to a **non-BOM workbook**, or **restore a converted BOM**, your latest saved materials list loads automatically.
 3. **Backup or move to another computer**: open **Materials > Backup & Transfer (JSON)** and click **Export JSON backup** to save `master-materials.json`, or **Import JSON...** on another computer to load it immediately.
 
-## What was updated in v1.1 – v2.2
+## What was updated in v1.1 – v2.3
+- **Fixed Auto BOM Cell-Typing Display Glitch (v2.3)**:
+  - **Fixed missing/skipped digits while typing in Auto BOM cells**: fixed the frozen-pane boundary on hidden Row 5 (`ySplit="5"` + invalid `activeCell="A1"`) to freeze cleanly at visible Row 4 (`freezeRows(4)`), replaced the volatile `OFFSET(...)` Print Area formula with a non-volatile `INDEX(...)` Print Area, trimmed 31,920-cell conditional formatting and data validation bloat (`A6:L2000` / `C6:C2000`) down to the active table range (`305`), and wrapped all Office.js `Excel.run` calls with `{ delayForCellEdit: true }` (plus filtered `onChanged` watcher events) so background add-in activity never interrupts active cell editing.
+  - **One-click upgrade for existing Auto BOM workbooks**: open **Troubleshooting & Repair → Repair selected sheets** in v2.3 to apply the freeze-pane, non-volatile Print Area, and conditional-formatting fixes directly to existing sheets.
 - **Add-in Version Badge & Selectable Saved Project-Only Material Lists (v2.2)**:
   - **Visible version tag**: the sticky header now displays `v2.2` (or `v2.2 · Offline` in the Offline Windows LTS edition) next to **BOM Tools** on every tab so you can immediately verify which version Excel loaded.
   - **Browse, select, restore, export, or delete any saved Project-Only list right inside the add-in**: scans all built-in storage layers (`localStorage`, IndexedDB, OPFS, and `C:\ProgramData\BOMTools\data\projects\` in Offline LTS) so even project lists created before flattening or before v2.2 appear automatically.

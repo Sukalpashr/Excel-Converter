@@ -27,6 +27,16 @@
   }
   function isBlank(v) { return v === "" || v === null || v === undefined; }
   function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
+  function runExcel(fn) {
+    if (root.BomTools && typeof root.BomTools.runExcel === "function") return root.BomTools.runExcel(fn);
+    try {
+      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
+          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
+        return Excel.run({ delayForCellEdit: true }, fn);
+      }
+    } catch (e) { /* fall through */ }
+    return Excel.run(fn);
+  }
 
   /* ---------- Excel calculation & screen-update suspension helpers ---------- */
   function canSuspendScreen() {
@@ -924,7 +934,7 @@
 
     // 1. Inspect and batch-read all selected converted BOM sheets in ONE sync
     var hasMaster = false, hasBlank = false;
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -960,7 +970,7 @@
       if (hasMaster && !hasBlank) {
         var existingMaster = [];
         try { existingMaster = await S.workbookList(); } catch (e) { existingMaster = []; }
-        await Excel.run(async function (context) {
+        await runExcel(async function (context) {
           var mWs = context.workbook.worksheets.getItemOrNullObject(MASTER);
           await context.sync();
           if (!mWs.isNullObject) { mWs.delete(); await context.sync(); }
@@ -1026,7 +1036,7 @@
     }
 
     // 4. Rebuild ALL selected converted sheets in batched syncs under Manual calculation mode
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
@@ -1197,19 +1207,20 @@
           ws.getRange("AB:AB").columnHidden = true;
           ws.showGridlines = false;
           ws.freezePanes.unfreeze();
-          ws.freezePanes.freezeRows(5);
+          ws.freezePanes.freezeRows(4);
 
           job.oldWs.delete();
         });
         if (compWs && !compWs.isNullObject) compWs.delete();
         await context.sync();
 
-        // Batch E2: Apply Materials dropdown across all restored sheets in 1 sync (with fallback per sheet)
+        // Batch E2: Apply Materials dropdown tightly across BOM rows on all restored sheets in 1 sync (with fallback per sheet)
         var dvFallbackJobs = [];
         try {
           pauseExcel(context);
           jobs.forEach(function (job) {
-            var target = job.restored.getRange("C6:C2000");
+            var endRow = 5 + Math.max(300, (job.data && job.data.bomRows ? job.data.bomRows.length : 300));
+            var target = job.restored.getRange("C6:C" + endRow);
             target.dataValidation.clear();
             target.dataValidation.rule = { list: { inCellDropDown: true, source: "=Materials" } };
             target.dataValidation.ignoreBlanks = true;
@@ -1290,7 +1301,7 @@
       growingConvertedSheets: [],
       masterMode: { isProject: false, active: false, projectName: "", name: "" }
     };
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -1347,7 +1358,7 @@
       opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
     }
     var fixed = [], skipped = [];
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -1494,7 +1505,7 @@
     var keepMaster = false;
     var convertedCount = 0;
 
-    await Excel.run(async function (context) {
+    await runExcel(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
 
