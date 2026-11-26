@@ -26,6 +26,57 @@
   var IDB_HANDLE_KEY = "localMasterHandle";
   var IDB_JSON_KEY = "localMasterJson";
   var OPFS_FILE = "master-materials.json";
+  var projectState = { loaded: false, name: "" };
+
+  function slug(s) {
+    var t = String(s || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
+    return t || "project";
+  }
+
+  /* Returns the isolated storage slot for either Global Master (name="") or a named Project-Only list. */
+  function targetFor(name) {
+    var cleanName = String(name || "").trim();
+    if (!cleanName) {
+      return {
+        project: false,
+        name: "",
+        slug: "",
+        cache: LOCAL_CACHE_KEY,
+        meta: LOCAL_META_KEY,
+        idb: IDB_JSON_KEY,
+        opfs: OPFS_FILE,
+        offlineEndpoint: "./local-master.json"
+      };
+    }
+    var k = slug(cleanName);
+    return {
+      project: true,
+      name: cleanName,
+      slug: k,
+      cache: "bomProjectJson:" + k,
+      meta: "bomProjectMeta:" + k,
+      idb: "projectJson:" + k,
+      opfs: "project-" + k + ".json",
+      offlineEndpoint: "./local-project-" + k + ".json"
+    };
+  }
+
+  function globalTarget() { return targetFor(""); }
+  function getProject() { return { active: !!projectState.name, isProject: !!projectState.name, name: projectState.name, projectName: projectState.name }; }
+
+  async function loadProjectState() {
+    try {
+      if (root.BomTools && root.BomTools.getMasterMode) {
+        var mode = await root.BomTools.getMasterMode();
+        projectState = { loaded: true, name: (mode && mode.isProject) ? (mode.projectName || mode.name || "") : "" };
+      } else {
+        projectState.loaded = true;
+      }
+    } catch (e) {
+      projectState.loaded = true;
+    }
+    return getProject();
+  }
 
   var FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
   var INPUT_KEYS = ["material"].concat(FIELDS);
@@ -100,9 +151,13 @@
     var nowIso = new Date().toISOString();
     var lcMeta = lastChange && lastChange.items ? buildLastChangeMeta(lastChange) : (lastChange && lastChange.time ? lastChange : null);
     var out = '{\n "version": 1,\n';
-    if (extraMeta && extraMeta.scope === "project") {
+    var isProj = !!(extraMeta && (extraMeta.scope === "project" || extraMeta.type === "project"));
+    if (isProj) {
+      var pName = String(extraMeta.projectName || extraMeta.project || "Project Custom Materials");
+      out += ' "type": "project",\n';
       out += ' "scope": "project",\n';
-      out += ' "projectName": ' + JSON.stringify(String(extraMeta.projectName || "Project Custom Materials")) + ',\n';
+      out += ' "project": ' + JSON.stringify(pName) + ',\n';
+      out += ' "projectName": ' + JSON.stringify(pName) + ',\n';
     }
     out += ' "updated": "' + nowIso + '",\n';
     if (lcMeta) {
@@ -114,17 +169,22 @@
   }
 
   function serializeProjectList(list, projectName, lastChange) {
-    return serialize(list, lastChange, { scope: "project", projectName: projectName });
+    return serialize(list, lastChange, { type: "project", scope: "project", project: projectName, projectName: projectName });
   }
 
   function parsePayload(text) {
     var j = JSON.parse(text);
     var arr = Array.isArray(j) ? j : (j.materials || []);
     var list = arr.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+    var isProj = !!(j && !Array.isArray(j) && (j.type === "project" || j.scope === "project"));
+    var pName = (j && !Array.isArray(j) && (j.project || j.projectName)) ? String(j.project || j.projectName).trim() : "";
     return {
       list: list,
-      scope: (j && !Array.isArray(j) && j.scope === "project") ? "project" : "master",
-      projectName: (j && !Array.isArray(j) && j.projectName) ? String(j.projectName).trim() : "",
+      isProject: isProj,
+      type: isProj ? "project" : "master",
+      scope: isProj ? "project" : "master",
+      project: pName,
+      projectName: pName,
       updated: (j && !Array.isArray(j) && j.updated) || "",
       lastChange: (j && !Array.isArray(j) && j.lastChange) || null
     };
@@ -169,11 +229,11 @@
     } catch (e) { /* ignore */ }
   }
 
-  async function opfsWriteJson(json) {
+  async function opfsWriteJson(json, file) {
     if (!supportsOpfs()) return false;
     try {
       var dir = await navigator.storage.getDirectory();
-      var fh = await dir.getFileHandle(OPFS_FILE, { create: true });
+      var fh = await dir.getFileHandle(file || OPFS_FILE, { create: true });
       var w = await fh.createWritable();
       await w.write(json);
       await w.close();
@@ -181,11 +241,11 @@
     } catch (e) { return false; }
   }
 
-  async function opfsReadJson() {
+  async function opfsReadJson(file) {
     if (!supportsOpfs()) return null;
     try {
       var dir = await navigator.storage.getDirectory();
-      var fh = await dir.getFileHandle(OPFS_FILE);
+      var fh = await dir.getFileHandle(file || OPFS_FILE);
       var f = await fh.getFile();
       return await f.text();
     } catch (e) { return null; }
@@ -245,9 +305,10 @@
     });
   }
 
-  function getCachedMeta() {
+  function getCachedMeta(t) {
+    t = t || globalTarget();
     try {
-      var raw = localStorage.getItem(LOCAL_META_KEY);
+      var raw = localStorage.getItem(t.meta);
       return raw ? JSON.parse(raw) : null;
     } catch (e) { return null; }
   }
@@ -256,19 +317,21 @@
     return !!(root && root.BOM_OFFLINE_LTS);
   }
 
-  async function offlineServerReadJson() {
-    if (!isOfflineLts() || typeof fetch !== "function") return null;
+  async function offlineServerReadJson(t) {
+    t = t || globalTarget();
+    if (!isOfflineLts() || typeof fetch !== "function" || !t.offlineEndpoint) return null;
     try {
-      var res = await fetch("./local-master.json?t=" + Date.now(), { cache: "no-store" });
+      var res = await fetch(t.offlineEndpoint + "?t=" + Date.now(), { cache: "no-store" });
       if (!res.ok) return null;
       return await res.text();
     } catch (e) { return null; }
   }
 
-  async function offlineServerWriteJson(json) {
-    if (!isOfflineLts() || typeof fetch !== "function") return false;
+  async function offlineServerWriteJson(json, t) {
+    t = t || globalTarget();
+    if (!isOfflineLts() || typeof fetch !== "function" || !t.offlineEndpoint) return false;
     try {
-      var res = await fetch("./local-master.json", {
+      var res = await fetch(t.offlineEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json; charset=utf-8" },
         body: json
@@ -277,92 +340,145 @@
     } catch (e) { return false; }
   }
 
-  async function saveLocalCache(list, lastChange) {
+  async function saveLocalCache(list, lastChange, t) {
+    t = t || globalTarget();
     requestPersistentStorage();
-    var existingMeta = getCachedMeta();
+    var existingMeta = getCachedMeta(t);
     var lcMeta = lastChange ? (buildLastChangeMeta(lastChange) || lastChange) : (existingMeta && existingMeta.lastChange) || null;
-    var json = serialize(list, lcMeta);
+    var json = t.project
+      ? serializeProjectList(list, t.name, lcMeta)
+      : serialize(list, lcMeta);
     var meta = {
       count: list.length,
       updated: new Date().toISOString(),
       lastChange: lcMeta
     };
     try {
-      localStorage.setItem(LOCAL_CACHE_KEY, json);
-      localStorage.setItem(LOCAL_META_KEY, JSON.stringify(meta));
+      localStorage.setItem(t.cache, json);
+      localStorage.setItem(t.meta, JSON.stringify(meta));
     } catch (e) { /* storage may be restricted */ }
     await Promise.all([
-      idbSet(IDB_JSON_KEY, json),
-      opfsWriteJson(json),
-      offlineServerWriteJson(json)
+      idbSet(t.idb, json),
+      opfsWriteJson(json, t.opfs),
+      offlineServerWriteJson(json, t)
     ]);
     // Clean up any legacy external file handle from earlier versions so Excel never asks to reconnect
-    try { await idbDel(IDB_HANDLE_KEY); } catch (e) { /* ignore */ }
+    if (!t.project) {
+      try { await idbDel(IDB_HANDLE_KEY); } catch (e) { /* ignore */ }
+    }
     return { json: json, meta: meta };
   }
 
-  async function readLocalCache() {
-    // In Offline LTS mode, check durable PC disk file (C:\ProgramData\BOMTools\data\master-materials.json) first
-    var json = await offlineServerReadJson();
-    if (!json) json = await opfsReadJson();
-    if (!json) json = await idbGet(IDB_JSON_KEY);
+  async function readLocalCache(t) {
+    t = t || globalTarget();
+    // In Offline LTS mode, check durable PC disk file first (master-materials.json or projects/project-<slug>.json)
+    var json = await offlineServerReadJson(t);
+    if (!json) json = await opfsReadJson(t.opfs);
+    if (!json) json = await idbGet(t.idb);
     if (!json) {
-      try { json = localStorage.getItem(LOCAL_CACHE_KEY); } catch (e) { json = null; }
+      try { json = localStorage.getItem(t.cache); } catch (e) { json = null; }
     }
     if (!json) return null;
     try {
       var parsed = parsePayload(json);
-      return { list: parsed.list, updated: parsed.updated, lastChange: parsed.lastChange, meta: getCachedMeta() };
+      return { list: parsed.list, updated: parsed.updated, lastChange: parsed.lastChange, meta: getCachedMeta(t) };
     } catch (e) { return null; }
   }
 
+  async function saveProjectSlot(projectName, list, lastChange) {
+    var cleanName = String(projectName || "").trim();
+    if (!cleanName) throw new Error("Project list name is required.");
+    var normalized = (list || []).map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
+    var saved = await saveLocalCache(normalized, lastChange || null, targetFor(cleanName));
+    projectState = { loaded: true, name: cleanName };
+    return { savedToProjectSlot: true, projectName: cleanName, count: normalized.length, json: saved.json };
+  }
+
+  async function readProjectSlot(projectName) {
+    var cleanName = String(projectName || "").trim();
+    if (!cleanName) return { list: [], lastChange: null, source: "none" };
+    var c = await readLocalCache(targetFor(cleanName));
+    if (c && c.list && c.list.length) {
+      return { list: c.list, lastChange: c.lastChange || null, updated: c.updated || "", source: "project" };
+    }
+    return { list: [], lastChange: null, updated: "", source: "none" };
+  }
+
   async function getLocalFileStatus() {
-    var cache = await readLocalCache();
+    var cache = await readLocalCache(globalTarget());
     var count = cache && cache.list ? cache.list.length : 0;
+    var proj = await loadProjectState();
+    var pCount = 0;
+    var pUpdated = "";
+    if (proj.active) {
+      var pc = await readLocalCache(targetFor(proj.name));
+      if (pc && pc.list) {
+        pCount = pc.list.length;
+        pUpdated = pc.updated || (pc.meta && pc.meta.updated) || "";
+      }
+    }
     return {
       ready: true,
       hasCache: count > 0,
       cachedCount: count,
       cachedUpdated: (cache && (cache.updated || (cache.meta && cache.meta.updated))) || "",
       lastChange: (cache && cache.lastChange) || (cache && cache.meta && cache.meta.lastChange) || null,
-      opfsSupported: supportsOpfs()
+      opfsSupported: supportsOpfs(),
+      project: proj.name,
+      hasProjectCache: pCount > 0,
+      projectCount: pCount,
+      projectUpdated: pUpdated
     };
   }
 
-  /* Always saves automatically to Built-in Add-in Storage (OPFS + IndexedDB + localStorage) with zero prompts */
+  /* Saves automatically to Built-in Add-in Storage (or to the isolated project slot when opts.projectName / project mode is active). */
   async function writeLocalMaster(list, log, opts) {
     log = log || noop;
     opts = opts || {};
     var normalized = list.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
-    var saved = await saveLocalCache(normalized, opts.lastChange || null);
+    var t = opts.forceGlobal
+      ? globalTarget()
+      : (opts.projectName ? targetFor(opts.projectName) : targetFor(projectState.name));
+    var saved = await saveLocalCache(normalized, opts.lastChange || null, t);
     return {
-      savedToBuiltIn: true,
+      savedToBuiltIn: !t.project,
+      savedToProjectSlot: !!t.project,
+      projectName: t.name,
       count: normalized.length,
       json: saved.json
     };
   }
 
-  /* Reads the authoritative Built-in Add-in Storage list (auto-connected, never prompts) */
+  /* Reads the authoritative Global Master list from Built-in Add-in Storage (auto-connected, never prompts) */
   async function readLocalMaster() {
-    var c = await readLocalCache();
+    var c = await readLocalCache(globalTarget());
     if (c && c.list && c.list.length) {
       return { list: c.list, lastChange: c.lastChange || null, source: "builtin" };
     }
     return { list: [], lastChange: null, source: "none" };
   }
 
-  /* Seeds Built-in Storage once from the open workbook if storage is currently empty (never seeds from a Project-Only list) */
+  /* Seeds Built-in Storage once from the open workbook if storage is currently empty (isolated per project when in Project-Only mode) */
   async function ensureSeededFromWorkbook() {
-    var c = await readLocalCache();
+    var proj = await loadProjectState();
+    if (proj.active) {
+      var pc = await readLocalCache(targetFor(proj.name));
+      if (pc && pc.list && pc.list.length) return { seeded: false, count: pc.list.length, projectMode: true };
+      try {
+        var pwb = await workbookList();
+        if (pwb.length) {
+          await saveProjectSlot(proj.name, pwb, null);
+          return { seeded: true, count: pwb.length, projectMode: true };
+        }
+      } catch (e) { /* converted workbook has no Master sheet yet */ }
+      return { seeded: false, count: 0, projectMode: true };
+    }
+    var c = await readLocalCache(globalTarget());
     if (c && c.list && c.list.length) return { seeded: false, count: c.list.length };
     try {
-      if (root.BomTools && root.BomTools.getMasterMode) {
-        var mode = await root.BomTools.getMasterMode();
-        if (mode && mode.isProject) return { seeded: false, count: 0, skippedProjectMode: true };
-      }
       var wb = await workbookList();
       if (wb.length) {
-        await writeLocalMaster(wb, noop, {});
+        await writeLocalMaster(wb, noop, { forceGlobal: true });
         return { seeded: true, count: wb.length };
       }
     } catch (e) { /* workbook may not have Master sheet yet */ }
@@ -372,30 +488,52 @@
   /* Save current workbook's Master Unique Materials into Built-in Storage */
   async function saveWorkbookToLocal(log, opts) {
     log = log || noop;
+    opts = opts || {};
+    var proj = await loadProjectState();
+    if (proj.active && !opts.forceGlobal) {
+      var pwb = await workbookList();
+      var pres = await saveProjectSlot(proj.name, pwb, opts.lastChange || null);
+      log("Saved " + pres.count + " materials to this project's isolated storage (\"" + proj.name + "\").");
+      return pres;
+    }
     var wb = await workbookList();
-    var res = await writeLocalMaster(wb, log, opts);
-    log("Saved " + res.count + " materials to this computer's built-in storage.");
+    var res = await writeLocalMaster(wb, log, { forceGlobal: true, lastChange: opts.lastChange || null });
+    log("Saved " + res.count + " materials to this computer's Global Master storage.");
     return res;
   }
 
-  /* Sync current workbook's Master Unique Materials from Built-in Storage (skips Project-Only workbooks unless opts.force) */
+  /* Sync current workbook's Master Unique Materials from Built-in Storage.
+   * When workbook is in Project-Only mode (unless opts.force / opts.forceGlobal), pulls ONLY from that project's isolated slot!
+   */
   async function pullLocal(log, opts) {
     log = log || noop;
     opts = opts || {};
-    if (!opts.force && root.BomTools && root.BomTools.getMasterMode) {
-      try {
-        var mode = await root.BomTools.getMasterMode();
-        if (mode && mode.isProject) {
-          log("Project-Only materials active (\"" + mode.projectName + "\") — keeping workbook's project list (Global Master not applied).");
-          return { added: 0, updated: 0, removed: 0, skipped: [], source: "project", skippedProjectMode: true, projectName: mode.projectName };
-        }
-      } catch (eMode) { /* ignore */ }
+    var forceGlobal = !!(opts.force || opts.forceGlobal);
+    var proj = forceGlobal ? { active: false, name: "" } : await loadProjectState();
+    if (proj.active) {
+      var pSlot = await readProjectSlot(proj.name);
+      if (!pSlot.list.length) {
+        log("Project-Only list \"" + proj.name + "\" has no saved copy on this computer yet (Global Master was not applied).");
+        return { added: 0, updated: 0, removed: 0, skipped: [], source: "project", empty: true, projectMode: true, projectName: proj.name };
+      }
+      log("Syncing Project-Only list \"" + proj.name + "\" from this computer (" + pSlot.list.length + " materials) ...");
+      var pr = await applyList(pSlot.list, log, { syncRemovals: opts.syncRemovals !== false, lastChange: pSlot.lastChange });
+      if (root.BomTools && root.BomTools.setProjectMaterialMode) {
+        await root.BomTools.setProjectMaterialMode(proj.name);
+      }
+      log("Project list synced: " + pr.added + " added, " + pr.updated + " changed" + (pr.removed ? ", " + pr.removed + " removed" : "") + ".");
+      pr.skipped.forEach(function (s) { log("Skipped " + s); });
+      pr.source = "project";
+      pr.projectMode = true;
+      pr.projectName = proj.name;
+      return pr;
     }
+
     var local = await readLocalMaster();
     if (!local.list.length) {
       return { added: 0, updated: 0, removed: 0, skipped: [], source: "none", empty: true };
     }
-    log("Syncing master list from built-in computer storage (" + local.list.length + " materials) ...");
+    log("Syncing Global Master list from built-in computer storage (" + local.list.length + " materials) ...");
     var r = await applyList(local.list, log, { syncRemovals: opts.syncRemovals !== false, lastChange: local.lastChange });
     log("Master list synced: " + r.added + " added, " + r.updated + " changed" + (r.removed ? ", " + r.removed + " removed" : "") + ".");
     r.skipped.forEach(function (s) { log("Skipped " + s); });
@@ -405,96 +543,115 @@
 
   /* Build JSON text for Global Master backup/transfer export */
   async function buildExportJson() {
-    var cache = await readLocalCache();
+    var cache = await readLocalCache(globalTarget());
     var lastChange = (cache && cache.lastChange) || (cache && cache.meta && cache.meta.lastChange) || null;
     var list = [];
-    var isProject = false;
+    var proj = await loadProjectState();
     try {
-      if (root.BomTools && root.BomTools.getMasterMode) {
-        var mode = await root.BomTools.getMasterMode();
-        isProject = !!(mode && mode.isProject);
-      }
-      if (!isProject) list = await workbookList();
+      if (!proj.active) list = await workbookList();
     } catch (e) {
       list = (cache && cache.list) || [];
     }
     if (!list.length && cache && cache.list) list = cache.list;
-    return { json: serialize(list, lastChange), count: list.length };
+    return { json: serialize(list, lastChange), count: list.length, fileName: "master-materials.json" };
   }
 
   function makeProjectFileSlug(name) {
-    var slug = String(name || "project").trim().toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-    return (slug || "project") + "-materials.json";
+    return slug(name) + "-materials.json";
   }
 
-  /* Build separate reusable JSON file for the current workbook's Project-Only material list */
+  /* Build separate reusable JSON file for the current workbook's Project-Only material list.
+   * Also syncs the live list to the per-project storage slot (and falls back to the slot if the sheet was already flattened). */
   async function buildProjectExportJson(projectName, lastChange) {
-    var list = await workbookList();
-    var pName = String(projectName || "").trim();
-    if (!pName && root.BomTools && root.BomTools.getMasterMode) {
-      try {
-        var mode = await root.BomTools.getMasterMode();
-        if (mode && mode.projectName) pName = mode.projectName;
-      } catch (e) { /* ignore */ }
+    var proj = await loadProjectState();
+    var pName = String(projectName || proj.name || "").trim() || "Project Custom Materials";
+    var cache = await readLocalCache(targetFor(pName));
+    var list = [];
+    try {
+      list = await workbookList();
+    } catch (e) {
+      list = [];
     }
-    pName = pName || "Project Custom Materials";
+    var useLastChange = lastChange || (cache && cache.lastChange) || null;
+    if (list.length) {
+      await saveLocalCache(list, useLastChange, targetFor(pName));
+    } else if (cache && cache.list && cache.list.length) {
+      list = cache.list;
+    }
     return {
-      json: serializeProjectList(list, pName, lastChange || null),
+      json: serializeProjectList(list, pName, useLastChange),
       count: list.length,
       projectName: pName,
       suggestedName: makeProjectFileSlug(pName)
     };
   }
 
-  /* Import a separate Project Materials JSON into THIS workbook ONLY (switches to Project-Only mode; never modifies Global Master) */
+  /* Import a separate Project Materials JSON into THIS workbook ONLY (switches to Project-Only mode; never modifies Global Master).
+   * Works even on an already-converted workbook (no Master sheet yet): saves to the per-project slot + sets BomProjectList so Restore uses it automatically. */
   async function importProjectJsonText(text, fileName, log) {
     log = log || noop;
     var parsed = parsePayload(text);
     if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
     var fallbackName = String(fileName || "Project Materials")
       .replace(/\.json$/i, "")
+      .replace(/^project-materials-?/i, "")
       .replace(/[-_]+materials$/i, "")
       .replace(/[-_]+/g, " ")
       .trim() || "Project Custom Materials";
     var pName = parsed.projectName || fallbackName;
 
-    suppressWatch(4000);
-    var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
+    suppressWatch(6000);
+    await saveProjectSlot(pName, parsed.list, parsed.lastChange);
+
+    var applied = true;
+    var r = { added: 0, updated: 0, removed: 0, skipped: [] };
+    try {
+      r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
+    } catch (e) {
+      if (!/not found/i.test(String(e && e.message))) throw e;
+      applied = false; // Converted workbook has no Master sheet yet — saved ready for Restore
+    }
+
     if (root.BomTools && root.BomTools.setProjectMaterialMode) {
       await root.BomTools.setProjectMaterialMode(pName);
     }
-    try {
-      var curList = await workbookList();
-      updateWatchSnap(curList);
-    } catch (e) { /* ignore */ }
-    log("Loaded Project-Only list \"" + pName + "\" (" + parsed.list.length + " materials) into this workbook only. Global Master list was not changed.");
+    if (applied) {
+      try {
+        var curList = await workbookList();
+        updateWatchSnap(curList);
+      } catch (e) { /* ignore */ }
+      log("Loaded Project-Only list \"" + pName + "\" (" + parsed.list.length + " materials) into this workbook only. Global Master was not changed.");
+    } else {
+      log("Saved Project-Only list \"" + pName + "\" (" + parsed.list.length + " materials) for this converted workbook. Click Restore Automated to rebuild sheets with these materials.");
+    }
     r.projectName = pName;
     r.count = parsed.list.length;
+    r.applied = applied;
     return r;
   }
 
-  /* Import a JSON backup/transfer file into Built-in Storage and apply to the workbook (if Master sheet exists and not Project-Only) */
+  /* Import a Global Master JSON backup/transfer file into Global Master Built-in Storage.
+   * Guardrail: refuses a Project-Only JSON file so it can never accidentally overwrite Global Master! */
   async function importLocalJsonText(text, fileName, log) {
     log = log || noop;
     var parsed = parsePayload(text);
     if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
-    await saveLocalCache(parsed.list, parsed.lastChange);
+    if (parsed.isProject) {
+      throw new Error("That is a Project-Only materials file (\"" + (parsed.projectName || fileName) + "\"). Use \"Load .json...\" in the Project-Only section at the top of Materials so your Global Master list stays untouched.");
+    }
+    await saveLocalCache(parsed.list, parsed.lastChange, globalTarget());
     try {
-      if (root.BomTools && root.BomTools.getMasterMode) {
-        var mode = await root.BomTools.getMasterMode();
-        if (mode && mode.isProject) {
-          log("Saved " + parsed.list.length + " materials to your computer's Global Master storage (this workbook stayed on its Project-Only list \"" + mode.projectName + "\").");
-          return { added: 0, updated: 0, removed: 0, skipped: [], savedOnly: true };
-        }
+      var proj = await loadProjectState();
+      if (proj.active) {
+        log("Saved " + parsed.list.length + " materials to your computer's Global Master storage (this workbook stayed on its Project-Only list \"" + proj.name + "\").");
+        return { added: 0, updated: 0, removed: 0, skipped: [], savedOnly: true };
       }
       var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
       log("Imported \"" + (fileName || "master-materials.json") + "\" (" + parsed.list.length + " materials): " +
         r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
       return r;
     } catch (e) {
-      log("Saved " + parsed.list.length + " materials from \"" + (fileName || "master-materials.json") + "\" to this computer's built-in storage. They will load automatically into your next BOM.");
+      log("Saved " + parsed.list.length + " materials from \"" + (fileName || "master-materials.json") + "\" to this computer's Global Master storage. They will load automatically into your next BOM.");
       return { added: 0, updated: 0, removed: 0, skipped: [], savedOnly: true };
     }
   }
@@ -708,6 +865,8 @@
   /* ---------------- pull / push (GitHub) ---------------- */
   async function pull(log) {
     log = log || noop;
+    var proj = await loadProjectState();
+    if (proj.active) { log("Project-Only list active (\"" + proj.name + "\") — shared GitHub list not applied."); return { added: 0, updated: 0, removed: 0, skipped: [] }; }
     log("Reading the shared list from GitHub ...");
     var rem = await fetchPages();
     if (!rem.list.length) { log("The shared list is empty or not published yet. Nothing to update."); return { added: 0, updated: 0, removed: 0, skipped: [] }; }
@@ -721,6 +880,8 @@
   async function push(log, opts) {
     log = log || noop;
     opts = opts || {};
+    var proj = await loadProjectState();
+    if (proj.active) { log("Project-Only list (\"" + proj.name + "\"): not published to shared GitHub master."); return { added: 0, changed: 0 }; }
     if (!hasToken()) throw new Error("No GitHub token on this computer. Add one under GitHub settings.");
     var wb = await workbookList();
     for (var attempt = 0; attempt < 2; attempt++) {
@@ -911,12 +1072,14 @@
                   if (T.stampMasterChanges) await T.stampMasterChanges(stampEntries, nowIso);
                 } catch (eSt) { /* non-fatal */ }
 
-                // Check Project-Only isolation: NEVER overwrite Global Master or GitHub if this workbook is in Project-Only mode!
-                var mode = (T.getMasterMode) ? await T.getMasterMode() : { isProject: false, projectName: "" };
-                var isProj = !!(mode && mode.isProject);
+                // Check Project-Only isolation: save to dedicated project slot (NEVER overwrite Global Master or GitHub!)
+                var proj = await loadProjectState();
+                var isProj = !!proj.active;
 
-                if (!isProj) {
-                  await writeLocalMaster(cur, log, { allowPrompt: false, lastChange: lastChange });
+                if (isProj) {
+                  await saveProjectSlot(proj.name, cur, lastChange);
+                } else {
+                  await writeLocalMaster(cur, log, { forceGlobal: true, lastChange: lastChange });
                   if (hasToken()) {
                     var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
                     if (names.length) {
@@ -932,7 +1095,7 @@
                     time: nowIso,
                     savedToBuiltIn: !isProj,
                     projectOnly: isProj,
-                    projectName: isProj ? mode.projectName : "",
+                    projectName: isProj ? proj.name : "",
                     items: items
                   });
                 }
@@ -963,6 +1126,12 @@
     buildProjectExportJson: buildProjectExportJson,
     importLocalJsonText: importLocalJsonText,
     importProjectJsonText: importProjectJsonText,
+    // project-only isolated storage slots
+    getProject: getProject,
+    loadProjectState: loadProjectState,
+    saveProjectSlot: saveProjectSlot,
+    readProjectSlot: readProjectSlot,
+    targetFor: targetFor,
     // GitHub optional API
     hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,

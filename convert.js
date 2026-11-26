@@ -59,7 +59,33 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* ---------- formulas of the growing purchase list (zero hidden helper columns — works for ANY custom/unlisted material) ---------- */
+  /* Write Excel 365 dynamic array formulas (SORT/UNIQUE/FILTER/# spill refs) via formulas2 so Excel never injects '@' */
+  function setDynamicFormulas(range, arr2d) {
+    try {
+      if (typeof Office !== "undefined" &&
+          Office.context && Office.context.requirements &&
+          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
+        range.formulas2 = arr2d;
+        return;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      range.formulas2 = arr2d;
+    } catch (e2) {
+      range.formulas = arr2d;
+    }
+  }
+
+  function ab5Formula(tot) {
+    var C = "$C$5:$C$" + tot;
+    return '=IFERROR(SORT(UNIQUE(FILTER(' + C + ',(' + C + '<>"")*(' + C + '<>"Materials")))),"")';
+  }
+
+  function ae2Formula() {
+    return '=IF($AB$5="",0,ROWS($AB$5#))';
+  }
+
+  /* ---------- formulas of the growing purchase list (Excel 365 dynamic SORT/UNIQUE/FILTER in hidden AB5) ---------- */
   function plFormulas(r, tot) {
     var rng = function (c) { return "$" + c + "$5:$" + c + "$" + tot; };
     var C = rng("C"), G = rng("G"), H = rng("H"), I = rng("I"), J = rng("J"), L = rng("L");
@@ -70,11 +96,8 @@
     var cntAbove = function (c) {
       return r > 5 ? 'IF(COUNT(' + c + '$5:' + c + (r - 1) + ')=0,"",SUM(' + c + '$5:' + c + (r - 1) + '))' : '""';
     };
-    // Direct unique-name lookup from $C$5:$C$<tot> with no hidden Column M or AB helper:
-    // Any new row inserted/typed with any custom material name immediately appears in Column P.
-    var matLookup = r === 5
-      ? 'IFERROR(INDEX(' + C + ',MATCH(1,INDEX((' + C + '<>"")*1,0),0)),"")'
-      : 'IFERROR(INDEX(' + C + ',MATCH(1,INDEX((' + C + '<>"")*(COUNTIF($P$5:P' + (r - 1) + ',' + C + '&"")=0),0),0)),"")';
+    // Reads directly from hidden Excel 365 dynamic array spill range $AB$5# (sorted A-Z, works for ANY custom/unlisted material)
+    var matLookup = 'INDEX($AB$5#,' + k + ')';
     // Qty formula handles numeric Set, blank Set (defaults to 1 via SUMIFS), and ignores text safely
     var pieceQty = 'SUMPRODUCT(--(' + C + '=P' + r + '),' + G + ',' + H + ')+SUMIFS(' + G + ',' + C + ',P' + r + ',' + H + ',"")';
 
@@ -355,28 +378,31 @@
     ]];
     ws.getRange("I" + tot + ":J" + tot).format.font.bold = true;
 
-    // Batch entire purchase list O5:AA<PL_LAST> in 1 write (no hidden AB helper needed)
+    // Hidden AB5 holds Excel 365 SORT(UNIQUE(FILTER(...))) dynamic spill array (AB6:AB<BOTTOM> stay clear so it never #SPILL!s)
+    setDynamicFormulas(ws.getRange("AB5"), [[ab5Formula(tot)]]);
+
+    // Batch entire purchase list O5:AA<PL_LAST> in 1 write via formulas2 so $AB$5# never gets implicit-intersection '@'
     var plRows = [];
     for (var r = 5; r <= PL_LAST; r++) {
       var f = plFormulas(r, tot);
       plRows.push([f.O, f.P, f.Q, f.R, f.S, f.T, f.U, "", f.W, "", "", f.Z, ""]);
     }
-    ws.getRange("O5:AA" + PL_LAST).formulas = plRows;
+    setDynamicFormulas(ws.getRange("O5:AA" + PL_LAST), plRows);
 
     ws.getRange("AD2").copyFrom("AD1", "Formats");
     ws.getRange("AE2").copyFrom("AE1", "Formats");
     ws.getRange("AE2").format.fill.clear();
     ws.getRange("AE1").values = [[S.stdLen]];
-    ws.getRange("AD2:AE3").formulas = [
+    setDynamicFormulas(ws.getRange("AD2:AE3"), [
       [
         "Materials in purchase list:",
-        '=ROUND(SUMPRODUCT(($C$5:$C$' + tot + '<>"")/COUNTIF($C$5:$C$' + tot + ',$C$5:$C$' + tot + '&"")),0)'
+        ae2Formula()
       ],
       [
         '=IF(AE2>' + CAP + ',"More than ' + CAP + ' materials - copy the last purchase-list row down","")',
         ""
       ]
-    ];
+    ]);
     ws.getRange("AD3").format.font.bold = true;
     ws.getRange("AD3").format.font.color = "#C00000";
 
@@ -959,16 +985,37 @@
       }
     }
 
-    // 3. Apply either a saved Project-Only JSON materials list OR sync the latest Global Master list
+    // 3. Apply either an explicitly chosen Project-Only JSON, an auto-detected BomProjectList slot, OR Global Master
+    var detectedProj = { active: false, name: "" };
+    try {
+      if (S.loadProjectState) detectedProj = await S.loadProjectState();
+    } catch (eProj) { /* ignore */ }
+
     if (opts.projectMaterials && Array.isArray(opts.projectMaterials.list) && opts.projectMaterials.list.length) {
       var pm = opts.projectMaterials;
       var projTitle = pm.projectName || "Project Custom Materials";
       log("Applying saved Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
+      if (S.saveProjectSlot) {
+        await S.saveProjectSlot(projTitle, pm.list, pm.lastChange || null);
+      }
       await S.applyList(pm.list, log, { syncRemovals: true, lastChange: pm.lastChange || null });
       if (T.setProjectMaterialMode) {
         await T.setProjectMaterialMode(projTitle);
       }
       log("Workbook set to Project-Only Materials mode (Global Master list untouched).");
+    } else if (detectedProj.active) {
+      log("Detected Project-Only list \"" + detectedProj.name + "\" from workbook properties ...");
+      try {
+        var pulledProj = await S.pullLocal(log, { syncRemovals: true });
+        if (T.setProjectMaterialMode) {
+          await T.setProjectMaterialMode(detectedProj.name);
+        }
+        if (pulledProj && pulledProj.empty) {
+          warnings.push("No saved copy of project list \"" + detectedProj.name + "\" was found on this computer. Load its saved .json file in Restore > Project Materials .json and restore again so custom materials get their weights.");
+        }
+      } catch (eP) {
+        log("Note: could not load project list \"" + detectedProj.name + "\" (" + (eP.message || eP) + ").");
+      }
     } else if (opts.syncLocal !== false) {
       try {
         await S.pullLocal(log, { allowPrompt: true, syncRemovals: true });
@@ -1235,7 +1282,13 @@
   }
 
   async function inspectWorkbook() {
-    var out = { master: false, bomSheets: [], convertedSheets: [], masterMode: { isProject: false, projectName: "" } };
+    var out = {
+      master: false,
+      bomSheets: [],
+      convertedSheets: [],
+      growingConvertedSheets: [],
+      masterMode: { isProject: false, active: false, projectName: "", name: "" }
+    };
     await Excel.run(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
@@ -1244,17 +1297,109 @@
       var masterWs = allSheets.filter(function (w) { return w.name.toLowerCase() === MASTER.toLowerCase(); })[0];
       out.master = !!masterWs;
       allSheets.forEach(function (ws) { ws.tables.load("items/name"); });
-      var metaCell = masterWs ? masterWs.getRange("Z1").load("values") : null;
       await context.sync();
-      if (metaCell && root.BomTools && root.BomTools.parseProjectMeta) {
+      if (root.BomTools && root.BomTools._readMasterMode) {
+        out.masterMode = await root.BomTools._readMasterMode(context, masterWs || null);
+      } else if (masterWs && root.BomTools && root.BomTools.parseProjectMeta) {
+        var metaCell = masterWs.getRange("Z1").load("values");
+        await context.sync();
         out.masterMode = root.BomTools.parseProjectMeta(metaCell.values[0][0]);
       }
       var sheets = filterBomSheets(allSheets);
       out.bomSheets = sheets.map(function (s) { return s.name; });
       var conv = await findConvertedSheets(context, wb, allSheets);
       out.convertedSheets = conv.map(function (s) { return s.name; });
+      if (conv.length) {
+        var p5s = conv.map(function (ws) { return ws.getRange("P5").load("formulas"); });
+        await context.sync();
+        conv.forEach(function (ws, i) {
+          var f5 = String((p5s[i].formulas && p5s[i].formulas[0] && p5s[i].formulas[0][0]) || "");
+          if (f5.indexOf("$AE$2") >= 0) out.growingConvertedSheets.push(ws.name);
+        });
+      }
     });
     return out;
+  }
+
+  /* Repairs / upgrades already-converted (plain, auto-growing) sheets to Excel 365 SORT(UNIQUE(FILTER(...))) in AB5:
+   * - Updates hidden AB5, AE2, Column P (names), and Column R (blank-Set-safe Qty) so ANY custom/unlisted material shows up A-Z.
+   * - Leaves typed Stock / PO inputs (V, W, X, Y, AA), formatting, and borders completely untouched! */
+  async function repairGrowingNames(log, opts) {
+    log = log || function () {};
+    opts = opts || {};
+    var selectedSet = null;
+    if (Array.isArray(opts.sheets) && opts.sheets.length) {
+      selectedSet = {};
+      opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
+    }
+    var fixed = [], skipped = [];
+    await Excel.run(async function (context) {
+      var wb = context.workbook;
+      wb.worksheets.load("items/name,items/visibility,items/position");
+      await context.sync();
+      wb.worksheets.items.forEach(function (ws) { ws.tables.load("items/name"); });
+      await context.sync();
+      var conv = await findConvertedSheets(context, wb, wb.worksheets.items);
+      if (selectedSet) {
+        conv = conv.filter(function (ws) { return !!selectedSet[String(ws.name).trim().toLowerCase()]; });
+      }
+      if (!conv.length) throw new Error("No converted (plain) BOM sheets found to repair.");
+
+      var loads = conv.map(function (ws) {
+        return {
+          ws: ws,
+          colI: ws.getRange("I1:I" + BOTTOM).load("values"),
+          colP: ws.getRange("P5:P" + PL_LAST).load("formulas")
+        };
+      });
+      await context.sync();
+
+      pauseExcel(context);
+      loads.forEach(function (L) {
+        var f5 = String((L.colP.formulas[0] && L.colP.formulas[0][0]) || "");
+        if (f5.indexOf("$AE$2") < 0) {
+          skipped.push(L.ws.name + " (fixed purchase list - nothing to repair)");
+          return;
+        }
+        var tot = 0, v = L.colI.values;
+        for (var i = 4; i < v.length; i++) {
+          if (String(v[i][0]).trim().toLowerCase() === "total:") { tot = i + 1; break; }
+        }
+        if (!tot) {
+          skipped.push(L.ws.name + " (no Total: row found)");
+          return;
+        }
+        // Preserve existing sheet's row capacity (e.g. 32 on older 25-row sheets or 47 on 40-row sheets)
+        var lastRow = 5;
+        for (var pi = 0; pi < L.colP.formulas.length; pi++) {
+          if (String(L.colP.formulas[pi][0] || "").indexOf("$AE$2") >= 0) lastRow = 5 + pi;
+        }
+        if (lastRow < 8) lastRow = PL_LAST;
+
+        L.ws.getRange("AB5:AB" + BOTTOM).clear("Contents");
+        L.ws.getRange("AB:AB").columnHidden = true;
+        setDynamicFormulas(L.ws.getRange("AB5"), [[ab5Formula(tot)]]);
+        setDynamicFormulas(L.ws.getRange("AE2"), [[ae2Formula()]]);
+
+        var pCol = [], rCol = [];
+        for (var r = 5; r <= lastRow; r++) {
+          var f = plFormulas(r, tot);
+          pCol.push([f.P]);
+          rCol.push([f.R]);
+        }
+        setDynamicFormulas(L.ws.getRange("P5:P" + lastRow), pCol);
+        setDynamicFormulas(L.ws.getRange("R5:R" + lastRow), rCol);
+        fixed.push(L.ws.name);
+      });
+      await context.sync();
+      if (fixed.length) {
+        wb.application.calculate(Excel.CalculationType.full);
+        await context.sync();
+      }
+    });
+    fixed.forEach(function (n) { log("Upgraded purchase-list names to Excel 365 dynamic list on \"" + n + "\"."); });
+    skipped.forEach(function (n) { log("Skipped " + n + "."); });
+    return { fixed: fixed, skipped: skipped };
   }
 
   /* High-speed batched Flatten conversion across all BOM sheets under Manual calculation mode */
@@ -1262,6 +1407,21 @@
     log = log || function () {};
     opts = opts || {};
     var warnings = [];
+
+    // Before deleting Master Unique Materials, auto-snapshot Project-Only list into its per-project storage slot on this PC
+    try {
+      if (root.BomSync && root.BomSync.loadProjectState && root.BomSync.saveProjectSlot) {
+        var projInfo = await root.BomSync.loadProjectState();
+        if (projInfo && projInfo.active) {
+          var projList = await root.BomSync.workbookList();
+          if (projList.length) {
+            await root.BomSync.saveProjectSlot(projInfo.name, projList, null);
+            log("Backed up Project-Only list \"" + projInfo.name + "\" (" + projList.length + " items) to this computer's project storage.");
+          }
+        }
+      }
+    } catch (eSnap) { /* non-fatal */ }
+
     await Excel.run(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
@@ -1308,7 +1468,7 @@
         });
 
         // Sync 4: Strip tables, clear CF/DV, unmerge AD2:AK2, delete row 5 across ALL sheets in ONE sync
-        log("Flattening " + sheets.length + " sheet(s) (" + (mode === "growing" ? "auto-growing" : "fixed") + ") ...");
+        log("Flattening " + sheets.length + " sheet(s) (" + (mode === "growing" ? "auto-growing 365" : "fixed") + ") ...");
         pauseExcel(context);
         snapshots.forEach(function (snap) {
           queueStripTables(snap.ws, snap.S.title);
@@ -1380,7 +1540,10 @@
     convertWorkbook: convertWorkbook,
     restoreAutomatedWorkbook: restoreAutomatedWorkbook,
     inspectWorkbook: inspectWorkbook,
+    repairGrowingNames: repairGrowingNames,
     plFormulas: plFormulas,
+    ab5Formula: ab5Formula,
+    ae2Formula: ae2Formula,
     compileMaterials: compileMaterials,
     CAP: CAP,
     PL_LAST: PL_LAST

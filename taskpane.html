@@ -928,6 +928,47 @@
     line-height: 1.4;
     margin: 0 0 8px;
   }
+  .proj-pick-wrap {
+    margin: 2px 0 9px;
+  }
+  .proj-pick-search {
+    margin-bottom: 6px;
+  }
+  .proj-pick-box {
+    border: 1px solid #D9E0FE;
+    border-radius: var(--radius-sm);
+    background: #FFFFFF;
+    overflow: hidden;
+  }
+  .proj-pick-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 9px;
+    background: #F6F7FF;
+    border-bottom: 1px solid #E3E7FE;
+    font-size: 11px;
+    font-weight: 600;
+    color: #3730A3;
+  }
+  .proj-pick-list {
+    max-height: 145px;
+    overflow: auto;
+  }
+  .proj-pick-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    border-bottom: 1px solid #F1F3FA;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .proj-pick-item:last-child { border-bottom: 0; }
+  .proj-pick-item:hover { background: #F8F9FF; }
+  .proj-pick-item input { accent-color: #4338CA; margin: 0; flex-shrink: 0; }
+  .proj-pick-item .pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .proj-pick-item small { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 
   /* ---- Log Output ---- */
   .log {
@@ -1162,7 +1203,7 @@
         <!-- Inline setup panel (visible when user clicks "One-Time Project List...") -->
         <div id="proj-setup-panel" class="scope-setup" hidden>
           <p class="note" style="margin-top:0;margin-bottom:8px">
-            Create an isolated material list just for this project. Changes here will <b>never</b> alter your Global Master list, and you can save it as a separate <code style="font-family:Consolas,monospace">.json</code> file for reuse.
+            Create an isolated material list just for this project. Changes auto-save separately on this PC and will <b>never</b> alter your Global Master list.
           </p>
           <label class="field">
             <span>Project list name</span>
@@ -1172,14 +1213,32 @@
             <span>Start with</span>
             <select id="proj-source-select">
               <option value="clone">Copy from Global Master list (recommended)</option>
+              <option value="pick">Pick specific materials from Global Master</option>
               <option value="usedOnly">Only materials used in this workbook&apos;s BOMs</option>
               <option value="blank">Blank one-time list (add custom materials only)</option>
             </select>
           </label>
+          <div id="proj-pick-wrap" class="proj-pick-wrap" hidden>
+            <input type="search" id="proj-pick-search" class="proj-pick-search" placeholder="Filter materials to include..." autocomplete="off">
+            <div class="proj-pick-box">
+              <div class="proj-pick-hdr">
+                <span id="proj-pick-count">0 selected</span>
+                <button type="button" id="proj-pick-toggle" class="link-btn" style="color:#4338CA">None</button>
+              </div>
+              <div id="proj-pick-list" class="proj-pick-list"></div>
+            </div>
+          </div>
           <div class="btnrow">
             <button type="button" id="proj-create-btn" class="indigo" style="flex:1">Create Project List</button>
             <button type="button" id="proj-load-setup-btn">Load .json...</button>
             <button type="button" id="proj-cancel-setup-btn">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Preload action when workbook has no Master sheet yet (e.g. already converted) -->
+        <div id="proj-nomaster-actions" class="scope-setup" hidden>
+          <div class="btnrow">
+            <button type="button" id="proj-load-nomaster-btn" class="indigo" style="flex:1">Load Project List (.json) for Restore...</button>
           </div>
         </div>
 
@@ -1273,7 +1332,7 @@
       <!-- Collapsible Drawer: Built-in Computer Storage + JSON Backup / Transfer -->
       <details class="drawer subtle" id="local-drawer">
         <summary>
-          <span class="sum-left"><span>Backup &amp; Transfer (JSON)</span></span>
+          <span class="sum-left"><span>Global Master Backup (JSON)</span></span>
           <span id="local-summary-tag" class="sum-meta ok">Auto-saved</span>
           <span class="sum-caret" aria-hidden="true">&#9656;</span>
         </summary>
@@ -1282,7 +1341,7 @@
             <b>Always auto-connected on this computer — no reconnecting or GitHub needed.</b>
           </p>
           <p class="note" style="margin-top:4px;margin-bottom:8px">
-            Every change saves automatically in Excel's built-in storage and loads into new BOMs. Export a <code style="font-family:Consolas,monospace">.json</code> file anytime to keep a backup or copy your list to another computer.
+            Global Master edits save automatically in Excel&apos;s built-in storage and load into new BOMs. Export a <code style="font-family:Consolas,monospace">.json</code> file anytime to back up or transfer your Global Master to another computer (Project-Only files are blocked here so they never overwrite Global Master).
           </p>
 
           <div id="local-status" class="status ok" style="margin-bottom:8px">Auto-saving on this computer...</div>
@@ -1346,9 +1405,13 @@
         <div id="conv-proj-callout" class="proj-callout" hidden>
           <div id="conv-proj-title" class="proj-callout-title">Project-Only Materials Active</div>
           <p class="proj-callout-desc">
-            Flattening removes the materials sheet from this copy. Save your project list as a separate <code style="font-family:Consolas,monospace">.json</code> file now so you can reuse or restore it later.
+            Flattening removes the materials sheet from this copy (a snapshot is also kept in this PC&apos;s project storage). Save a separate <code style="font-family:Consolas,monospace">.json</code> file so you can reuse or restore it on any computer.
           </p>
-          <button type="button" id="conv-proj-save-btn" class="indigo" style="width:100%">Save Project Materials (.json)</button>
+          <label class="chk" style="margin:4px 0 8px">
+            <input type="checkbox" id="conv-save-proj" checked>
+            <span>Save project materials (<code style="font-family:Consolas,monospace">.json</code>) file automatically before converting</span>
+          </label>
+          <button type="button" id="conv-proj-save-btn" class="indigo" style="width:100%">Save .json now</button>
         </div>
 
         <div class="card">
@@ -1363,13 +1426,13 @@
           <div class="card-title"><span>Step 2 &middot; Choose Output Style</span></div>
           <label class="opt">
             <input type="radio" name="mode" value="growing" checked>
-            <b>Auto-growing purchase list</b>
-            <span>Purchase list updates and grows automatically—even when you type custom materials not on the Master list.</span>
+            <b>Auto-growing purchase list (Excel 365)</b>
+            <span>Sorted dynamic list (SORT/UNIQUE/FILTER) — updates and grows automatically, even when you type custom materials not on Master.</span>
           </label>
           <label class="opt">
             <input type="radio" name="mode" value="fixed">
-            <b>Fixed purchase list</b>
-            <span>Simple fixed rows with basic SUMIF / ROUNDUP formulas.</span>
+            <b>Fixed purchase list (No automation)</b>
+            <span>Static rows with classic SUMIF / ROUNDUP formulas — best for sharing with non-365 Excel or without automation.</span>
           </label>
           <label class="chk">
             <input type="checkbox" id="compiled">
@@ -1393,6 +1456,11 @@
             <span id="rest-dot" class="dot"></span>
             <div id="rest-status" class="status">Checking...</div>
           </div>
+        </div>
+
+        <div id="rest-proj-detected" class="proj-callout" hidden>
+          <div id="rest-proj-detected-title" class="proj-callout-title">Project-Only Workbook Detected</div>
+          <p id="rest-proj-detected-desc" class="proj-callout-desc" style="margin-bottom:0"></p>
         </div>
 
         <div class="card">
@@ -1433,14 +1501,29 @@
           <button id="restore-btn" class="primary" disabled>Restore Selected Sheets</button>
           <div id="rest-log" class="log"></div>
         </div>
+
+        <details class="drawer subtle" id="rest-repair-names-drawer" hidden>
+          <summary>
+            <span class="sum-left"><span>Upgrade / Repair Purchase-List Names</span></span>
+            <span class="sum-meta">Excel 365</span>
+            <span class="sum-caret" aria-hidden="true">&#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <p class="note" style="margin-top:6px;margin-bottom:8px">
+              Upgrades already-converted Auto-growing sheets (selected above) to the Excel 365 <code style="font-family:Consolas,monospace">SORT(UNIQUE(FILTER(...)))</code> purchase list so any custom material shows up automatically — without touching your BOM rows or Stock/PO inputs.
+            </p>
+            <button type="button" id="rest-repair-names-btn" style="width:100%" disabled>Upgrade purchase-list names on selected sheets</button>
+            <div id="rest-repair-names-log" class="log"></div>
+          </div>
+        </details>
       </div>
     </section>
   </main>
 
-  <script src="convert.js?v=15"></script>
-  <script src="tools.js?v=15"></script>
-  <script src="template-data.js?v=15"></script>
-  <script src="sync.js?v=15"></script>
-  <script src="taskpane.js?v=15"></script>
+  <script src="convert.js?v=16"></script>
+  <script src="tools.js?v=16"></script>
+  <script src="template-data.js?v=16"></script>
+  <script src="sync.js?v=16"></script>
+  <script src="taskpane.js?v=16"></script>
 </body>
 </html>

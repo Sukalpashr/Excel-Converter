@@ -97,22 +97,30 @@
     return "";
   }
 
+  var PROJECT_PROP = "BomProjectList";
+
   function parseProjectMeta(val) {
-    var empty = { isProject: false, projectName: "", created: "" };
+    var empty = { isProject: false, active: false, projectName: "", name: "", created: "" };
     if (!val) return empty;
     var s = String(val).trim();
-    if (!s || s.charAt(0) !== "{") return empty;
-    try {
-      var obj = JSON.parse(s);
-      if (obj && obj.scope === "project") {
-        return {
-          isProject: true,
-          projectName: String(obj.name || "Project Custom Materials").trim() || "Project Custom Materials",
-          created: String(obj.created || "")
-        };
-      }
-    } catch (e) { /* ignore malformed metadata */ }
-    return empty;
+    if (!s) return empty;
+    if (s.charAt(0) === "{") {
+      try {
+        var obj = JSON.parse(s);
+        if (obj && (obj.scope === "project" || obj.name)) {
+          var nm = String(obj.name || "Project Custom Materials").trim() || "Project Custom Materials";
+          return {
+            isProject: true,
+            active: true,
+            projectName: nm,
+            name: nm,
+            created: String(obj.created || "")
+          };
+        }
+      } catch (e) { /* ignore malformed metadata */ }
+      return empty;
+    }
+    return { isProject: true, active: true, projectName: s, name: s, created: "" };
   }
 
   function serializeProjectMeta(projectName) {
@@ -311,33 +319,70 @@
     } catch (e) { /* non-fatal */ }
   }
 
-  /* ---------------- Project-Only / One-Time Material Mode (isolated from global Master) ---------------- */
+  /* ---------------- Project-Only / One-Time Material Mode (Workbook Custom Property + A2 visual banner) ---------------- */
+  async function readWorkbookProjectProp(context) {
+    try {
+      var item = context.workbook.properties.custom.getItemOrNullObject(PROJECT_PROP);
+      item.load("value");
+      await context.sync();
+      if (!item.isNullObject && item.value) {
+        return parseProjectMeta(item.value);
+      }
+    } catch (e) { /* ignore on hosts without custom properties */ }
+    return { isProject: false, active: false, projectName: "", name: "", created: "" };
+  }
+
+  async function writeWorkbookProjectProp(context, projectNameOrNull) {
+    try {
+      var props = context.workbook.properties.custom;
+      var item = props.getItemOrNullObject(PROJECT_PROP);
+      item.load("key");
+      await context.sync();
+      if (projectNameOrNull) {
+        var payload = serializeProjectMeta(projectNameOrNull);
+        if (item.isNullObject) props.add(PROJECT_PROP, payload);
+        else item.value = payload;
+      } else {
+        if (!item.isNullObject) item.delete();
+      }
+      await context.sync();
+    } catch (e) { /* non-fatal on older hosts */ }
+  }
+
   async function readMasterMode(context, ws) {
+    var fromProp = await readWorkbookProjectProp(context);
+    if (fromProp.isProject) return fromProp;
+    if (!ws) return fromProp;
     try {
       var z1 = ws.getRange("Z1").load("values");
       await context.sync();
-      return parseProjectMeta(z1.values[0][0]);
+      var fromZ1 = parseProjectMeta(z1.values[0][0]);
+      if (fromZ1.isProject) {
+        // Silently migrate v1.9 Z1 flag into workbook custom property so it survives Flattening
+        await writeWorkbookProjectProp(context, fromZ1.projectName);
+      }
+      return fromZ1;
     } catch (e) {
-      return { isProject: false, projectName: "", created: "" };
+      return { isProject: false, active: false, projectName: "", name: "", created: "" };
     }
   }
 
-  async function writeMasterMode(context, ws, projectNameOrNull) {
+  /* Writes/clears visual banner on Master!A2 (leaving A3 exclusively for Last change audit banner) + Z1 mirror. */
+  async function writeProjectBanner(context, ws, projectNameOrNull) {
+    if (!ws) return;
     var z1 = ws.getRange("Z1");
     var a2 = ws.getRange("A2");
     if (projectNameOrNull) {
       var cleanName = String(projectNameOrNull).trim() || "Project Custom Materials";
       z1.values = [[serializeProjectMeta(cleanName)]];
       try { ws.getRange("Z:Z").columnHidden = true; } catch (e) { /* ignore */ }
-      a2.values = [["PROJECT-ONLY MATERIALS: " + cleanName + " (Isolated — changes here do not modify the global Master list)"]];
+      a2.values = [["PROJECT-ONLY MATERIALS: " + cleanName + " (Isolated — changes auto-save separately and do not modify Global Master)"]];
       try {
         a2.format.font.size = 10;
         a2.format.font.bold = true;
         a2.format.font.italic = true;
         a2.format.font.color = "#3730A3";
       } catch (e) { /* ignore */ }
-      await context.sync();
-      return { isProject: true, projectName: cleanName };
     } else {
       z1.values = [[""]];
       a2.values = [[""]];
@@ -346,45 +391,61 @@
         a2.format.font.italic = false;
         a2.format.font.color = "#4B5563";
       } catch (e) { /* ignore */ }
-      await context.sync();
-      return { isProject: false, projectName: "" };
     }
+    await context.sync();
+  }
+
+  async function writeMasterMode(context, ws, projectNameOrNull) {
+    var cleanName = projectNameOrNull ? (String(projectNameOrNull).trim() || "Project Custom Materials") : "";
+    await writeWorkbookProjectProp(context, cleanName || null);
+    if (ws) await writeProjectBanner(context, ws, cleanName || null);
+    return {
+      isProject: !!cleanName,
+      active: !!cleanName,
+      projectName: cleanName,
+      name: cleanName
+    };
   }
 
   async function getMasterMode() {
-    var out = { isProject: false, projectName: "", created: "" };
+    var out = { isProject: false, active: false, projectName: "", name: "", created: "" };
     try {
       await Excel.run(async function (context) {
         var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
         await context.sync();
-        if (ws.isNullObject) return;
-        out = await readMasterMode(context, ws);
+        out = await readMasterMode(context, ws.isNullObject ? null : ws);
       });
-    } catch (e) { /* no Master sheet */ }
+    } catch (e) { /* ignore */ }
     return out;
   }
 
   async function setProjectMaterialMode(projectName) {
-    var out = { isProject: true, projectName: String(projectName || "").trim() || "Project Custom Materials" };
+    var cleanName = String(projectName || "").trim() || "Project Custom Materials";
+    var out = { isProject: true, active: true, projectName: cleanName, name: cleanName };
     await Excel.run(async function (context) {
-      var m = await openMaster(context);
-      out = await writeMasterMode(context, m.ws, out.projectName);
+      var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
+      await context.sync();
+      out = await writeMasterMode(context, ws.isNullObject ? null : ws, cleanName);
     });
     return out;
   }
 
   async function exitProjectMaterialMode() {
-    var out = { isProject: false, projectName: "" };
+    var out = { isProject: false, active: false, projectName: "", name: "" };
     await Excel.run(async function (context) {
-      var m = await openMaster(context);
-      out = await writeMasterMode(context, m.ws, null);
+      var ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
+      await context.sync();
+      out = await writeMasterMode(context, ws.isNullObject ? null : ws, null);
     });
     return out;
   }
 
   /* Converts this workbook's Master Unique Materials sheet into an isolated one-time Project Material list.
-   * opts.source: "clone" (keep current Master materials), "usedOnly" (keep only materials used in BOM sheets),
-   *              or "blank" (clear table to 1 blank row for purely custom project items).
+   * opts.source:
+   *   "clone"    = copy all materials from current Master list
+   *   "pick"     = keep only hand-picked materials in opts.keepNames (array of names)
+   *   "usedOnly" = keep only materials currently used in this workbook's BOM sheets
+   *   "blank"    = clear table to 1 blank row for purely custom project items
    */
   async function createProjectMaterialList(opts, log) {
     opts = opts || {};
@@ -411,6 +472,31 @@
         });
         await context.sync();
         remaining = 0;
+      } else if (source === "pick") {
+        var keepArr = Array.isArray(opts.keepNames) ? opts.keepNames : [];
+        var keepSet = {};
+        keepArr.forEach(function (nm) { var k = lc(nm); if (k) keepSet[k] = true; });
+        if (!Object.keys(keepSet).length) {
+          throw new Error("Tick at least one material to include in the project list.");
+        }
+        log("Keeping " + Object.keys(keepSet).length + " selected material(s) for this project ...");
+        var bodyP = m.t.getDataBodyRange().load(["values", "rowCount"]);
+        await context.sync();
+        var delP = [];
+        var keptP = 0;
+        bodyP.values.forEach(function (row, idx) {
+          var nm = lc(row[m.idx.material] || "");
+          if (nm && keepSet[nm]) keptP++;
+          else delP.push(idx);
+        });
+        if (!keptP) {
+          throw new Error("None of the selected materials were found in the Master table.");
+        }
+        for (var dp = delP.length - 1; dp >= 0; dp--) {
+          m.t.rows.getItemAt(delP[dp]).delete();
+        }
+        if (delP.length) await context.sync();
+        remaining = keptP;
       } else if (source === "usedOnly") {
         log("Scanning BOM sheets for materials currently in use ...");
         wb.worksheets.load("items/name");
@@ -842,7 +928,7 @@
   async function inspectSheets() {
     var out = {
       bomSheets: [], allSheets: [], hasBlank: false, hasMaster: false,
-      needsTemplate: false, project: "", masterMode: { isProject: false, projectName: "", created: "" }
+      needsTemplate: false, project: "", masterMode: { isProject: false, active: false, projectName: "", name: "", created: "" }
     };
     await Excel.run(async function (context) {
       var wb = context.workbook;
@@ -856,9 +942,8 @@
       out.hasMaster = !!masterWs;
       var bom = sheets.filter(function (ws) { return !!firstTable(ws.tables.items, "bom_"); });
       var a1 = bom.map(function (ws) { return ws.getRange("A1").load("values"); });
-      var z1 = masterWs ? masterWs.getRange("Z1").load("values") : null;
       await context.sync();
-      if (z1) out.masterMode = parseProjectMeta(z1.values[0][0]);
+      out.masterMode = await readMasterMode(context, masterWs || null);
       bom.forEach(function (ws, i) {
         out.bomSheets.push({ name: ws.name, hidden: ws.visibility !== "Visible" });
         if (ws.name === BLANK) out.hasBlank = true;
@@ -998,13 +1083,12 @@
 
   /* ================= Materials master ================= */
   async function listMaterials() {
-    var out = { rows: [], categories: [], masterMode: { isProject: false, projectName: "", created: "" } };
+    var out = { rows: [], categories: [], masterMode: { isProject: false, active: false, projectName: "", name: "", created: "" } };
     await Excel.run(async function (context) {
       var m = await openMaster(context);
       var body = m.t.getDataBodyRange().load("values");
-      var z1 = m.ws.getRange("Z1").load("values");
       await context.sync();
-      out.masterMode = parseProjectMeta(z1.values[0][0]);
+      out.masterMode = await readMasterMode(context, m.ws);
       var cats = {};
       body.values.forEach(function (r, i) {
         var o = rowToObj(r, i, m.idx);
@@ -1163,6 +1247,8 @@
     _openMaster: openMaster, _rowToObj: rowToObj,
     _ensureAuditColumns: ensureAuditColumns,
     _writeMasterBanner: writeMasterBanner,
+    _writeProjectBanner: writeProjectBanner,
+    _readMasterMode: readMasterMode,
     _ensureMasterNames: ensureMasterNames,
     _applyBomDataValidation: applyBomDataValidation,
     _repairBomSheet: repairBomSheet,
@@ -1174,6 +1260,7 @@
     deleteMaterial: deleteMaterial, stampMasterChanges: stampMasterChanges,
     getMasterMode: getMasterMode, setProjectMaterialMode: setProjectMaterialMode,
     createProjectMaterialList: createProjectMaterialList, exitProjectMaterialMode: exitProjectMaterialMode,
+    PROJECT_PROP: PROJECT_PROP,
     // pure helpers
     checkSheetName: checkSheetName, safeId: safeId, uniqueName: uniqueName,
     normalizeMaterial: normalizeMaterial, validateMaterial: validateMaterial,
