@@ -21,10 +21,15 @@ Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then r
 2. Whenever you create a **new BOM sheet**, add a BOM to a **non-BOM workbook**, or **restore a converted BOM**, your latest saved materials list loads automatically.
 3. **Backup or move to another computer**: open **Materials > Backup & Transfer (JSON)** and click **Export JSON backup** to save `master-materials.json`, or **Import JSON...** on another computer to load it immediately.
 
-## What was updated in v1.1 – v2.3
-- **Fixed Auto BOM Cell-Typing Display Glitch (v2.3)**:
-  - **Fixed missing/skipped digits while typing in Auto BOM cells**: fixed the frozen-pane boundary on hidden Row 5 (`ySplit="5"` + invalid `activeCell="A1"`) to freeze cleanly at visible Row 4 (`freezeRows(4)`), replaced the volatile `OFFSET(...)` Print Area formula with a non-volatile `INDEX(...)` Print Area, trimmed 31,920-cell conditional formatting and data validation bloat (`A6:L2000` / `C6:C2000`) down to the active table range (`305`), and wrapped all Office.js `Excel.run` calls with `{ delayForCellEdit: true }` (plus filtered `onChanged` watcher events) so background add-in activity never interrupts active cell editing.
-  - **One-click upgrade for existing Auto BOM workbooks**: open **Troubleshooting & Repair → Repair selected sheets** in v2.3 to apply the freeze-pane, non-volatile Print Area, and conditional-formatting fixes directly to existing sheets.
+## What was updated in v2.3 (typing-lag fix for newly created BOM sheets)
+- **Lighter template**: conditional formatting and the Materials dropdown now cover rows 6–305 (the table's real size) instead of 6–2000, and the dynamic Print_Area uses a non-volatile `INDEX` formula instead of `OFFSET`. `template.xlsx` and `template-data.js` were rebuilt together.
+- **Dropdown follows the table**: `applyBomDataValidation` sizes the Materials dropdown from the BOM table (minimum 305 rows) on Add Sheet, Repair, and Restore.
+- **Calculation mode can no longer get stuck on Manual**: the previous mode is saved before any Manual switch, restored in `finally` even if the switch itself failed, and re-applied automatically the next time the pane opens or a BOM sheet is created.
+- **Shadow-name cleanup after copy**: sheet-scoped copies of the 7 master names are removed from every newly created BOM sheet.
+- Removed the stray AI Studio script tag from `taskpane.html`; script cache-bust is now `?v=19`.
+- **After deploying**: bump `<Version>` in your manifest (e.g. `2.3.0.0`) and hard-refresh/restart Excel so the new scripts load. Existing BOM sheets keep their old rules; use a freshly created sheet to test.
+
+## What was updated in v1.1 – v2.2
 - **Add-in Version Badge & Selectable Saved Project-Only Material Lists (v2.2)**:
   - **Visible version tag**: the sticky header now displays `v2.2` (or `v2.2 · Offline` in the Offline Windows LTS edition) next to **BOM Tools** on every tab so you can immediately verify which version Excel loaded.
   - **Browse, select, restore, export, or delete any saved Project-Only list right inside the add-in**: scans all built-in storage layers (`localStorage`, IndexedDB, OPFS, and `C:\ProgramData\BOMTools\data\projects\` in Offline LTS) so even project lists created before flattening or before v2.2 appear automatically.

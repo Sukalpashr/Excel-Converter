@@ -85,16 +85,6 @@
   var AUDIT_KEYS = ["lastAction", "lastModified"];
 
   function noop() {}
-  function runExcel(fn) {
-    if (root.BomTools && typeof root.BomTools.runExcel === "function") return root.BomTools.runExcel(fn);
-    try {
-      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
-          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
-        return Excel.run({ delayForCellEdit: true }, fn);
-      }
-    } catch (e) { /* fall through */ }
-    return Excel.run(fn);
-  }
   function lc(s) { return String(s).trim().toLowerCase(); }
   function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
   function isNil(v) { return v === null || v === undefined || (typeof v === "number" && isNaN(v)); }
@@ -1086,7 +1076,7 @@
     var syncRemovals = !!opts.syncRemovals;
     var T = root.BomTools, res = { added: 0, updated: 0, removed: 0, skipped: [] };
     suppressWatch(3500);
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await T._openMaster(context);
       var hasAuditMeta = list.some(function (r) { return r.lastAction || r.lastModified; });
@@ -1246,16 +1236,18 @@
       b64 = bufToB64(await res.arrayBuffer());
     }
 
-    await runExcel(async function (context) {
+    try { if (T.recoverCalcMode) await T.recoverCalcMode(log); } catch (eRc) { /* ignore */ }
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
         wb.application.load("calculationMode");
         await context.sync();
         prevCalcMode = wb.application.calculationMode;
+        if (T.noteManualCalc) T.noteManualCalc(prevCalcMode);
         wb.application.calculationMode = Excel.CalculationMode.manual;
         await context.sync();
-      } catch (e) { prevCalcMode = null; }
+      } catch (e) { /* keep prevCalcMode (if it was read) so the finally block still restores it */ }
 
       var added = [];
       try {
@@ -1304,7 +1296,7 @@
         log("Setting up named ranges and dropdowns ...");
         var matInfo = await T._ensureMasterNames(context, wb, log);
 
-        // Repair BOM Blank formulas, dropdown (C6:C2000), hidden row 5 / cols M & AB, freeze panes, and print setup
+        // Repair BOM Blank formulas, dropdown (Materials column), hidden row 5 / cols M & AB, freeze panes, and print setup
         await T._repairBomSheet(context, wb, blank, matInfo, {}, log);
 
         // Verify no broken external links or #REF! remain on BOM Blank
@@ -1322,7 +1314,9 @@
         await T._openMaster(context);
       } finally {
         try {
-          if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
+          if (prevCalcMode !== null) { wb.application.calculationMode = prevCalcMode; await context.sync(); if (T.clearManualCalcNote) T.clearManualCalcNote(); }
+        } catch (e) { /* ignore */ }
+        try {
           wb.application.calculate(Excel.CalculationType.full);
           await context.sync();
         } catch (e) { /* ignore */ }
@@ -1348,15 +1342,13 @@
     if (watcher.on) return;
     var T = root.BomTools;
     try {
-      await runExcel(async function (context) {
+      await Excel.run(async function (context) {
         var ws = context.workbook.worksheets.getItemOrNullObject(T.MASTER);
         await context.sync();
         if (ws.isNullObject) return;
         watcher.snap = await workbookList();
-        ws.onChanged.add(function (ev) {
+        ws.onChanged.add(function () {
           if (Date.now() < watcher.ignoreUntil) return;
-          if (ev && ev.source && String(ev.source) !== "Local") return;
-          if (ev && ev.changeType && ev.changeType !== "RangeEdited" && ev.changeType !== "RowInserted" && ev.changeType !== "RowDeleted") return;
           clearTimeout(watcher.timer);
           watcher.timer = setTimeout(async function () {
             if (watcher.busy || Date.now() < watcher.ignoreUntil) return;
@@ -1428,7 +1420,7 @@
               }
             } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;
-          }, 1800);
+          }, 1400);
         });
         await context.sync();
         watcher.on = true;

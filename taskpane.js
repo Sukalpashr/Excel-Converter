@@ -1947,7 +1947,7 @@ async function openCopy(logger, tipText) {
   logger("Reading this workbook...", true);
   try {
     var b64 = await getFileBase64();
-    await (BomTools.runExcel || Excel.run)(async function (context) {
+    await Excel.run(async function (context) {
       Excel.createWorkbook(b64).open();
       await context.sync();
     });
@@ -2166,6 +2166,8 @@ async function syncPush() {
  * Boot
  * ===================================================================== */
 Office.onReady(function (info) {
+  // v2.3: if an earlier operation left Excel in Manual calculation, put it back
+  try { if (info.host === Office.HostType.Excel && window.BomTools && BomTools.recoverCalcMode) BomTools.recoverCalcMode(); } catch (eRc) { /* ignore */ }
   if ($("hdr-version")) {
     $("hdr-version").textContent = "v" + ADDIN_VERSION + (window.BOM_OFFLINE_LTS ? " · Offline" : "");
     $("hdr-version").title = "BOM Tools Add-in v" + ADDIN_VERSION + (window.BOM_OFFLINE_LTS ? " (Offline Windows LTS)" : "");
