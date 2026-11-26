@@ -59,21 +59,10 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* Write Excel 365 dynamic array formulas (SORT/UNIQUE/FILTER/# spill refs) via formulas2 so Excel never injects '@' */
+  /* Write Excel 365 dynamic array formulas (SORT/UNIQUE/FILTER/# spill refs).
+   * Note: Office.js Range only exposes `.formulas` (NOT VBA's `.formulas2`); Range.formulas natively parses Excel 365 dynamic arrays. */
   function setDynamicFormulas(range, arr2d) {
-    try {
-      if (typeof Office !== "undefined" &&
-          Office.context && Office.context.requirements &&
-          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
-        range.formulas2 = arr2d;
-        return;
-      }
-    } catch (e) { /* fall through */ }
-    try {
-      range.formulas2 = arr2d;
-    } catch (e2) {
-      range.formulas = arr2d;
-    }
+    range.formulas = arr2d;
   }
 
   function ab5Formula(tot) {
@@ -381,7 +370,7 @@
     // Hidden AB5 holds Excel 365 SORT(UNIQUE(FILTER(...))) dynamic spill array (AB6:AB<BOTTOM> stay clear so it never #SPILL!s)
     setDynamicFormulas(ws.getRange("AB5"), [[ab5Formula(tot)]]);
 
-    // Batch entire purchase list O5:AA<PL_LAST> in 1 write via formulas2 so $AB$5# never gets implicit-intersection '@'
+    // Batch entire purchase list O5:AA<PL_LAST> in 1 write via range.formulas (natively writes Excel 365 dynamic arrays)
     var plRows = [];
     for (var r = 5; r <= PL_LAST; r++) {
       var f = plFormulas(r, tot);
@@ -985,7 +974,7 @@
       }
     }
 
-    // 3. Apply either an explicitly chosen Project-Only JSON, an auto-detected BomProjectList slot, OR Global Master
+    // 3. Apply either an explicitly chosen Project-Only list (from PC slot or .json), explicit Global Master, or auto-detected BomProjectList
     var detectedProj = { active: false, name: "" };
     try {
       if (S.loadProjectState) detectedProj = await S.loadProjectState();
@@ -994,7 +983,7 @@
     if (opts.projectMaterials && Array.isArray(opts.projectMaterials.list) && opts.projectMaterials.list.length) {
       var pm = opts.projectMaterials;
       var projTitle = pm.projectName || "Project Custom Materials";
-      log("Applying saved Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
+      log("Applying Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
       if (S.saveProjectSlot) {
         await S.saveProjectSlot(projTitle, pm.list, pm.lastChange || null);
       }
@@ -1003,6 +992,18 @@
         await T.setProjectMaterialMode(projTitle);
       }
       log("Workbook set to Project-Only Materials mode (Global Master list untouched).");
+    } else if (opts.materialSource === "global") {
+      if (detectedProj.active && T.exitProjectMaterialMode) {
+        await T.exitProjectMaterialMode();
+        log("Switched workbook from Project-Only (\"" + detectedProj.name + "\") to Global Master list.");
+      }
+      if (opts.syncLocal !== false) {
+        try {
+          await S.pullLocal(log, { forceGlobal: true, allowPrompt: true, syncRemovals: true });
+        } catch (eG) {
+          log("Note: skipped local master file sync (" + (eG.message || eG) + ").");
+        }
+      }
     } else if (detectedProj.active) {
       log("Detected Project-Only list \"" + detectedProj.name + "\" from workbook properties ...");
       try {
@@ -1011,7 +1012,7 @@
           await T.setProjectMaterialMode(detectedProj.name);
         }
         if (pulledProj && pulledProj.empty) {
-          warnings.push("No saved copy of project list \"" + detectedProj.name + "\" was found on this computer. Load its saved .json file in Restore > Project Materials .json and restore again so custom materials get their weights.");
+          warnings.push("No saved copy of project list \"" + detectedProj.name + "\" was found on this computer. Pick a saved project list or load its .json file in Restore so custom materials get their weights.");
         }
       } catch (eP) {
         log("Note: could not load project list \"" + detectedProj.name + "\" (" + (eP.message || eP) + ").");
@@ -1310,11 +1311,24 @@
       var conv = await findConvertedSheets(context, wb, allSheets);
       out.convertedSheets = conv.map(function (s) { return s.name; });
       if (conv.length) {
-        var p5s = conv.map(function (ws) { return ws.getRange("P5").load("formulas"); });
+        var checks = conv.map(function (ws) {
+          return {
+            ws: ws,
+            p5: ws.getRange("P5:P" + PL_LAST).load(["formulas", "values"]),
+            ae2: ws.getRange("AE2").load("formulas")
+          };
+        });
         await context.sync();
-        conv.forEach(function (ws, i) {
-          var f5 = String((p5s[i].formulas && p5s[i].formulas[0] && p5s[i].formulas[0][0]) || "");
-          if (f5.indexOf("$AE$2") >= 0) out.growingConvertedSheets.push(ws.name);
+        checks.forEach(function (c) {
+          var f5 = String((c.p5.formulas && c.p5.formulas[0] && c.p5.formulas[0][0]) || "");
+          var fAe2 = String((c.ae2.formulas && c.ae2.formulas[0] && c.ae2.formulas[0][0]) || "");
+          var hasGrandTotal = c.p5.values.some(function (row) {
+            return String(row[0] || "").trim().toLowerCase().indexOf("grand total") === 0;
+          });
+          var isBlankBroken = !f5 && !fAe2 && !hasGrandTotal;
+          if (f5.indexOf("$AE$2") >= 0 || isBlankBroken) {
+            out.growingConvertedSheets.push(c.ws.name);
+          }
         });
       }
     });
@@ -1323,7 +1337,7 @@
 
   /* Repairs / upgrades already-converted (plain, auto-growing) sheets to Excel 365 SORT(UNIQUE(FILTER(...))) in AB5:
    * - Updates hidden AB5, AE2, Column P (names), and Column R (blank-Set-safe Qty) so ANY custom/unlisted material shows up A-Z.
-   * - Leaves typed Stock / PO inputs (V, W, X, Y, AA), formatting, and borders completely untouched! */
+   * - Also recovers sheets left blank by an earlier write, rebuilding O5:AA<PL_LAST> & AD2:AE3 while preserving typed Stock/PO inputs! */
   async function repairGrowingNames(log, opts) {
     log = log || function () {};
     opts = opts || {};
@@ -1349,15 +1363,22 @@
         return {
           ws: ws,
           colI: ws.getRange("I1:I" + BOTTOM).load("values"),
-          colP: ws.getRange("P5:P" + PL_LAST).load("formulas")
+          pl: ws.getRange("O5:AA" + PL_LAST).load(["formulas", "values"]),
+          ae12: ws.getRange("AE1:AE2").load(["values", "formulas"])
         };
       });
       await context.sync();
 
       pauseExcel(context);
       loads.forEach(function (L) {
-        var f5 = String((L.colP.formulas[0] && L.colP.formulas[0][0]) || "");
-        if (f5.indexOf("$AE$2") < 0) {
+        var f5 = String((L.pl.formulas[0] && L.pl.formulas[0][1]) || "");
+        var fAe2 = String((L.ae12.formulas[1] && L.ae12.formulas[1][0]) || "");
+        var hasGrandTotal = L.pl.values.some(function (row) {
+          return String(row[1] || "").trim().toLowerCase().indexOf("grand total") === 0;
+        });
+        var isGrowing = f5.indexOf("$AE$2") >= 0;
+        var isBlankBroken = !f5 && !fAe2 && !hasGrandTotal;
+        if (!isGrowing && !isBlankBroken) {
           skipped.push(L.ws.name + " (fixed purchase list - nothing to repair)");
           return;
         }
@@ -1369,26 +1390,62 @@
           skipped.push(L.ws.name + " (no Total: row found)");
           return;
         }
-        // Preserve existing sheet's row capacity (e.g. 32 on older 25-row sheets or 47 on 40-row sheets)
-        var lastRow = 5;
-        for (var pi = 0; pi < L.colP.formulas.length; pi++) {
-          if (String(L.colP.formulas[pi][0] || "").indexOf("$AE$2") >= 0) lastRow = 5 + pi;
-        }
-        if (lastRow < 8) lastRow = PL_LAST;
 
         L.ws.getRange("AB5:AB" + BOTTOM).clear("Contents");
         L.ws.getRange("AB:AB").columnHidden = true;
         setDynamicFormulas(L.ws.getRange("AB5"), [[ab5Formula(tot)]]);
-        setDynamicFormulas(L.ws.getRange("AE2"), [[ae2Formula()]]);
 
-        var pCol = [], rCol = [];
-        for (var r = 5; r <= lastRow; r++) {
-          var f = plFormulas(r, tot);
-          pCol.push([f.P]);
-          rCol.push([f.R]);
+        if (isBlankBroken) {
+          // Full rebuild of the growing purchase list & header counters, preserving any typed Stock/PO inputs
+          var plRows = [];
+          for (var rb = 5; rb <= PL_LAST; rb++) {
+            var fb = plFormulas(rb, tot);
+            var existingRow = L.pl.values[rb - 5] || [];
+            var existingF = L.pl.formulas[rb - 5] || [];
+            var keep = function (off) {
+              return (!isFormula(existingF[off]) && !isBlank(existingRow[off])) ? existingRow[off] : "";
+            };
+            plRows.push([
+              fb.O, fb.P, fb.Q, fb.R, fb.S, fb.T, fb.U,
+              keep(7),
+              keep(8) !== "" ? keep(8) : fb.W,
+              keep(9), keep(10),
+              fb.Z,
+              keep(12)
+            ]);
+          }
+          setDynamicFormulas(L.ws.getRange("O5:AA" + PL_LAST), plRows);
+          var stdLen = (typeof L.ae12.values[0][0] === "number" && L.ae12.values[0][0] > 0) ? L.ae12.values[0][0] : 6000;
+          L.ws.getRange("AE1").values = [[stdLen]];
+          L.ws.getRange("AD2").copyFrom("AD1", "Formats");
+          L.ws.getRange("AE2").copyFrom("AE1", "Formats");
+          L.ws.getRange("AE2").format.fill.clear();
+          setDynamicFormulas(L.ws.getRange("AD2:AE3"), [
+            ["Materials in purchase list:", ae2Formula()],
+            ['=IF(AE2>' + CAP + ',"More than ' + CAP + ' materials - copy the last purchase-list row down","")', ""]
+          ]);
+          L.ws.getRange("AD3").format.font.bold = true;
+          L.ws.getRange("AD3").format.font.color = "#C00000";
+          L.ws.getRange("O5:AA" + PL_LAST).conditionalFormats.clearAll();
+          addGrowCf(L.ws, 15, 5, PL_LAST, "$AE$2", 4);
+        } else {
+          // Preserve existing sheet's row capacity (e.g. 32 on older 25-row sheets or 47 on 40-row sheets)
+          var lastRow = 5;
+          for (var pi = 0; pi < L.pl.formulas.length; pi++) {
+            if (String(L.pl.formulas[pi][1] || "").indexOf("$AE$2") >= 0) lastRow = 5 + pi;
+          }
+          if (lastRow < 8) lastRow = PL_LAST;
+
+          setDynamicFormulas(L.ws.getRange("AE2"), [[ae2Formula()]]);
+          var pCol = [], rCol = [];
+          for (var r = 5; r <= lastRow; r++) {
+            var f = plFormulas(r, tot);
+            pCol.push([f.P]);
+            rCol.push([f.R]);
+          }
+          setDynamicFormulas(L.ws.getRange("P5:P" + lastRow), pCol);
+          setDynamicFormulas(L.ws.getRange("R5:R" + lastRow), rCol);
         }
-        setDynamicFormulas(L.ws.getRange("P5:P" + lastRow), pCol);
-        setDynamicFormulas(L.ws.getRange("R5:R" + lastRow), rCol);
         fixed.push(L.ws.name);
       });
       await context.sync();
@@ -1402,25 +1459,40 @@
     return { fixed: fixed, skipped: skipped };
   }
 
-  /* High-speed batched Flatten conversion across all BOM sheets under Manual calculation mode */
+  /* High-speed batched Flatten conversion across selected (or all) BOM sheets under Manual calculation mode.
+   * If opts.sheets selects only a subset of automated BOM sheets, Master Unique Materials, BOM Blank, and named ranges are KEPT. */
   async function convertWorkbook(mode, log, opts) {
     log = log || function () {};
     opts = opts || {};
     var warnings = [];
+    var selectedSet = null;
+    if (Array.isArray(opts.sheets)) {
+      if (!opts.sheets.length) throw new Error("Select at least one automated BOM sheet to flatten.");
+      selectedSet = {};
+      opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
+    }
 
-    // Before deleting Master Unique Materials, auto-snapshot Project-Only list into its per-project storage slot on this PC
+    // Auto-snapshot active Project-Only list to this PC's per-project storage slot & re-stamp BomProjectList before converting
+    var activeProjectName = "";
     try {
       if (root.BomSync && root.BomSync.loadProjectState && root.BomSync.saveProjectSlot) {
         var projInfo = await root.BomSync.loadProjectState();
         if (projInfo && projInfo.active) {
+          activeProjectName = projInfo.name;
           var projList = await root.BomSync.workbookList();
           if (projList.length) {
             await root.BomSync.saveProjectSlot(projInfo.name, projList, null);
             log("Backed up Project-Only list \"" + projInfo.name + "\" (" + projList.length + " items) to this computer's project storage.");
           }
+          if (root.BomTools && root.BomTools.setProjectMaterialMode) {
+            await root.BomTools.setProjectMaterialMode(projInfo.name);
+          }
         }
       }
     } catch (eSnap) { /* non-fatal */ }
+
+    var keepMaster = false;
+    var convertedCount = 0;
 
     await Excel.run(async function (context) {
       var wb = context.workbook;
@@ -1448,12 +1520,25 @@
         var tblMat = masterWs.tables.items.filter(function (t) { return t.name === "tblMat"; })[0];
         if (!tblMat) throw new Error('Table "tblMat" not found on the Master sheet.');
 
-        var sheets = filterBomSheets(allSheets);
-        if (!sheets.length) throw new Error("No BOM sheet (table named bom_...) found in this workbook.");
+        var allBomSheets = filterBomSheets(allSheets);
+        if (!allBomSheets.length) throw new Error("No BOM sheet (table named bom_...) found in this workbook.");
+
+        var sheets = selectedSet
+          ? allBomSheets.filter(function (ws) { return !!selectedSet[String(ws.name).trim().toLowerCase()]; })
+          : allBomSheets;
+        if (!sheets.length) throw new Error("None of the selected automated BOM sheets were found.");
+
+        var selectedLookup = {};
+        sheets.forEach(function (s) { selectedLookup[String(s.name).trim().toLowerCase()] = true; });
+        var remainingAutomated = allBomSheets.filter(function (ws) {
+          return !selectedLookup[String(ws.name).trim().toLowerCase()];
+        });
+        keepMaster = remainingAutomated.length > 0;
+        convertedCount = sheets.length;
         var convertedNames = sheets.map(function (s) { return s.name; });
 
-        // Sync 3: Batch-load Master table AND A1:AK<BOTTOM> for ALL BOM sheets in ONE sync
-        log("Reading Master list and " + sheets.length + " BOM sheet(s) ...");
+        // Sync 3: Batch-load Master table AND A1:AK<BOTTOM> for ALL selected BOM sheets in ONE sync
+        log("Reading Master list and " + sheets.length + " selected BOM sheet(s) ...");
         var matHdr = tblMat.getHeaderRowRange().load("values");
         var matBody = tblMat.getDataBodyRange().load("values");
         var sheetRanges = sheets.map(function (ws) {
@@ -1467,7 +1552,7 @@
           return { ws: ws, S: S, po: readPo(S, master) };
         });
 
-        // Sync 4: Strip tables, clear CF/DV, unmerge AD2:AK2, delete row 5 across ALL sheets in ONE sync
+        // Sync 4: Strip tables, clear CF/DV, unmerge AD2:AK2, delete row 5 across selected sheets in ONE sync
         log("Flattening " + sheets.length + " sheet(s) (" + (mode === "growing" ? "auto-growing 365" : "fixed") + ") ...");
         pauseExcel(context);
         snapshots.forEach(function (snap) {
@@ -1475,7 +1560,7 @@
         });
         await context.sync();
 
-        // Sync 5: Write BOM blocks, purchase lists, borders, CF, print areas & freeze panes across ALL sheets in ONE sync
+        // Sync 5: Write BOM blocks, purchase lists, borders, CF, print areas & freeze panes across selected sheets in ONE sync
         pauseExcel(context);
         snapshots.forEach(function (snap) {
           var w = mode === "growing"
@@ -1527,12 +1612,19 @@
           catch (e) { warnings.push("Compiled sheet failed: " + (e.message || e)); }
         }
 
-        log("Removing template sheets and named ranges ...");
-        await cleanWorkbook(context, wb, convertedNames);
+        if (keepMaster) {
+          log("Kept \"" + MASTER + "\", \"" + BLANK + "\", and named ranges because " + remainingAutomated.length +
+            " automated BOM sheet(s) remain unconverted (" + remainingAutomated.map(function (s) { return s.name; }).join(", ") + ").");
+        } else {
+          log("Removing template sheets and named ranges ...");
+          await cleanWorkbook(context, wb, convertedNames);
+        }
       } finally {
         await restoreCalcAndRecalc(context, wb, prevCalcMode);
       }
     });
+    warnings.keptMaster = keepMaster;
+    warnings.convertedCount = convertedCount;
     return warnings;
   }
 

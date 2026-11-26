@@ -335,17 +335,21 @@
   async function writeWorkbookProjectProp(context, projectNameOrNull) {
     try {
       var props = context.workbook.properties.custom;
-      var item = props.getItemOrNullObject(PROJECT_PROP);
-      item.load("key");
-      await context.sync();
       if (projectNameOrNull) {
         var payload = serializeProjectMeta(projectNameOrNull);
-        if (item.isNullObject) props.add(PROJECT_PROP, payload);
-        else item.value = payload;
+        // CustomPropertyCollection.add creates or updates reliably across Excel Desktop & Web (keep <=255 chars)
+        if (payload.length > 250) payload = String(projectNameOrNull).trim().slice(0, 240);
+        props.add(PROJECT_PROP, payload);
+        await context.sync();
       } else {
-        if (!item.isNullObject) item.delete();
+        var item = props.getItemOrNullObject(PROJECT_PROP);
+        item.load("key");
+        await context.sync();
+        if (!item.isNullObject) {
+          item.delete();
+          await context.sync();
+        }
       }
-      await context.sync();
     } catch (e) { /* non-fatal on older hosts */ }
   }
 

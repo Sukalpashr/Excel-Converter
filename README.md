@@ -21,7 +21,15 @@ Host this folder on any HTTPS static host (GitHub Pages or Netlify Drop), then r
 2. Whenever you create a **new BOM sheet**, add a BOM to a **non-BOM workbook**, or **restore a converted BOM**, your latest saved materials list loads automatically.
 3. **Backup or move to another computer**: open **Materials > Backup & Transfer (JSON)** and click **Export JSON backup** to save `master-materials.json`, or **Import JSON...** on another computer to load it immediately.
 
-## What was updated in v1.1 – v2.0
+## What was updated in v1.1 – v2.2
+- **Add-in Version Badge & Selectable Saved Project-Only Material Lists (v2.2)**:
+  - **Visible version tag**: the sticky header now displays `v2.2` (or `v2.2 · Offline` in the Offline Windows LTS edition) next to **BOM Tools** on every tab so you can immediately verify which version Excel loaded.
+  - **Browse, select, restore, export, or delete any saved Project-Only list right inside the add-in**: scans all built-in storage layers (`localStorage`, IndexedDB, OPFS, and `C:\ProgramData\BOMTools\data\projects\` in Offline LTS) so even project lists created before flattening or before v2.2 appear automatically.
+  - **Convert > Restore Automated** now offers a clear 3-way **Materials list to restore with** picker (**Global Master list**, **Saved Project-Only list on this PC** dropdown, or **Project Materials `.json` file**), and **Materials** includes a **Saved Project Lists on this PC** drawer to load, export, or delete any saved project list anytime.
+  - Hardened `BomProjectList` custom property writes (`custom.add`) and re-stamps it before full flattening so project links survive reliably.
+- **Fixed Auto-Growing Excel 365 Purchase List & Selective Sheet Flattening (v2.1)**:
+  - **Fixed empty Auto-growing purchase list**: replaced the non-existent Office.js `range.formulas2` call with `range.formulas` (which natively writes Excel 365 `SORT(UNIQUE(FILTER(...)))` and `$AB$5#` dynamic arrays without dropping formulas), and upgraded **Upgrade / Repair Purchase-List Names** so it can also rebuild any sheet left empty by v2.0.
+  - **Selective Sheet Flattening (keeps Master sheet on partial flatten)**: **Convert > Flatten for Sharing** now displays a per-sheet selection checklist (`All` / `None`). Whenever at least one automated BOM sheet is left unselected, `Master Unique Materials`, hidden `BOM Blank`, and all 7 workbook named ranges are automatically kept intact so remaining automated pages continue working normally.
 - **Excel 365 Dynamic Array Auto-Growing Purchase List & Best-of-Both Project-Only Lists (v2.0)**:
   - **Excel 365 `SORT(UNIQUE(FILTER(...)))` Auto-Growing Purchase List**: hidden `AB5` holds `=IFERROR(SORT(UNIQUE(FILTER($C$5:$C$<tot>,($C$5:$C$<tot><>"")*($C$5:$C$<tot><>"Materials")))),"")`, `AE2` holds `=IF($AB$5="",0,ROWS($AB$5#))`, and `P5:P47` uses `INDEX($AB$5#,(ROW()-4))` — all written via `range.formulas2` (ExcelApi 1.9+) so Excel 365 never injects `@`. Any custom/unlisted material added after flattening appears alphabetically right away. Use **Fixed purchase list (No automation)** when sharing with non-365 Excel.
   - **Upgrade / Repair Purchase-List Names**: new collapsible tool in **Convert > Restore Automated** upgrades already-converted Auto-growing sheets in place to the Excel 365 dynamic list without touching BOM rows or Stock/PO inputs.
