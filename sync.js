@@ -96,10 +96,15 @@
     };
   }
 
-  function serialize(list, lastChange) {
+  function serialize(list, lastChange, extraMeta) {
     var nowIso = new Date().toISOString();
     var lcMeta = lastChange && lastChange.items ? buildLastChangeMeta(lastChange) : (lastChange && lastChange.time ? lastChange : null);
-    var out = '{\n "version": 1,\n "updated": "' + nowIso + '",\n';
+    var out = '{\n "version": 1,\n';
+    if (extraMeta && extraMeta.scope === "project") {
+      out += ' "scope": "project",\n';
+      out += ' "projectName": ' + JSON.stringify(String(extraMeta.projectName || "Project Custom Materials")) + ',\n';
+    }
+    out += ' "updated": "' + nowIso + '",\n';
     if (lcMeta) {
       out += ' "lastChange": ' + JSON.stringify(lcMeta) + ',\n';
     }
@@ -108,12 +113,18 @@
     return out;
   }
 
+  function serializeProjectList(list, projectName, lastChange) {
+    return serialize(list, lastChange, { scope: "project", projectName: projectName });
+  }
+
   function parsePayload(text) {
     var j = JSON.parse(text);
     var arr = Array.isArray(j) ? j : (j.materials || []);
     var list = arr.map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
     return {
       list: list,
+      scope: (j && !Array.isArray(j) && j.scope === "project") ? "project" : "master",
+      projectName: (j && !Array.isArray(j) && j.projectName) ? String(j.projectName).trim() : "",
       updated: (j && !Array.isArray(j) && j.updated) || "",
       lastChange: (j && !Array.isArray(j) && j.lastChange) || null
     };
@@ -241,6 +252,31 @@
     } catch (e) { return null; }
   }
 
+  function isOfflineLts() {
+    return !!(root && root.BOM_OFFLINE_LTS);
+  }
+
+  async function offlineServerReadJson() {
+    if (!isOfflineLts() || typeof fetch !== "function") return null;
+    try {
+      var res = await fetch("./local-master.json?t=" + Date.now(), { cache: "no-store" });
+      if (!res.ok) return null;
+      return await res.text();
+    } catch (e) { return null; }
+  }
+
+  async function offlineServerWriteJson(json) {
+    if (!isOfflineLts() || typeof fetch !== "function") return false;
+    try {
+      var res = await fetch("./local-master.json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: json
+      });
+      return !!res.ok;
+    } catch (e) { return false; }
+  }
+
   async function saveLocalCache(list, lastChange) {
     requestPersistentStorage();
     var existingMeta = getCachedMeta();
@@ -257,7 +293,8 @@
     } catch (e) { /* storage may be restricted */ }
     await Promise.all([
       idbSet(IDB_JSON_KEY, json),
-      opfsWriteJson(json)
+      opfsWriteJson(json),
+      offlineServerWriteJson(json)
     ]);
     // Clean up any legacy external file handle from earlier versions so Excel never asks to reconnect
     try { await idbDel(IDB_HANDLE_KEY); } catch (e) { /* ignore */ }
@@ -265,7 +302,9 @@
   }
 
   async function readLocalCache() {
-    var json = await opfsReadJson();
+    // In Offline LTS mode, check durable PC disk file (C:\ProgramData\BOMTools\data\master-materials.json) first
+    var json = await offlineServerReadJson();
+    if (!json) json = await opfsReadJson();
     if (!json) json = await idbGet(IDB_JSON_KEY);
     if (!json) {
       try { json = localStorage.getItem(LOCAL_CACHE_KEY); } catch (e) { json = null; }
@@ -312,11 +351,15 @@
     return { list: [], lastChange: null, source: "none" };
   }
 
-  /* Seeds Built-in Storage once from the open workbook if storage is currently empty */
+  /* Seeds Built-in Storage once from the open workbook if storage is currently empty (never seeds from a Project-Only list) */
   async function ensureSeededFromWorkbook() {
     var c = await readLocalCache();
     if (c && c.list && c.list.length) return { seeded: false, count: c.list.length };
     try {
+      if (root.BomTools && root.BomTools.getMasterMode) {
+        var mode = await root.BomTools.getMasterMode();
+        if (mode && mode.isProject) return { seeded: false, count: 0, skippedProjectMode: true };
+      }
       var wb = await workbookList();
       if (wb.length) {
         await writeLocalMaster(wb, noop, {});
@@ -335,10 +378,19 @@
     return res;
   }
 
-  /* Sync current workbook's Master Unique Materials from Built-in Storage */
+  /* Sync current workbook's Master Unique Materials from Built-in Storage (skips Project-Only workbooks unless opts.force) */
   async function pullLocal(log, opts) {
     log = log || noop;
     opts = opts || {};
+    if (!opts.force && root.BomTools && root.BomTools.getMasterMode) {
+      try {
+        var mode = await root.BomTools.getMasterMode();
+        if (mode && mode.isProject) {
+          log("Project-Only materials active (\"" + mode.projectName + "\") — keeping workbook's project list (Global Master not applied).");
+          return { added: 0, updated: 0, removed: 0, skipped: [], source: "project", skippedProjectMode: true, projectName: mode.projectName };
+        }
+      } catch (eMode) { /* ignore */ }
+    }
     var local = await readLocalMaster();
     if (!local.list.length) {
       return { added: 0, updated: 0, removed: 0, skipped: [], source: "none", empty: true };
@@ -351,13 +403,18 @@
     return r;
   }
 
-  /* Build JSON text for backup/transfer export (prefers live workbook list + latest lastChange) */
+  /* Build JSON text for Global Master backup/transfer export */
   async function buildExportJson() {
     var cache = await readLocalCache();
     var lastChange = (cache && cache.lastChange) || (cache && cache.meta && cache.meta.lastChange) || null;
     var list = [];
+    var isProject = false;
     try {
-      list = await workbookList();
+      if (root.BomTools && root.BomTools.getMasterMode) {
+        var mode = await root.BomTools.getMasterMode();
+        isProject = !!(mode && mode.isProject);
+      }
+      if (!isProject) list = await workbookList();
     } catch (e) {
       list = (cache && cache.list) || [];
     }
@@ -365,13 +422,73 @@
     return { json: serialize(list, lastChange), count: list.length };
   }
 
-  /* Import a JSON backup/transfer file into Built-in Storage and apply to the workbook (if Master sheet exists) */
+  function makeProjectFileSlug(name) {
+    var slug = String(name || "project").trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+    return (slug || "project") + "-materials.json";
+  }
+
+  /* Build separate reusable JSON file for the current workbook's Project-Only material list */
+  async function buildProjectExportJson(projectName, lastChange) {
+    var list = await workbookList();
+    var pName = String(projectName || "").trim();
+    if (!pName && root.BomTools && root.BomTools.getMasterMode) {
+      try {
+        var mode = await root.BomTools.getMasterMode();
+        if (mode && mode.projectName) pName = mode.projectName;
+      } catch (e) { /* ignore */ }
+    }
+    pName = pName || "Project Custom Materials";
+    return {
+      json: serializeProjectList(list, pName, lastChange || null),
+      count: list.length,
+      projectName: pName,
+      suggestedName: makeProjectFileSlug(pName)
+    };
+  }
+
+  /* Import a separate Project Materials JSON into THIS workbook ONLY (switches to Project-Only mode; never modifies Global Master) */
+  async function importProjectJsonText(text, fileName, log) {
+    log = log || noop;
+    var parsed = parsePayload(text);
+    if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
+    var fallbackName = String(fileName || "Project Materials")
+      .replace(/\.json$/i, "")
+      .replace(/[-_]+materials$/i, "")
+      .replace(/[-_]+/g, " ")
+      .trim() || "Project Custom Materials";
+    var pName = parsed.projectName || fallbackName;
+
+    suppressWatch(4000);
+    var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
+    if (root.BomTools && root.BomTools.setProjectMaterialMode) {
+      await root.BomTools.setProjectMaterialMode(pName);
+    }
+    try {
+      var curList = await workbookList();
+      updateWatchSnap(curList);
+    } catch (e) { /* ignore */ }
+    log("Loaded Project-Only list \"" + pName + "\" (" + parsed.list.length + " materials) into this workbook only. Global Master list was not changed.");
+    r.projectName = pName;
+    r.count = parsed.list.length;
+    return r;
+  }
+
+  /* Import a JSON backup/transfer file into Built-in Storage and apply to the workbook (if Master sheet exists and not Project-Only) */
   async function importLocalJsonText(text, fileName, log) {
     log = log || noop;
     var parsed = parsePayload(text);
     if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
     await saveLocalCache(parsed.list, parsed.lastChange);
     try {
+      if (root.BomTools && root.BomTools.getMasterMode) {
+        var mode = await root.BomTools.getMasterMode();
+        if (mode && mode.isProject) {
+          log("Saved " + parsed.list.length + " materials to your computer's Global Master storage (this workbook stayed on its Project-Only list \"" + mode.projectName + "\").");
+          return { added: 0, updated: 0, removed: 0, skipped: [], savedOnly: true };
+        }
+      }
       var r = await applyList(parsed.list, log, { syncRemovals: true, lastChange: parsed.lastChange });
       log("Imported \"" + (fileName || "master-materials.json") + "\" (" + parsed.list.length + " materials): " +
         r.added + " added, " + r.updated + " changed, " + r.removed + " removed.");
@@ -794,12 +911,17 @@
                   if (T.stampMasterChanges) await T.stampMasterChanges(stampEntries, nowIso);
                 } catch (eSt) { /* non-fatal */ }
 
-                // Always save additions, modifications, and removals (with lastChange info) to local computer file + cache
-                var writeRes = await writeLocalMaster(cur, log, { allowPrompt: false, lastChange: lastChange });
-                if (hasToken()) {
-                  var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
-                  if (names.length) {
-                    try { await push(log, { only: names }); } catch (e) { log("GitHub auto-publish skipped: " + (e.message || e)); }
+                // Check Project-Only isolation: NEVER overwrite Global Master or GitHub if this workbook is in Project-Only mode!
+                var mode = (T.getMasterMode) ? await T.getMasterMode() : { isProject: false, projectName: "" };
+                var isProj = !!(mode && mode.isProject);
+
+                if (!isProj) {
+                  await writeLocalMaster(cur, log, { allowPrompt: false, lastChange: lastChange });
+                  if (hasToken()) {
+                    var names = d.onlyWb.map(function (m) { return m.material; }).concat(d.changed.map(function (c) { return c.material; }));
+                    if (names.length) {
+                      try { await push(log, { only: names }); } catch (e) { log("GitHub auto-publish skipped: " + (e.message || e)); }
+                    }
                   }
                 }
 
@@ -808,7 +930,9 @@
                   watcher.onSaved({
                     source: "sheet",
                     time: nowIso,
-                    savedToBuiltIn: true,
+                    savedToBuiltIn: !isProj,
+                    projectOnly: isProj,
+                    projectName: isProj ? mode.projectName : "",
                     items: items
                   });
                 }
@@ -836,12 +960,15 @@
     pullLocal: pullLocal,
     compareLocal: compareLocal,
     buildExportJson: buildExportJson,
+    buildProjectExportJson: buildProjectExportJson,
     importLocalJsonText: importLocalJsonText,
+    importProjectJsonText: importProjectJsonText,
     // GitHub optional API
     hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,
     // pure helpers
-    diff: diff, changedFields: changedFields, serialize: serialize, parseList: parseList, parsePayload: parsePayload,
+    diff: diff, changedFields: changedFields, serialize: serialize, serializeProjectList: serializeProjectList,
+    parseList: parseList, parsePayload: parsePayload,
     buildLastChangeMeta: buildLastChangeMeta,
     workbookList: workbookList, applyList: applyList
   };

@@ -836,6 +836,99 @@
   }
   #mat-list .mtag.modified { color: #1D4ED8; }
 
+  /* ---- Project-Only / One-Time Material Mode ---- */
+  .scope-card {
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 9px 11px;
+    margin-bottom: 10px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .scope-card.is-project {
+    background: #F4F5FF;
+    border-color: #C7D2FE;
+  }
+  .scope-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .scope-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  .scope-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .scope-card.is-project .scope-dot {
+    background: #4F46E5;
+  }
+  .scope-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-card.is-project .scope-title {
+    color: #312E81;
+  }
+  .scope-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .scope-card.is-project .scope-sub {
+    color: #4338CA;
+  }
+  .scope-setup {
+    margin-top: 9px;
+    padding-top: 9px;
+    border-top: 1px solid #E7ECE9;
+  }
+  .scope-card.is-project .scope-setup {
+    border-top-color: #D9E0FE;
+  }
+  button.indigo {
+    background: #4338CA;
+    border-color: #4338CA;
+    color: #fff;
+    font-weight: 600;
+  }
+  button.indigo:hover:not(:disabled) {
+    background: #3730A3;
+    border-color: #3730A3;
+  }
+  .proj-callout {
+    background: #F4F5FF;
+    border: 1px solid #C7D2FE;
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .proj-callout-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #312E81;
+    margin-bottom: 3px;
+  }
+  .proj-callout-desc {
+    font-size: 11.5px;
+    color: #4338CA;
+    line-height: 1.4;
+    margin: 0 0 8px;
+  }
+
   /* ---- Log Output ---- */
   .log {
     white-space: pre-wrap;
@@ -1053,10 +1146,61 @@
         </div>
       </div>
 
-      <!-- Main Panel 1: Search & Browse Master List -->
+      <!-- Scope Card: Switch between Global Master List and Isolated One-Time Project List -->
+      <div id="proj-scope-card" class="scope-card">
+        <div class="scope-top">
+          <div class="scope-left">
+            <span class="scope-dot" aria-hidden="true"></span>
+            <span id="proj-scope-title" class="scope-title">Global Master List</span>
+          </div>
+          <button type="button" id="proj-open-setup" class="link-btn">One-Time Project List...</button>
+        </div>
+        <div id="proj-scope-sub" class="scope-sub">
+          Edits auto-save to this computer and apply to future BOMs.
+        </div>
+
+        <!-- Inline setup panel (visible when user clicks "One-Time Project List...") -->
+        <div id="proj-setup-panel" class="scope-setup" hidden>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Create an isolated material list just for this project. Changes here will <b>never</b> alter your Global Master list, and you can save it as a separate <code style="font-family:Consolas,monospace">.json</code> file for reuse.
+          </p>
+          <label class="field">
+            <span>Project list name</span>
+            <input type="text" id="proj-name-input" placeholder="e.g. Warehouse B Custom Materials" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Start with</span>
+            <select id="proj-source-select">
+              <option value="clone">Copy from Global Master list (recommended)</option>
+              <option value="usedOnly">Only materials used in this workbook&apos;s BOMs</option>
+              <option value="blank">Blank one-time list (add custom materials only)</option>
+            </select>
+          </label>
+          <div class="btnrow">
+            <button type="button" id="proj-create-btn" class="indigo" style="flex:1">Create Project List</button>
+            <button type="button" id="proj-load-setup-btn">Load .json...</button>
+            <button type="button" id="proj-cancel-setup-btn">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Active Project-Only Actions (visible when workbook is in Project-Only mode) -->
+        <div id="proj-active-actions" class="scope-setup" hidden>
+          <div class="btnrow">
+            <button type="button" id="proj-export-btn" class="indigo" style="flex:1">Save Project List (.json)</button>
+            <button type="button" id="proj-load-btn">Load .json...</button>
+          </div>
+          <div class="btnrow" style="margin-top:6px">
+            <button type="button" id="proj-exit-btn" style="flex:1">Switch back to Global Master</button>
+          </div>
+        </div>
+        <input type="file" id="proj-import-input" accept=".json,application/json" hidden>
+        <div id="proj-log" class="log"></div>
+      </div>
+
+      <!-- Main Panel 1: Search & Browse Materials List -->
       <div class="card">
         <div class="card-title">
-          <span>Master Materials</span>
+          <span id="mat-list-title">Master Materials</span>
           <span id="mat-status" style="font-weight:500;text-transform:none;letter-spacing:0">Checking...</span>
         </div>
         <input type="search" id="mat-search" placeholder="Search materials or categories..." autocomplete="off">
@@ -1157,7 +1301,7 @@
       </details>
 
       <!-- Collapsible Drawer: Optional GitHub Sync -->
-      <details class="drawer subtle">
+      <details class="drawer subtle" id="github-drawer">
         <summary>
           <span class="sum-left"><span>Advanced: GitHub Sync</span></span>
           <span class="sum-caret" aria-hidden="true">&#9656;</span>
@@ -1199,6 +1343,14 @@
           </div>
         </div>
 
+        <div id="conv-proj-callout" class="proj-callout" hidden>
+          <div id="conv-proj-title" class="proj-callout-title">Project-Only Materials Active</div>
+          <p class="proj-callout-desc">
+            Flattening removes the materials sheet from this copy. Save your project list as a separate <code style="font-family:Consolas,monospace">.json</code> file now so you can reuse or restore it later.
+          </p>
+          <button type="button" id="conv-proj-save-btn" class="indigo" style="width:100%">Save Project Materials (.json)</button>
+        </div>
+
         <div class="card">
           <div class="card-title"><span>Step 1 &middot; Work on a copy</span></div>
           <p class="note" style="margin-top:0;margin-bottom:8px">
@@ -1212,7 +1364,7 @@
           <label class="opt">
             <input type="radio" name="mode" value="growing" checked>
             <b>Auto-growing purchase list</b>
-            <span>Purchase list updates and grows automatically when BOM rows change.</span>
+            <span>Purchase list updates and grows automatically—even when you type custom materials not on the Master list.</span>
           </label>
           <label class="opt">
             <input type="radio" name="mode" value="fixed">
@@ -1254,13 +1406,25 @@
         <div class="card">
           <div class="card-title"><span>Step 2 &middot; Choose Sheets &amp; Restore</span></div>
           <p class="note" style="margin-top:0;margin-bottom:6px">
-            Rebuilds each selected sheet back into a full automated BOM with <b>Master Unique Materials</b>, hidden <b>BOM Blank</b>, live dropdowns, formulas, and Stock &amp; PO inputs preserved.
+            Rebuilds each selected sheet back into a full automated BOM with live dropdowns, formulas, and Stock &amp; PO inputs preserved.
           </p>
           <div id="rest-sheets" class="sheet-pick" hidden></div>
           <label class="chk">
             <input type="checkbox" id="rest-sync" checked>
-            <span>Load my latest saved materials list from this computer</span>
+            <span>Load my Global Master list from this computer</span>
           </label>
+          <label class="chk">
+            <input type="checkbox" id="rest-use-proj">
+            <span>Instead, restore with a saved Project Materials <code style="font-family:Consolas,monospace">.json</code> file (isolated)</span>
+          </label>
+          <div id="rest-proj-box" style="margin:4px 0 8px 22px" hidden>
+            <div class="btnrow">
+              <button type="button" id="rest-proj-pick-btn">Choose Project .json...</button>
+              <button type="button" id="rest-proj-clear-btn" hidden>Clear</button>
+            </div>
+            <input type="file" id="rest-proj-input" accept=".json,application/json" hidden>
+            <div id="rest-proj-status" class="note">No project materials file chosen yet.</div>
+          </div>
           <label class="chk">
             <input type="checkbox" id="rest-drop-compiled">
             <span>Remove "Compiled Purchase List" sheet (if present)</span>
@@ -1273,10 +1437,10 @@
     </section>
   </main>
 
-  <script src="convert.js?v=14"></script>
-  <script src="tools.js?v=14"></script>
-  <script src="template-data.js?v=14"></script>
-  <script src="sync.js?v=14"></script>
-  <script src="taskpane.js?v=14"></script>
+  <script src="convert.js?v=15"></script>
+  <script src="tools.js?v=15"></script>
+  <script src="template-data.js?v=15"></script>
+  <script src="sync.js?v=15"></script>
+  <script src="taskpane.js?v=15"></script>
 </body>
 </html>

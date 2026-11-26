@@ -7,8 +7,11 @@ var state = {
   canRestore: false,
   busy: false,
   confirmDelete: false,
+  confirmExitProject: false,
   convertSubmode: "flatten",
-  activeTab: "home"
+  activeTab: "home",
+  projectMode: { isProject: false, projectName: "" },
+  restProjectData: null
 };
 
 function makeLog(id) {
@@ -25,6 +28,7 @@ var log = makeLog("log");
 var restLog = makeLog("rest-log");
 var shLog = makeLog("sh-log");
 var matLog = makeLog("mat-log");
+var projLog = makeLog("proj-log");
 var localLog = makeLog("local-log");
 var syncLog = makeLog("sync-log");
 var homeRepairLog = makeLog("home-repair-log");
@@ -65,10 +69,13 @@ function updateButtons() {
   var shRepPicked = getPickedSheets("sh-repair-sheets").length;
   var homeRepPicked = getPickedSheets("home-repair-sheets").length;
 
+  var useRestProj = $("rest-use-proj") ? $("rest-use-proj").checked : false;
+  var needRestProjFile = useRestProj && !state.restProjectData;
+
   if ($("convert")) $("convert").disabled = state.busy || !state.ok || !isCopy;
   if ($("copy")) $("copy").disabled = state.busy;
   if ($("rest-copy")) $("rest-copy").disabled = state.busy;
-  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !restPicked;
+  if ($("restore-btn")) $("restore-btn").disabled = state.busy || !state.canRestore || !restPicked || needRestProjFile;
   if ($("sh-repair")) $("sh-repair").disabled = state.busy || !shRepPicked;
   if ($("home-repair-btn")) $("home-repair-btn").disabled = state.busy || !homeRepPicked;
 
@@ -84,6 +91,8 @@ function updateButtons() {
     setReqHint("rest-req-hint", "No converted BOM sheets found to restore.", false);
   } else if (!restPicked) {
     setReqHint("rest-req-hint", "Select at least one sheet above to restore.", true);
+  } else if (needRestProjFile) {
+    setReqHint("rest-req-hint", "Choose your saved Project Materials .json file above to continue.", false);
   } else {
     setReqHint("rest-req-hint", "", false);
   }
@@ -206,7 +215,7 @@ function showTab(name, opts) {
   if (name === "mat") {
     refreshMaterials();
     refreshLocalFileStatus();
-    refreshSync();
+    if (!window.BOM_OFFLINE_LTS) refreshSync();
     renderSessionChanges();
     BomSync.watch(localLog, handleAutoSaveEvent);
   }
@@ -238,6 +247,7 @@ async function refreshHome() {
     renderSheetPicker("home-repair-sheets", repairItems, "BOM sheets to repair");
     if ($("home-repair-drawer")) $("home-repair-drawer").hidden = !repairItems.length;
 
+    if (info.masterMode) state.projectMode = info.masterMode;
     var hasAuto = info.master && info.bomSheets.length > 0;
     var hasConv = info.convertedSheets && info.convertedSheets.length > 0;
 
@@ -285,26 +295,43 @@ async function refreshLocalFileStatus() {
       await BomSync.ensureSeededFromWorkbook();
     }
     var info = await BomSync.getLocalFileStatus();
+    var isProj = !!(state.projectMode && state.projectMode.isProject);
     if (info.hasCache) {
       if (st) {
         st.className = "status ok";
-        st.textContent = "Auto-saving in built-in storage (" + info.cachedCount + " materials) — never asks to reconnect.";
+        st.textContent = "Auto-saving Global Master in built-in storage (" + info.cachedCount + " materials) — never asks to reconnect.";
       }
       if (tag) { tag.className = "sum-meta ok"; tag.textContent = info.cachedCount + " saved"; }
-      if (homeSt) homeSt.textContent = "Master list auto-saves on this computer (" + info.cachedCount + " items).";
-      if (shSt) shSt.textContent = "Auto-connected to built-in storage (" + info.cachedCount + " items).";
+      if (homeSt) {
+        homeSt.textContent = isProj
+          ? ("Project-Only list active (\"" + state.projectMode.projectName + "\") · Global Master untouched (" + info.cachedCount + " items).")
+          : ("Master list auto-saves on this computer (" + info.cachedCount + " items).");
+      }
+      if (shSt) {
+        shSt.textContent = isProj
+          ? ("Project-Only list active (\"" + state.projectMode.projectName + "\") — new sheets will keep your project materials.")
+          : ("Auto-connected to built-in storage (" + info.cachedCount + " items).");
+      }
     } else {
       if (st) {
         st.className = "status";
         st.textContent = "Built-in storage is ready. Open a BOM workbook or import a JSON backup to populate it.";
       }
       if (tag) { tag.className = "sum-meta"; tag.textContent = "Auto-saved"; }
-      if (homeSt) homeSt.textContent = "Master list will auto-save on this computer once a BOM is opened.";
-      if (shSt) shSt.textContent = "Built-in storage ready — materials auto-save on this computer.";
+      if (homeSt) {
+        homeSt.textContent = isProj
+          ? ("Project-Only list active (\"" + state.projectMode.projectName + "\") · Global Master untouched.")
+          : "Master list will auto-save on this computer once a BOM is opened.";
+      }
+      if (shSt) {
+        shSt.textContent = isProj
+          ? ("Project-Only list active (\"" + state.projectMode.projectName + "\") — new sheets keep your project materials.")
+          : "Built-in storage ready — materials auto-save on this computer.";
+      }
     }
 
-    if (pullBtn) pullBtn.disabled = state.busy || !info.hasCache || !mat.hasMaster;
-    if (saveBtn) saveBtn.disabled = state.busy || !mat.rows.length;
+    if (pullBtn) pullBtn.disabled = state.busy || !info.hasCache || !mat.hasMaster || isProj;
+    if (saveBtn) saveBtn.disabled = state.busy || !mat.rows.length || isProj;
   } catch (e) {
     if (st) { st.className = "status warn"; st.textContent = "Could not check built-in storage: " + (e.message || e); }
   }
@@ -407,6 +434,7 @@ async function refreshSheets() {
   setDot("sh-dot", "");
   try {
     sheetInfo = await BomTools.inspectSheets();
+    if (sheetInfo.masterMode) state.projectMode = sheetInfo.masterMode;
     var sel = $("sh-source"), keep = sel.value;
     sel.innerHTML = "";
     if (sheetInfo.needsTemplate) {
@@ -769,7 +797,9 @@ function showChangeToast(evt) {
   }
 
   if (whereEl) {
-    whereEl.textContent = "Saved to Master sheet & this computer";
+    whereEl.textContent = evt.projectOnly
+      ? "Saved to Project list only (Global Master untouched)"
+      : "Saved to Master sheet & this computer";
   }
   if (hintEl) hintEl.textContent = anyClickable ? "Click to edit" : "";
 
@@ -911,7 +941,9 @@ function recordAutoSave(evt) {
   var normalizedEvt = {
     source: evt.source || "panel",
     time: nowIso,
-    savedToBuiltIn: true,
+    savedToBuiltIn: evt.projectOnly ? false : true,
+    projectOnly: !!evt.projectOnly,
+    projectName: evt.projectName || "",
     items: normalizedItems
   };
 
@@ -1095,6 +1127,145 @@ function renderMatList() {
   }
 }
 
+function resetExitProjectConfirm() {
+  state.confirmExitProject = false;
+  if ($("proj-exit-btn")) $("proj-exit-btn").textContent = "Switch back to Global Master";
+}
+
+function renderProjectScopeUI() {
+  var card = $("proj-scope-card");
+  var title = $("proj-scope-title");
+  var sub = $("proj-scope-sub");
+  var openBtn = $("proj-open-setup");
+  var setupPanel = $("proj-setup-panel");
+  var activePanel = $("proj-active-actions");
+  var listTitle = $("mat-list-title");
+  if (!card) return;
+
+  var isProj = !!(state.projectMode && state.projectMode.isProject);
+  card.className = "scope-card" + (isProj ? " is-project" : "");
+
+  if (isProj) {
+    var pName = state.projectMode.projectName || "Project Custom Materials";
+    if (title) title.textContent = "Project-Only: " + pName;
+    if (sub) sub.textContent = "Changes stay in this workbook only — Global Master is untouched.";
+    if (openBtn) openBtn.hidden = true;
+    if (setupPanel) setupPanel.hidden = true;
+    if (activePanel) activePanel.hidden = false;
+    if (listTitle) listTitle.textContent = "Project Materials";
+  } else {
+    if (title) title.textContent = "Global Master List";
+    if (sub) sub.textContent = mat.hasMaster
+      ? "Edits auto-save to this computer and apply to future BOMs."
+      : "Open a BOM workbook to manage or isolate materials.";
+    if (openBtn) {
+      openBtn.hidden = !mat.hasMaster;
+      openBtn.disabled = state.busy;
+    }
+    if (activePanel) activePanel.hidden = true;
+    if (listTitle) listTitle.textContent = "Master Materials";
+    resetExitProjectConfirm();
+  }
+}
+
+async function createProjectList() {
+  if (!mat.hasMaster || state.busy) return;
+  var pName = ($("proj-name-input") ? $("proj-name-input").value.trim() : "") || "Project Custom Materials";
+  var source = $("proj-source-select") ? $("proj-source-select").value : "clone";
+  state.busy = true; projLog("", true);
+  try {
+    BomSync.suppressWatch(4000);
+    await BomTools.createProjectMaterialList({ projectName: pName, source: source }, projLog);
+    var list = await BomSync.workbookList();
+    BomSync.updateWatchSnap(list);
+    if ($("proj-setup-panel")) $("proj-setup-panel").hidden = true;
+  } catch (e) {
+    projLog("Could not create Project-Only list: " + (e.message || e));
+  }
+  state.busy = false;
+  await refreshMaterials();
+  await refreshLocalFileStatus();
+}
+
+async function saveProjectListFile(logger) {
+  logger = logger || projLog;
+  logger("", true);
+  try {
+    var pName = (state.projectMode && state.projectMode.projectName) || "Project Custom Materials";
+    var exp = await BomSync.buildProjectExportJson(pName);
+    if (!exp.count) {
+      logger("Add at least one material to the project list before saving.");
+      return;
+    }
+    if (BomSync.supportsSavePicker && BomSync.supportsSavePicker()) {
+      try {
+        var handle = await window.showSaveFilePicker({
+          suggestedName: exp.suggestedName,
+          types: [{ description: "Project Materials JSON", accept: { "application/json": [".json"] } }]
+        });
+        var writable = await handle.createWritable();
+        await writable.write(exp.json);
+        await writable.close();
+        logger("Saved \"" + handle.name + "\" (" + exp.count + " project materials). You can reload it anytime even after flattening.");
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+      }
+    }
+    var blob = new Blob([exp.json], { type: "application/json;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = exp.suggestedName;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    logger("Saved " + exp.suggestedName + " (" + exp.count + " project materials) for reuse.");
+  } catch (e) {
+    logger("Save failed: " + (e.message || e));
+  }
+}
+
+async function loadProjectListFile(ev) {
+  var file = ev.target && ev.target.files && ev.target.files[0];
+  if (!file) return;
+  state.busy = true; projLog("", true);
+  try {
+    var text = await file.text();
+    await BomSync.importProjectJsonText(text, file.name, projLog);
+    if ($("proj-setup-panel")) $("proj-setup-panel").hidden = true;
+  } catch (e) {
+    projLog("Could not load Project JSON: " + (e.message || e));
+  }
+  ev.target.value = "";
+  state.busy = false;
+  await refreshMaterials();
+  await refreshLocalFileStatus();
+}
+
+async function exitProjectMode() {
+  if (!state.projectMode || !state.projectMode.isProject || state.busy) return;
+  if (!state.confirmExitProject) {
+    state.confirmExitProject = true;
+    if ($("proj-exit-btn")) $("proj-exit-btn").textContent = "Confirm switch to Global Master";
+    projLog("Click \"Confirm switch to Global Master\" to reconnect this workbook to your Global Master list (save your Project .json first if you want to keep it).", true);
+    return;
+  }
+  state.busy = true; projLog("", true);
+  try {
+    BomSync.suppressWatch(4000);
+    await BomTools.exitProjectMaterialMode();
+    await BomSync.pullLocal(projLog, { force: true, syncRemovals: true });
+    var list = await BomSync.workbookList();
+    BomSync.updateWatchSnap(list);
+    projLog("Switched back to Global Master list.");
+  } catch (e) {
+    projLog("Switch failed: " + (e.message || e));
+  }
+  state.busy = false;
+  resetExitProjectConfirm();
+  await refreshMaterials();
+  await refreshLocalFileStatus();
+}
+
 async function refreshMaterials(keepName) {
   var st = $("mat-status");
   st.textContent = "Loading...";
@@ -1102,6 +1273,8 @@ async function refreshMaterials(keepName) {
     var res = await BomTools.listMaterials();
     mat.rows = res.rows;
     mat.hasMaster = true;
+    state.projectMode = res.masterMode || { isProject: false, projectName: "" };
+    renderProjectScopeUI();
     var dl = $("m-cats"); dl.innerHTML = "";
     res.categories.forEach(function (c) { var o = document.createElement("option"); o.value = c; dl.appendChild(o); });
     var incompleteCount = res.rows.filter(function (r) { return !BomTools.getMaterialValidationStatus(r).valid; }).length;
@@ -1113,6 +1286,8 @@ async function refreshMaterials(keepName) {
   } catch (e) {
     mat.rows = [];
     mat.hasMaster = false;
+    state.projectMode = { isProject: false, projectName: "" };
+    renderProjectScopeUI();
     st.textContent = "No Master sheet in workbook";
     renderMatList();
     updateMatValidation();
@@ -1148,6 +1323,7 @@ async function saveMaterial() {
     var changeItems = [{ type: changeType, material: r, fields: diffFields, time: nowIso }];
     var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
 
+    var isProj = !!(state.projectMode && state.projectMode.isProject);
     var list = await BomSync.workbookList();
     list.forEach(function (item) {
       if (item.material.toLowerCase() === r.material.toLowerCase()) {
@@ -1156,15 +1332,19 @@ async function saveMaterial() {
       }
     });
     BomSync.updateWatchSnap(list);
-    await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
+    if (!isProj) {
+      await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
+    }
 
     recordAutoSave({
       source: "panel",
       time: nowIso,
-      savedToBuiltIn: true,
+      savedToBuiltIn: !isProj,
+      projectOnly: isProj,
+      projectName: isProj ? state.projectMode.projectName : "",
       items: changeItems
     });
-    if (BomSync.hasToken()) {
+    if (!isProj && BomSync.hasToken()) {
       try { await BomSync.push(matLog, { only: r.material }); }
       catch (e) { matLog("Saved on this computer; GitHub publish skipped (" + (e.message || e) + ")."); }
     }
@@ -1182,10 +1362,13 @@ async function saveMaterial() {
 
 async function removeMaterial() {
   if (mat.mode !== "edit" || !mat.selected) return;
+  var isProj = !!(state.projectMode && state.projectMode.isProject);
   if (!state.confirmDelete) {
     state.confirmDelete = true;
     $("m-delete").textContent = "Confirm";
-    matLog("Click \"Confirm\" to permanently remove \"" + mat.selected.material + "\" from this workbook and your saved list.", true);
+    matLog(isProj
+      ? ("Click \"Confirm\" to remove \"" + mat.selected.material + "\" from this project list (Global Master stays untouched).")
+      : ("Click \"Confirm\" to permanently remove \"" + mat.selected.material + "\" from this workbook and your saved list."), true);
     return;
   }
   var removedObj = BomTools.normalizeMaterial(mat.selected);
@@ -1200,11 +1383,15 @@ async function removeMaterial() {
     var lastChange = BomSync.buildLastChangeMeta({ time: nowIso, source: "panel", items: changeItems });
     var list = await BomSync.workbookList();
     BomSync.updateWatchSnap(list);
-    await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
+    if (!isProj) {
+      await BomSync.writeLocalMaster(list, matLog, { lastChange: lastChange });
+    }
     recordAutoSave({
       source: "panel",
       time: nowIso,
-      savedToBuiltIn: true,
+      savedToBuiltIn: !isProj,
+      projectOnly: isProj,
+      projectName: isProj ? state.projectMode.projectName : "",
       items: changeItems
     });
     state.busy = false;
@@ -1232,6 +1419,16 @@ async function check(autoPickSubmode) {
     var info = await BomConvert.inspectWorkbook();
     state.ok = info.master && info.bomSheets.length > 0;
     state.canRestore = info.convertedSheets && info.convertedSheets.length > 0;
+    state.projectMode = info.masterMode || { isProject: false, projectName: "" };
+
+    var projCallout = $("conv-proj-callout");
+    if (projCallout) {
+      var showProjBackup = state.ok && !!(state.projectMode && state.projectMode.isProject);
+      projCallout.hidden = !showProjBackup;
+      if (showProjBackup && $("conv-proj-title")) {
+        $("conv-proj-title").textContent = "Project-Only List Active: " + (state.projectMode.projectName || "Project Custom Materials");
+      }
+    }
 
     if (state.ok) {
       setDot("conv-dot", "ok");
@@ -1264,6 +1461,7 @@ async function check(autoPickSubmode) {
     }
   } catch (e) {
     state.ok = false; state.canRestore = false;
+    if ($("conv-proj-callout")) $("conv-proj-callout").hidden = true;
     setDot("conv-dot", "warn"); setDot("rest-dot", "warn");
     st.className = "status warn"; st.textContent = "Could not read workbook: " + (e.message || e);
     rst.className = "status warn"; rst.textContent = "Could not read workbook: " + (e.message || e);
@@ -1329,10 +1527,50 @@ async function convert() {
   await check(false);
 }
 
+async function handleRestoreProjectFile(ev) {
+  var file = ev.target && ev.target.files && ev.target.files[0];
+  if (!file) return;
+  try {
+    var text = await file.text();
+    var parsed = BomSync.parsePayload(text);
+    if (!parsed.list.length) throw new Error("No materials found in that JSON file.");
+    var fallbackName = String(file.name || "Project Materials")
+      .replace(/\.json$/i, "")
+      .replace(/[-_]+materials$/i, "")
+      .replace(/[-_]+/g, " ")
+      .trim() || "Project Custom Materials";
+    state.restProjectData = {
+      fileName: file.name,
+      projectName: parsed.projectName || fallbackName,
+      list: parsed.list,
+      lastChange: parsed.lastChange || null
+    };
+    if ($("rest-proj-status")) {
+      $("rest-proj-status").textContent = "Ready: \"" + state.restProjectData.projectName + "\" (" + parsed.list.length + " materials from " + file.name + ").";
+      $("rest-proj-status").className = "status ok";
+    }
+    if ($("rest-proj-clear-btn")) $("rest-proj-clear-btn").hidden = false;
+  } catch (e) {
+    state.restProjectData = null;
+    if ($("rest-proj-status")) {
+      $("rest-proj-status").textContent = "Could not read file: " + (e.message || e);
+      $("rest-proj-status").className = "status warn";
+    }
+    if ($("rest-proj-clear-btn")) $("rest-proj-clear-btn").hidden = true;
+  }
+  ev.target.value = "";
+  updateButtons();
+}
+
 async function restoreAutomated() {
   var picked = getPickedSheets("rest-sheets");
   if (!picked.length) {
     restLog("Select at least one converted sheet to restore.", true);
+    return;
+  }
+  var useProj = $("rest-use-proj") ? $("rest-use-proj").checked : false;
+  if (useProj && !state.restProjectData) {
+    restLog("Choose your saved Project Materials .json file first.", true);
     return;
   }
   state.busy = true; updateButtons();
@@ -1340,7 +1578,8 @@ async function restoreAutomated() {
   try {
     var res = await BomConvert.restoreAutomatedWorkbook(restLog, {
       sheets: picked,
-      syncLocal: $("rest-sync").checked,
+      syncLocal: useProj ? false : $("rest-sync").checked,
+      projectMaterials: useProj ? state.restProjectData : null,
       removeCompiled: $("rest-drop-compiled").checked
     });
     restLog("Done! Restored " + res.restoredCount + " sheet(s) back to automated BOM format.");
@@ -1362,6 +1601,7 @@ function nameList(arr, pick) {
 }
 
 async function refreshSync() {
+  if (window.BOM_OFFLINE_LTS) return;
   var st = $("sync-status"), dt = $("sync-detail");
   if (!st) return;
   st.className = "status"; st.textContent = "Checking GitHub...";
@@ -1464,6 +1704,26 @@ Office.onReady(function (info) {
     renderMatList();
   };
 
+  // Project-Only / One-Time Material List controls
+  $("proj-open-setup").onclick = function () {
+    projLog("", true);
+    var panel = $("proj-setup-panel");
+    if (panel) panel.hidden = !panel.hidden;
+    if (panel && !panel.hidden && $("proj-name-input") && !$("proj-name-input").value && sheetInfo && sheetInfo.project) {
+      $("proj-name-input").value = sheetInfo.project + " Materials";
+    }
+  };
+  $("proj-cancel-setup-btn").onclick = function () {
+    if ($("proj-setup-panel")) $("proj-setup-panel").hidden = true;
+    projLog("", true);
+  };
+  $("proj-create-btn").onclick = createProjectList;
+  $("proj-export-btn").onclick = function () { saveProjectListFile(projLog); };
+  $("proj-load-btn").onclick = function () { $("proj-import-input").click(); };
+  $("proj-load-setup-btn").onclick = function () { $("proj-import-input").click(); };
+  $("proj-import-input").onchange = loadProjectListFile;
+  $("proj-exit-btn").onclick = exitProjectMode;
+
   // Built-in storage + JSON backup / transfer controls
   $("local-pull").onclick = localPull;
   $("local-save").onclick = localSave;
@@ -1471,7 +1731,10 @@ Office.onReady(function (info) {
   $("local-import-btn").onclick = function () { $("local-import-input").click(); };
   $("local-import-input").onchange = localImportFile;
 
-  // Optional GitHub sync
+  // Optional GitHub sync (hidden automatically in Offline LTS edition)
+  if (window.BOM_OFFLINE_LTS && $("github-drawer")) {
+    $("github-drawer").hidden = true;
+  }
   $("sync-pull").onclick = syncPull;
   $("sync-push").onclick = syncPush;
   $("gh-save").onclick = function () {
@@ -1485,6 +1748,7 @@ Office.onReady(function (info) {
   // Convert (two-way)
   $("cmode-flatten").onclick = function () { setConvertSubmode("flatten"); };
   $("cmode-restore").onclick = function () { setConvertSubmode("restore"); };
+  $("conv-proj-save-btn").onclick = function () { saveProjectListFile(log); };
   $("copy").onclick = function () {
     openCopy(log, "Opened a copy in a new window. Open BOM Tools there, tick the confirmation box, and convert.");
   };
@@ -1493,6 +1757,23 @@ Office.onReady(function (info) {
   };
   $("convert").onclick = convert;
   $("iscopy").onchange = updateButtons;
+  $("rest-use-proj").onchange = function () {
+    var on = $("rest-use-proj").checked;
+    if ($("rest-proj-box")) $("rest-proj-box").hidden = !on;
+    if ($("rest-sync")) $("rest-sync").disabled = on;
+    updateButtons();
+  };
+  $("rest-proj-pick-btn").onclick = function () { $("rest-proj-input").click(); };
+  $("rest-proj-input").onchange = handleRestoreProjectFile;
+  $("rest-proj-clear-btn").onclick = function () {
+    state.restProjectData = null;
+    if ($("rest-proj-status")) {
+      $("rest-proj-status").textContent = "No project materials file chosen yet.";
+      $("rest-proj-status").className = "note";
+    }
+    if ($("rest-proj-clear-btn")) $("rest-proj-clear-btn").hidden = true;
+    updateButtons();
+  };
   $("restore-btn").onclick = restoreAutomated;
 
   // Top nav tabs — always opens to Home tab!

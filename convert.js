@@ -7,7 +7,7 @@
 (function (root) {
   "use strict";
 
-  var CAP = 25;
+  var CAP = 40;
   var PL_LAST = 4 + CAP + 3;   // last purchase-list row carrying formulas (growing mode)
   var BOTTOM = 320;
   var KGM2 = "kg/m²";
@@ -59,26 +59,32 @@
     } catch (e) { /* ignore */ }
   }
 
-  /* ---------- formulas of the growing purchase list (same as the VBA PLF / Python pl_formulas) ---------- */
+  /* ---------- formulas of the growing purchase list (zero hidden helper columns — works for ANY custom/unlisted material) ---------- */
   function plFormulas(r, tot) {
     var rng = function (c) { return "$" + c + "$5:$" + c + "$" + tot; };
-    var C = rng("C"), G = rng("G"), H = rng("H"), I = rng("I"), J = rng("J"), L = rng("L"), M = rng("M");
+    var C = rng("C"), G = rng("G"), H = rng("H"), I = rng("I"), J = rng("J"), L = rng("L");
     var k = "(ROW()-4)", n = "$AE$2";
-    var prev = r === 5 ? "-1" : "AB" + (r - 1);
     var bar = "SUMIF(" + C + ",P" + r + "," + L + ")>0";
     var gt = k + "=" + n + "+1", rq = k + "=" + n + "+3", item = k + "<=" + n, after = k + ">" + n;
     var sumAbove = function (c) { return r > 5 ? "SUM(" + c + "$5:" + c + (r - 1) + ")" : '""'; };
     var cntAbove = function (c) {
       return r > 5 ? 'IF(COUNT(' + c + '$5:' + c + (r - 1) + ')=0,"",SUM(' + c + '$5:' + c + (r - 1) + '))' : '""';
     };
+    // Direct unique-name lookup from $C$5:$C$<tot> with no hidden Column M or AB helper:
+    // Any new row inserted/typed with any custom material name immediately appears in Column P.
+    var matLookup = r === 5
+      ? 'IFERROR(INDEX(' + C + ',MATCH(1,INDEX((' + C + '<>"")*1,0),0)),"")'
+      : 'IFERROR(INDEX(' + C + ',MATCH(1,INDEX((' + C + '<>"")*(COUNTIF($P$5:P' + (r - 1) + ',' + C + '&"")=0),0),0)),"")';
+    // Qty formula handles numeric Set, blank Set (defaults to 1 via SUMIFS), and ignores text safely
+    var pieceQty = 'SUMPRODUCT(--(' + C + '=P' + r + '),' + G + ',' + H + ')+SUMIFS(' + G + ',' + C + ',P' + r + ',' + H + ',"")';
+
     var f = {};
     f.O = '=IF(' + item + ',' + k + ',"")';
-    f.AB = '=IF(' + item + ',IFERROR(SMALL(' + M + ',COUNTIF(' + M + ',"<="&' + prev + ')+1),""),"")';
-    f.P = '=IF(' + item + ',IFERROR(INDEX(' + C + ',MATCH(AB' + r + ',' + M + ',0)),""),' +
+    f.P = '=IF(' + item + ',' + matLookup + ',' +
           'IF(' + gt + ',"Grand Total Weight in KG :",IF(' + rq + ',"Requested by:","")))';
     f.Q = '=IF(' + rq + ',"Procurement",IF(' + after + ',"",IF(' + bar + ',$AE$1,"")))';
     f.R = '=IF(' + after + ',"",IF(' + bar + ',ROUNDUP(SUMIF(' + C + ',P' + r + ',' + L + ')/Q' + r + ',0),' +
-          'SUMPRODUCT((' + C + '=P' + r + ')*' + G + '*' + H + ')))';
+          pieceQty + '))';
     f.S = '=IF(' + gt + ',' + sumAbove("S") + ',IF(' + after + ',"",SUMIF(' + C + ',P' + r + ',' + J + ')))';
     f.T = '=IF(' + rq + ',"Store Section:",IF(' + after + ',"",IF(' + bar + ',INDEX(' + I + ',MATCH(P' + r + ',' + C + ',0)),"")))';
     f.U = '=IF(' + gt + ',' + sumAbove("U") + ',IF(' + after + ',"",IF(' + bar + ',Q' + r + '/1000*R' + r + '*T' + r + ',S' + r + ')))';
@@ -173,9 +179,10 @@
 
   function readPo(S, master) {   // typed stock / PO values per material (growing + fixed both put them back)
     var po = {};
-    for (var r = 6; r <= 40; r++) {
+    for (var r = 6; r <= 60; r++) {
       var mat = String(S.val(r, 16)).trim();
-      if (mat !== "" && master[mat]) {
+      if (!mat || mat.indexOf("Grand Total") === 0 || mat === "Requested by:") continue;
+      if (master[mat] || !isFormula(S.frm(r, 16)) || S.val(r, 15) !== "") {
         var entry = COLS_PO.map(function (c) {
           return (isFormula(S.frm(r, c)) || S.val(r, c) === "") ? undefined : S.val(r, c);
         });
@@ -339,7 +346,7 @@
     setBorders(ws.getRange("O5:AA" + PL_LAST), false);
 
     if (last >= first) setBorders(ws.getRange("A" + first + ":L" + last), true);
-    var missing = writeBomBlockBatched(ws, S, master, { first: first, last: last, tot: tot, helperM: true });
+    var missing = writeBomBlockBatched(ws, S, master, { first: first, last: last, tot: tot, helperM: false });
 
     setBorders(ws.getRange("A" + tot + ":L" + tot), true, true);
     ws.getRange("I" + tot + ":J" + tot).formulas = [[
@@ -348,16 +355,13 @@
     ]];
     ws.getRange("I" + tot + ":J" + tot).format.font.bold = true;
 
-    // Batch entire purchase list (O5:AA32 + AB5:AB32) in 2 writes instead of 280
+    // Batch entire purchase list O5:AA<PL_LAST> in 1 write (no hidden AB helper needed)
     var plRows = [];
-    var abRows = [];
     for (var r = 5; r <= PL_LAST; r++) {
       var f = plFormulas(r, tot);
       plRows.push([f.O, f.P, f.Q, f.R, f.S, f.T, f.U, "", f.W, "", "", f.Z, ""]);
-      abRows.push([f.AB]);
     }
     ws.getRange("O5:AA" + PL_LAST).formulas = plRows;
-    ws.getRange("AB5:AB" + PL_LAST).formulas = abRows;
 
     ws.getRange("AD2").copyFrom("AD1", "Formats");
     ws.getRange("AE2").copyFrom("AE1", "Formats");
@@ -386,12 +390,13 @@
 
   /* ---------- MODE 2: queue fixed purchase list writes for one sheet (no sync inside) ---------- */
   function queueConvertSheetFixed(ws, S, po, master) {
-    // materials used in the BOM, in Master order
+    // materials used in the BOM, in Master order (plus any unlisted custom materials at the end)
     var used = {};
     for (var r0 = 6; r0 <= S.lastOld; r0++) {
       var m0 = S.val(r0, 3);
       var mKey = isBlank(m0) ? "" : String(m0).trim();
-      if (mKey && master[mKey]) used[mKey] = master[mKey].order;
+      if (!mKey || used[mKey] !== undefined) continue;
+      used[mKey] = master[mKey] ? master[mKey].order : (1000000 + r0);
     }
     var names = Object.keys(used).sort(function (a, b) { return used[a] - used[b]; });
     var n = names.length;
@@ -430,18 +435,22 @@
       row[0] = '=IF(P' + r + '="","",COUNTA(P$' + first + ':P' + r + '))';
       row[1] = mat;
       row[4] = "=SUMIF(" + Cr + ",P" + r + "," + Jr + ")";
-      if (info.unit === "kg/m") {
+      if (info && info.unit === "kg/m") {
         row[2] = S.stdLen;
         row[3] = "=ROUNDUP(SUMIF(" + Cr + ",P" + r + "," + Lr + ")/Q" + r + ",0)";
         row[5] = "=INDEX(" + Ir + ",MATCH(P" + r + "," + Cr + ",0))";
         row[6] = "=Q" + r + "/1000*R" + r + "*T" + r;
-      } else if (info.unit === KGM2) {
+      } else if (info && info.unit === KGM2) {
         row[2] = info.sl + " x " + info.sw;
         row[3] = "=ROUNDUP(S" + r + "/(" + info.area + "*" + info.sl + "*" + info.sw + "/10^6),0)";
         row[6] = "=R" + r + "*" + info.area + "*" + info.sl + "*" + info.sw + "/10^6";
-      } else {
-        row[3] = "=SUMPRODUCT((" + Cr + "=P" + r + ")*" + Gr + "*" + Hr + ")";
+      } else if (info) {
+        row[3] = "=SUMPRODUCT(--(" + Cr + "=P" + r + ")," + Gr + "," + Hr + ")+SUMIFS(" + Gr + "," + Cr + ",P" + r + "," + Hr + ',"")';
         row[6] = "=R" + r + "*" + info.piece;
+      } else {
+        // Custom / unlisted material not in Master
+        row[3] = "=SUMPRODUCT(--(" + Cr + "=P" + r + ")," + Gr + "," + Hr + ")+SUMIFS(" + Gr + "," + Cr + ",P" + r + "," + Hr + ',"")';
+        row[6] = "=S" + r;
       }
       var pv = po[mat];
       if (pv) {
@@ -490,7 +499,7 @@
     var loads = sheets.map(function (ws) {
       return {
         ws: ws,
-        pl: ws.getRange("O1:AA60").load("values"),
+        pl: ws.getRange("O1:AA80").load("values"),
         bom: ws.getRange("A5:L" + BOTTOM).load("values")
       };
     });
@@ -568,7 +577,7 @@
 
   async function growingBody(context, cs, datas, master, ctx) {
     var nL = datas.length, src = datas[0].ws;
-    var capMain = Math.min(nL * CAP, 120), mainLast = PAD + 4 + capMain + 3;
+    var capMain = Math.min(nL * CAP, 150), mainLast = PAD + 4 + capMain + 3;
     var lastListEnd = ctx.lastListEnd;
     var hs = lastListEnd + 3;
     var HN = colLetter(hs), HQ = colLetter(hs + 1), HT = colLetter(hs + 2), HS = colLetter(hs + 3), HR = colLetter(hs + 4),
@@ -950,8 +959,17 @@
       }
     }
 
-    // 3. Optionally sync the latest local computer master list before restoring formulas
-    if (opts.syncLocal !== false) {
+    // 3. Apply either a saved Project-Only JSON materials list OR sync the latest Global Master list
+    if (opts.projectMaterials && Array.isArray(opts.projectMaterials.list) && opts.projectMaterials.list.length) {
+      var pm = opts.projectMaterials;
+      var projTitle = pm.projectName || "Project Custom Materials";
+      log("Applying saved Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
+      await S.applyList(pm.list, log, { syncRemovals: true, lastChange: pm.lastChange || null });
+      if (T.setProjectMaterialMode) {
+        await T.setProjectMaterialMode(projTitle);
+      }
+      log("Workbook set to Project-Only Materials mode (Global Master list untouched).");
+    } else if (opts.syncLocal !== false) {
       try {
         await S.pullLocal(log, { allowPrompt: true, syncRemovals: true });
       } catch (e) {
@@ -1217,15 +1235,20 @@
   }
 
   async function inspectWorkbook() {
-    var out = { master: false, bomSheets: [], convertedSheets: [] };
+    var out = { master: false, bomSheets: [], convertedSheets: [], masterMode: { isProject: false, projectName: "" } };
     await Excel.run(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
       var allSheets = wb.worksheets.items;
-      out.master = allSheets.some(function (w) { return w.name.toLowerCase() === MASTER.toLowerCase(); });
+      var masterWs = allSheets.filter(function (w) { return w.name.toLowerCase() === MASTER.toLowerCase(); })[0];
+      out.master = !!masterWs;
       allSheets.forEach(function (ws) { ws.tables.load("items/name"); });
+      var metaCell = masterWs ? masterWs.getRange("Z1").load("values") : null;
       await context.sync();
+      if (metaCell && root.BomTools && root.BomTools.parseProjectMeta) {
+        out.masterMode = root.BomTools.parseProjectMeta(metaCell.values[0][0]);
+      }
       var sheets = filterBomSheets(allSheets);
       out.bomSheets = sheets.map(function (s) { return s.name; });
       var conv = await findConvertedSheets(context, wb, allSheets);
