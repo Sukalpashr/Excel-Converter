@@ -53,6 +53,22 @@
     return Excel.run(fn);
   }
 
+  function canSuspendScreen() {
+    try {
+      return typeof Office !== "undefined" &&
+        Office.context && Office.context.requirements &&
+        Office.context.requirements.isSetSupported("ExcelApi", "1.10");
+    } catch (e) { return false; }
+  }
+  function pauseExcel(context) {
+    try { context.application.suspendApiCalculationUntilNextSync(); } catch (e) { /* ignore */ }
+    try {
+      if (canSuspendScreen() && typeof context.application.suspendScreenUpdatingUntilNextSync === "function") {
+        context.application.suspendScreenUpdatingUntilNextSync();
+      }
+    } catch (e) { /* ignore */ }
+  }
+
   /* ---------------- pure helpers (unit-tested in node) ---------------- */
   function safeId(s) {
     return String(s).trim().replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "Sheet";
@@ -215,7 +231,7 @@
     return '=SUBSTITUTE($A$1,"Bill of Materials","Remaining Purchase List")&IF($A$2<>""," – "&$A$2,"")';
   }
   function canonicalAD2(bomName, plName) {
-    return '=IF(IFERROR(INDEX(' + bomName + '[Materials],MATCH(1,INDEX((' + bomName + '[Materials]<>"")*(COUNTIF(' + plName + '[Materials],' + bomName + '[Materials])=0),0),0)),"")<>"","⚠ Not on purchase list (not in Master, or list full): "&IFERROR(INDEX(' + bomName + '[Materials],MATCH(1,INDEX((' + bomName + '[Materials]<>"")*(COUNTIF(' + plName + '[Materials],' + bomName + '[Materials])=0),0),0)),""),IF(ABS(SUMIF(' + plName + '[Mat Row],">0",' + plName + '[Consumable Wt. kg])-SUMIF(' + bomName + '[Mat Row],">0",' + bomName + '[Total Weight (kg)]))>0.01,"⚠ Purchase list total does not match BOM total – check material names","✔ Purchase list covers every BOM material"))';
+    return '=IF($M$4=5,"✔ Purchase list covers every BOM material",LET(miss,IFERROR(INDEX(' + bomName + '[Materials],MATCH(1,INDEX((' + bomName + '[Materials]<>"")*(COUNTIF(' + plName + '[Materials],' + bomName + '[Materials])=0),0),0)),""),IF(miss<>"","⚠ Not on purchase list (not in Master, or list full): "&miss,IF(ABS(SUMIF(' + plName + '[Mat Row],">0",' + plName + '[Consumable Wt. kg])-SUMIF(' + bomName + '[Mat Row],">0",' + bomName + '[Total Weight (kg)]))>0.01,"⚠ Purchase list total does not match BOM total – check material names","✔ Purchase list covers every BOM material"))))';
   }
   function canonicalPoWeightFormula(rowNum) {
     var prev = rowNum - 1;
@@ -711,9 +727,9 @@
       }
     }
 
-    // 4. Ensure Primary Unit dropdown validation on Master Unique Materials (C5:C300+)
+    // 4. Ensure Primary Unit dropdown validation on Master Unique Materials (clamped to C5:C300+)
     var matRows = colRanges.Materials.range.rowCount || 55;
-    var dvEnd = Math.max(300, 4 + matRows + 100);
+    var dvEnd = Math.max(300, 4 + matRows + 20);
     try {
       var unitDv = m.ws.getRange("C5:C" + dvEnd).dataValidation;
       unitDv.clear();
@@ -738,6 +754,28 @@
       await context.sync();
     } catch (e) { /* non-fatal on older hosts */ }
 
+    // 5. Clamp any legacy 2000-row Conditional Formatting bloat on Master Unique Materials down to row 300+
+    try {
+      var mProbe = m.ws.getRange("C" + (dvEnd + 1) + ":F" + (dvEnd + 1));
+      mProbe.conditionalFormats.load("items/id");
+      await context.sync();
+      if (mProbe.conditionalFormats.items.length > 0) {
+        m.ws.getRange().conditionalFormats.clearAll();
+        var addMasterCf = function (addr, formula) {
+          var cf = m.ws.getRange(addr).conditionalFormats.add("Custom");
+          cf.custom.rule.formula = formula;
+          cf.custom.format.font.color = "#9C0006";
+          cf.custom.format.fill.color = "#FFC7CE";
+          cf.stopIfTrue = false;
+        };
+        addMasterCf("C5:C" + dvEnd, '=AND($A5<>"",$C5="")');
+        addMasterCf("D5:D" + dvEnd, '=AND($C5="kg/m",$D5="")');
+        addMasterCf("E5:E" + dvEnd, '=AND($C5="kg/m²",$E5="")');
+        addMasterCf("F5:F" + dvEnd, '=AND($C5="kg/each",$F5="")');
+        await context.sync();
+      }
+    } catch (eCfM) { /* non-fatal */ }
+
     return {
       master: m,
       matRangeAddress: colRanges.Materials.range.address,
@@ -745,11 +783,19 @@
     };
   }
 
-  /* Explicitly sets the Materials dropdown on the BOM table rows (C6:C<endRow>) and clears stale C<endRow+1>:C2000 bloat. */
-  async function applyBomDataValidation(context, ws, matInfo, log, maxRow) {
+  /* Explicitly sets the Materials dropdown strictly on the BOM table's Materials column body (falling back to C6:C305)
+   * and clears any legacy C<endRow+1>:C2000 validation bloat. */
+  async function applyBomDataValidation(context, ws, matInfo, log, maxRow, bomT) {
     log = log || noop;
     var endRow = Math.max(305, Number(maxRow) || 305);
-    var target = ws.getRange("C6:C" + endRow);
+    var target = null;
+    if (bomT) {
+      try {
+        target = bomT.columns.getItem("Materials").getDataBodyRange();
+      } catch (eCol) { target = null; }
+    }
+    if (!target) target = ws.getRange("C6:C" + endRow);
+
     var alertCfg = {
       showAlert: true,
       style: Excel.DataValidationAlertStyle.stop,
@@ -776,16 +822,17 @@
     } catch (e1) {
       // Fallback: bind directly to the Master Unique Materials A1 range address
       try {
-        target.dataValidation.clear();
-        target.dataValidation.rule = {
+        var fallbackTarget = ws.getRange("C6:C" + endRow);
+        fallbackTarget.dataValidation.clear();
+        fallbackTarget.dataValidation.rule = {
           list: {
             inCellDropDown: true,
             source: "=" + matInfo.matRangeAddress
           }
         };
-        target.dataValidation.ignoreBlanks = true;
-        target.dataValidation.prompt = { showPrompt: false, title: "", message: "" };
-        target.dataValidation.errorAlert = alertCfg;
+        fallbackTarget.dataValidation.ignoreBlanks = true;
+        fallbackTarget.dataValidation.prompt = { showPrompt: false, title: "", message: "" };
+        fallbackTarget.dataValidation.errorAlert = alertCfg;
         await context.sync();
       } catch (e2) {
         log("WARNING: could not set Materials dropdown on " + ws.name + " (" + (e2.message || e2) + ").");
@@ -793,47 +840,54 @@
     }
   }
 
-  /* Replaces volatile OFFSET(...) Print_Area with non-volatile INDEX(...) Print_Area so typing never triggers volatile layout recalculations. */
-  async function fixVolatilePrintArea(context, ws) {
+  /* Removes dynamic/volatile _xlnm.Print_Area (OFFSET / INDEX) and _xlnm.Print_Titles from live BOM sheets
+   * so Excel never recalculates dynamic print pagination on every keystroke/cell repaint. */
+  async function removeDynamicPrintArea(context, ws) {
     try {
       ws.names.load("items/name,items/formula");
       await context.sync();
-      var pa = ws.names.items.filter(function (nm) {
+      var removed = false;
+      ws.names.items.forEach(function (nm) {
         var n = lc(nm.name || "");
-        return n === "_xlnm.print_area" || n === "print_area";
-      })[0];
-      if (!pa) return;
-      var curF = String(pa.formula || "");
-      if (curF.toUpperCase().indexOf("OFFSET(") < 0) return;
-      var q = "'" + String(ws.name).replace(/'/g, "''") + "'";
-      var nonVolatile = "=" + q + "!$A$1:INDEX(" + q + "!$AA:$AA,MAX(" + q + "!$M$4+2," + q + "!$AB$4+8))";
-      pa.delete();
-      await context.sync();
-      try {
-        ws.names.add("_xlnm.Print_Area", nonVolatile);
-        await context.sync();
-      } catch (eAdd) {
-        try {
-          ws.pageLayout.setPrintArea("A1:AA306");
-          await context.sync();
-        } catch (eFb) { /* ignore */ }
-      }
+        if (n === "_xlnm.print_area" || n === "print_area" || n === "_xlnm.print_titles" || n === "print_titles") {
+          try { nm.delete(); removed = true; } catch (eDel) { /* ignore */ }
+        }
+      });
+      if (removed) await context.sync();
     } catch (e) { /* non-fatal on hosts without sheet-scoped names */ }
   }
 
-  /* Tightens legacy 2,000-row Conditional Formatting rules (31,920 cells!) down to the exact BOM table height so typing stays snappy. */
+  /* Tightens legacy 2,000-row Conditional Formatting rules, removes cross-sheet INDEX(WtUnit,...) CF lookups,
+   * and consolidates the 13 ROW()=$M$4+1 / ROW()=$AB$4+6 border CF rules down to 4 clean rules. */
   async function trimBloatedBomCf(context, ws, tableEnd) {
-    if (tableEnd >= 2000) return;
     try {
-      var probe = ws.getRange("A" + (tableEnd + 1) + ":L" + (tableEnd + 1));
-      probe.conditionalFormats.load("items/id");
+      var probe = tableEnd < 2000 ? ws.getRange("A" + (tableEnd + 1) + ":L" + (tableEnd + 1)) : null;
+      if (probe) probe.conditionalFormats.load("items/id");
+      var d6Cf = ws.getRange("D6:D6").conditionalFormats;
+      d6Cf.load("items/type");
+      var bomCf = ws.getRange("A6:L" + tableEnd).conditionalFormats;
+      bomCf.load("items/id");
       await context.sync();
-      if (!probe.conditionalFormats.items.length) return;
 
-      // Clear ONLY rules that extend past the BOM table (rows 6..tableEnd rules are untouched!)
-      probe.conditionalFormats.clearAll();
+      var hasBloat = !!(probe && probe.conditionalFormats.items.length > 0);
+      var hasManyRowRules = bomCf.items.length > 10;
+      var hasCrossSheet = false;
+      if (d6Cf.items.length) {
+        var customRules = d6Cf.items.filter(function (it) { return it.type === "Custom"; });
+        if (customRules.length) {
+          customRules.forEach(function (it) { it.custom.rule.load("formula"); });
+          await context.sync();
+          hasCrossSheet = customRules.some(function (it) {
+            return String((it.custom && it.custom.rule && it.custom.rule.formula) || "").toUpperCase().indexOf("INDEX(WTUNIT") >= 0;
+          });
+        }
+      }
 
-      // Re-apply the 5 BOM helper CF rules tightly bounded to 6..tableEnd
+      if (!hasBloat && !hasCrossSheet && !hasManyRowRules) return;
+
+      // Clear all CF on the sheet and rebuild the lean 11-rule set (zero cross-sheet CF, 4 consolidated ROW() border rules)
+      ws.getRange().conditionalFormats.clearAll();
+
       var cfSec = ws.getRange("A6:L" + tableEnd).conditionalFormats.add("Custom");
       cfSec.custom.rule.formula = '=AND($C6="",$B6<>"")';
       cfSec.custom.format.font.bold = true;
@@ -845,6 +899,18 @@
       cfUnk.custom.format.fill.color = "#FFC7CE";
       cfUnk.stopIfTrue = false;
 
+      var cfAdOk = ws.getRange("AD2").conditionalFormats.add("Custom");
+      cfAdOk.custom.rule.formula = '=LEFT($AD$2,1)="✔"';
+      cfAdOk.custom.format.font.bold = true;
+      cfAdOk.custom.format.font.color = "#006100";
+      cfAdOk.stopIfTrue = false;
+
+      var cfAdWarn = ws.getRange("AD2").conditionalFormats.add("Custom");
+      cfAdWarn.custom.rule.formula = '=LEFT($AD$2,1)="⚠"';
+      cfAdWarn.custom.format.font.bold = true;
+      cfAdWarn.custom.format.font.color = "#C00000";
+      cfAdWarn.stopIfTrue = false;
+
       var addReqCf = function (addr, formula) {
         var cf = ws.getRange(addr).conditionalFormats.add("Custom");
         cf.custom.rule.formula = formula;
@@ -855,15 +921,31 @@
         });
         cf.stopIfTrue = false;
       };
-      addReqCf("D6:D" + tableEnd, '=IF(ISNUMBER($M6),AND(OR(INDEX(WtUnit,$M6)="kg/m",INDEX(WtUnit,$M6)="kg/m²"),$D6=""),FALSE)');
-      addReqCf("E6:E" + tableEnd, '=IF(ISNUMBER($M6),AND(INDEX(WtUnit,$M6)="kg/m²",$E6=""),FALSE)');
+      // Pure same-sheet checks (zero cross-sheet INDEX(WtUnit,...) lookups!)
+      addReqCf("D6:D" + tableEnd, '=AND(ISNUMBER($M6),$D6="",OR(ISNUMBER($I6),AND($I6="",$G6<>"",$J6=0)))');
+      addReqCf("E6:E" + tableEnd, '=AND(ISNUMBER($M6),$I6="",$E6="",$G6<>"",$J6=0)');
       addReqCf("G6:G" + tableEnd, '=AND(ISNUMBER($M6),$G6="")');
+
+      var addBorderCf = function (addr, formula, bold) {
+        var cf = ws.getRange(addr).conditionalFormats.add("Custom");
+        cf.custom.rule.formula = formula;
+        if (bold) cf.custom.format.font.bold = true;
+        ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom"].forEach(function (e) {
+          cf.custom.format.borders.getItem(e).style = "Continuous";
+        });
+        cf.stopIfTrue = false;
+      };
+      // 4 consolidated ROW() border rules instead of 13 separate rules
+      addBorderCf("A6:L" + tableEnd, '=ROW()<=$M$4', false);
+      addBorderCf("A6:L" + tableEnd, '=ROW()=$M$4+1', true);
+      addBorderCf("O6:AA33", '=ROW()<=$AB$4+5', false);
+      addBorderCf("O6:AA33", '=ROW()=$AB$4+6', true);
 
       await context.sync();
     } catch (e) { /* non-fatal */ }
   }
 
-  /* Restores/verifies layout, hidden helper rows/cols, header formulas, print setup, and dropdown on a BOM sheet. */
+  /* Restores/verifies layout, hidden helper rows/cols, header formulas, O(1) SN formulas, and dropdown on a BOM sheet. */
   async function repairBomSheet(context, wb, ws, matInfo, opts, log) {
     opts = opts || {};
     log = log || noop;
@@ -877,20 +959,24 @@
     var bomName = bomT.name;
     var plName = plT ? plT.name : "";
 
-    // 1. Load top-level formulas + table rowCount + optional stale table bodies in ONE sync
+    // 1. Load top-level formulas + table rowCount + A6/O6 SN probes + optional stale table bodies in ONE sync
     var rO2 = ws.getRange("O2").load("formulas");
     var rM4 = ws.getRange("M4").load("formulas");
     var rAB4 = ws.getRange("AB4").load("formulas");
     var rAD2 = ws.getRange("AD2").load("formulas");
     var rAE1 = ws.getRange("AE1").load("values");
+    var rA6 = ws.getRange("A6").load("formulas");
+    var rO6 = plT ? ws.getRange("O6").load("formulas") : null;
     var bomMeta = bomT.getDataBodyRange().load("rowCount");
+    var plMeta = plT ? plT.getDataBodyRange().load("rowCount") : null;
     var bomBody = (opts.srcBomName && opts.srcBomName !== bomName) ? bomT.getDataBodyRange().load("formulas") : null;
     var plBody = (plT && ((opts.srcBomName && opts.srcBomName !== bomName) || (opts.srcPlName && opts.srcPlName !== plName)))
       ? plT.getDataBodyRange().load("formulas")
       : null;
     await context.sync();
 
-    var tableEnd = 5 + Math.max(300, bomMeta.rowCount || 300);
+    var bomRows = Math.max(300, bomMeta.rowCount || 300);
+    var tableEnd = 5 + bomRows;
 
     var fO2 = String(rO2.formulas[0][0] || "");
     if (!isFormula(fO2) || fO2.indexOf("#REF!") >= 0) rO2.formulas = [[canonicalO2()]];
@@ -906,7 +992,8 @@
         rAB4.formulas = [[canonicalAB4(plName)]];
       }
       var fAD2 = String(rAD2.formulas[0][0] || "");
-      if (!isFormula(fAD2) || fAD2.indexOf(bomName + "[") < 0 || fAD2.indexOf(plName + "[") < 0 || fAD2.indexOf("#REF!") >= 0) {
+      if (!isFormula(fAD2) || fAD2.indexOf(bomName + "[") < 0 || fAD2.indexOf(plName + "[") < 0 ||
+          fAD2.indexOf("#REF!") >= 0 || fAD2.indexOf("IF($M$4=5,") < 0 || fAD2.indexOf("LET(") < 0) {
         rAD2.formulas = [[canonicalAD2(bomName, plName)]];
       }
     }
@@ -940,6 +1027,27 @@
       if (plChanged) plBody.formulas = plOut;
     }
 
+    // Upgrade legacy O(N^2) expanding COUNTA in S.N. columns to O(1) N(A5)+1 / N(O5)+1
+    var fA6 = String(rA6.formulas[0][0] || "");
+    if (fA6.toUpperCase().indexOf("COUNTA(") >= 0) {
+      var snOut = new Array(bomRows);
+      for (var snIdx = 0; snIdx < bomRows; snIdx++) {
+        snOut[snIdx] = ['=IF([@Materials]="","",N(A' + (5 + snIdx) + ')+1)'];
+      }
+      ws.getRange("A6:A" + tableEnd).formulas = snOut;
+    }
+    if (rO6 && plMeta) {
+      var fO6 = String(rO6.formulas[0][0] || "");
+      var plRows = plMeta.rowCount || 28;
+      if (fO6.toUpperCase().indexOf("COUNTA(") >= 0 && plRows > 0) {
+        var plSnOut = new Array(plRows);
+        for (var pIdx = 0; pIdx < plRows; pIdx++) {
+          plSnOut[pIdx] = ['=IF([@[Mat Row]]="","",N(O' + (5 + pIdx) + ')+1)'];
+        }
+        ws.getRange("O6:O" + (5 + plRows)).formulas = plSnOut;
+      }
+    }
+
     // 2. Enforce hidden table header row (row 5) and hidden helper cols (M & AB)
     try {
       ws.getRange("5:5").rowHidden = true;
@@ -948,20 +1056,16 @@
       await context.sync();
     } catch (e) { /* non-fatal */ }
 
-    // 3. Replace volatile OFFSET Print_Area & trim any legacy 2000-row CF bloat
-    await fixVolatilePrintArea(context, ws);
+    // 3. Remove dynamic/volatile Print_Area & Print_Titles, and heal any legacy bloated/cross-sheet CF
+    await removeDynamicPrintArea(context, ws);
     await trimBloatedBomCf(context, ws, tableEnd);
 
-    // 4. Re-apply Materials dropdown tightly on C6:C<tableEnd>
-    await applyBomDataValidation(context, ws, matInfo, log, tableEnd);
+    // 4. Re-apply Materials dropdown tightly on bomT's Materials column body (fallback C6:C305)
+    await applyBomDataValidation(context, ws, matInfo, log, tableEnd, bomT);
 
-    // 5. Enforce landscape print setup & repeating header rows 3:4 BEFORE finalizing active window view / freeze panes
-    try {
-      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
-      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-      ws.pageLayout.setPrintTitleRows("3:4");
-      await context.sync();
-    } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
+    // 5. NOTE: Do NOT apply ws.pageLayout.zoom (horizontalFitToPages) or setPrintTitleRows("3:4") on live BOM sheets
+    //    (Excel Desktop recalculates dynamic fit-to-page pagination on every edit, stalling UI repaints).
+    //    Print scaling & title rows are applied only when converting/flattening for print.
 
     // 6. Re-commit scalar BOM table formulas on Row 6 when requested so Excel's live formula engine binds cleanly
     if (opts.resyncFormulas) {
@@ -1115,6 +1219,7 @@
       } catch (e) { prevCalcMode = null; }
 
       try {
+        pauseExcel(context);
         log("Checking Master sheet and workbook named ranges ...");
         var matInfo = await ensureMasterNames(context, wb, log);
         wb.worksheets.load("items/name,items/visibility");
@@ -1128,6 +1233,7 @@
           if (!firstTable(ws.tables.items, "bom_")) continue;
           if (selectedSet && !selectedSet[lc(ws.name)]) continue;
           log("Verifying dropdowns, layout and formulas on \"" + ws.name + "\" ...");
+          pauseExcel(context);
           await repairBomSheet(context, wb, ws, matInfo, { resyncFormulas: true }, log);
           if (ws.visibility === "Visible") lastVisibleSheet = ws.name;
           count++;
@@ -1212,132 +1318,157 @@
     var result = { name: "", warnings: [] };
     await runExcel(async function (context) {
       var wb = context.workbook;
-      var matInfo = await ensureMasterNames(context, wb, log);
-
-      wb.worksheets.load("items/name,items/position,items/visibility");
-      wb.tables.load("items/name");
-      await context.sync();
-
-      var newName = String(opts.name || "").trim();
-      var err = checkSheetName(newName, wb.worksheets.items.map(function (w) { return w.name; }));
-      if (err) throw new Error(err);
-
-      var src = wb.worksheets.getItemOrNullObject(opts.source);
-      await context.sync();
-      if (src.isNullObject) throw new Error("Source sheet \"" + opts.source + "\" was not found.");
-
-      wb.worksheets.items.forEach(function (ws) { ws.tables.load("items/name"); });
-      await context.sync();
-      var srcSheet = wb.worksheets.items.filter(function (w) { return w.name === opts.source; })[0];
-      var srcBom = firstTable(srcSheet.tables.items, "bom_");
-      var srcPl = firstTable(srcSheet.tables.items, "pl_");
-      if (!srcBom) throw new Error("The source sheet has no BOM table (bom_...).");
-
-      // put the new sheet after the last real BOM sheet (not after the hidden blank one)
-      var rel = src, lastPos = -1;
-      wb.worksheets.items.forEach(function (ws) {
-        if (ws.name !== BLANK && firstTable(ws.tables.items, "bom_") && ws.position > lastPos) { rel = ws; lastPos = ws.position; }
-      });
-
-      var srcOrigVis = srcSheet.visibility;
-      var srcWasHidden = srcOrigVis !== "Visible";
-      log("Copying \"" + opts.source + "\" ...");
-
-      // Excel Desktop bug fix: copying a HIDDEN worksheet (BOM Blank) directly via Office.js leaves
-      // the copied sheet's window/editor view state uninitialized, causing in-cell typing display glitches
-      // (e.g. second digit invisible while typing until Enter). Always temporarily unhide the source sheet
-      // before calling .copy(), isolate .copy() in its own sync, then restore the source sheet's visibility.
-      var copy;
+      var prevCalcMode = null;
       try {
-        if (srcWasHidden) {
-          src.visibility = Excel.SheetVisibility.visible;
-          await context.sync();
-          src.activate();
-          await context.sync();
-          // Heal legacy hidden BOM Blank templates in older workbooks once while visible so future copies start clean
-          try {
-            await fixVolatilePrintArea(context, src);
-            await trimBloatedBomCf(context, src, 305);
-            src.showGridlines = false;
-            src.freezePanes.unfreeze();
-            await context.sync();
-            src.freezePanes.freezeRows(4);
-            await context.sync();
-          } catch (eHeal) { /* non-fatal */ }
-        }
-        copy = src.copy(Excel.WorksheetPositionType.after, rel);
+        wb.application.load("calculationMode");
         await context.sync();
-        copy.name = newName;
-        copy.visibility = Excel.SheetVisibility.visible;
+        prevCalcMode = wb.application.calculationMode;
+        if (prevCalcMode !== Excel.CalculationMode.manual) {
+          wb.application.calculationMode = Excel.CalculationMode.manual;
+          await context.sync();
+        }
+      } catch (e) { prevCalcMode = null; }
+
+      var copy = null;
+      var newName = String(opts.name || "").trim();
+      var bomName = "";
+
+      try {
+        pauseExcel(context);
+        var matInfo = await ensureMasterNames(context, wb, log);
+
+        wb.worksheets.load("items/name,items/position,items/visibility");
+        wb.tables.load("items/name");
+        await context.sync();
+
+        var err = checkSheetName(newName, wb.worksheets.items.map(function (w) { return w.name; }));
+        if (err) throw new Error(err);
+
+        var src = wb.worksheets.getItemOrNullObject(opts.source);
+        await context.sync();
+        if (src.isNullObject) throw new Error("Source sheet \"" + opts.source + "\" was not found.");
+
+        wb.worksheets.items.forEach(function (ws) { ws.tables.load("items/name"); });
+        await context.sync();
+        var srcSheet = wb.worksheets.items.filter(function (w) { return w.name === opts.source; })[0];
+        var srcBom = firstTable(srcSheet.tables.items, "bom_");
+        var srcPl = firstTable(srcSheet.tables.items, "pl_");
+        if (!srcBom) throw new Error("The source sheet has no BOM table (bom_...).");
+
+        // put the new sheet after the last real BOM sheet (not after the hidden blank one)
+        var rel = src, lastPos = -1;
+        wb.worksheets.items.forEach(function (ws) {
+          if (ws.name !== BLANK && firstTable(ws.tables.items, "bom_") && ws.position > lastPos) { rel = ws; lastPos = ws.position; }
+        });
+
+        var srcOrigVis = srcSheet.visibility;
+        var srcWasHidden = srcOrigVis !== "Visible";
+        log("Copying \"" + opts.source + "\" ...");
+
+        // Temporarily unhide hidden BOM Blank before copying, heal legacy Print_Area/CF once, then restore visibility
+        try {
+          if (srcWasHidden) {
+            pauseExcel(context);
+            src.visibility = Excel.SheetVisibility.visible;
+            await context.sync();
+            src.activate();
+            await context.sync();
+            try {
+              pauseExcel(context);
+              await removeDynamicPrintArea(context, src);
+              await trimBloatedBomCf(context, src, 305);
+              src.showGridlines = false;
+              src.freezePanes.unfreeze();
+              await context.sync();
+              src.freezePanes.freezeRows(4);
+              await context.sync();
+            } catch (eHeal) { /* non-fatal */ }
+          }
+          pauseExcel(context);
+          copy = src.copy(Excel.WorksheetPositionType.after, rel);
+          await context.sync();
+          pauseExcel(context);
+          copy.name = newName;
+          copy.visibility = Excel.SheetVisibility.visible;
+          copy.activate();
+          copy.tables.load("items/name");
+          await context.sync();
+        } finally {
+          if (srcWasHidden) {
+            try {
+              pauseExcel(context);
+              src.visibility = srcOrigVis === "VeryHidden" ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
+              await context.sync();
+            } catch (eVis) { /* ignore */ }
+          }
+        }
+
+        var bomT = firstTable(copy.tables.items, "bom_"), plT = firstTable(copy.tables.items, "pl_");
+        if (!bomT) { copy.delete(); await context.sync(); throw new Error("The copy has no BOM table. It was removed."); }
+
+        // tidy table names to the template convention (bom_<sheet>, pl_<sheet>)
+        wb.tables.load("items/name");
+        await context.sync();
+        var taken = wb.tables.items.map(function (t) { return t.name; });
+        var id = safeId(newName);
+        bomName = uniqueName("bom_" + id, taken);
+        var plName = uniqueName("pl_" + id, taken.concat([bomName]));
+        log("Naming tables " + bomName + (plT ? " / " + plName : "") + " ...");
+        pauseExcel(context);
+        bomT.name = bomName;
+        if (plT) plT.name = plName;
+        await context.sync();
+
+        pauseExcel(context);
+        copy.getRange("A2").values = [[newName]];
+        if (opts.project && String(opts.project).trim()) {
+          copy.getRange("A1").values = [[TITLE_PREFIX + String(opts.project).trim()]];
+        }
+        await context.sync();
+
+        if (opts.clear) {
+          log("Clearing entered data ...");
+          pauseExcel(context);
+          await clearInputs(context, bomT, BOM_INPUT, false);
+          if (plT) await clearInputs(context, plT, PL_INPUT, true);
+        }
+
+        // Activate the new visible sheet BEFORE applying window-view settings (showGridlines & freezePanes)
         copy.activate();
-        copy.tables.load("items/name");
         await context.sync();
+
+        // Ensure dropdowns, table formulas, O(1) SN, hidden helper row/cols, freeze panes, and clean CF are all set
+        pauseExcel(context);
+        await repairBomSheet(context, wb, copy, matInfo, {
+          srcBomName: srcBom.name,
+          srcPlName: srcPl ? srcPl.name : "",
+          isActive: true,
+          resyncFormulas: srcWasHidden || lc(opts.source) === lc(BLANK)
+        }, log);
       } finally {
-        if (srcWasHidden) {
-          try {
-            src.visibility = srcOrigVis === "VeryHidden" ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
-            await context.sync();
-          } catch (eVis) { /* ignore */ }
+        try {
+          if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
+          await recalculateWorkbook(context, wb, copy);
+        } catch (eRest) { /* ignore */ }
+      }
+
+      if (copy) {
+        var f3 = copy.getRange("A6").load("formulas");
+        var checkM4 = copy.getRange("M4").load("values");
+        await context.sync();
+        if (String(f3.formulas[0][0]).indexOf(bomName + "[") < 0 && String(f3.formulas[0][0]).indexOf("[@") < 0) {
+          result.warnings.push("Could not confirm the S.N. formula follows the renamed table. Check column A on the new sheet.");
         }
+        if (typeof checkM4.values[0][0] === "string" && checkM4.values[0][0].charAt(0) === "#") {
+          result.warnings.push("Formula check cell M4 returned " + checkM4.values[0][0] + ". Try clicking Repair dropdowns & formulas.");
+        }
+
+        copy.activate();
+        await context.sync();
+        copy.getRange("B6").select();
+        await context.sync();
+        result.name = newName;
       }
-
-      var bomT = firstTable(copy.tables.items, "bom_"), plT = firstTable(copy.tables.items, "pl_");
-      if (!bomT) { copy.delete(); await context.sync(); throw new Error("The copy has no BOM table. It was removed."); }
-
-      // tidy table names to the template convention (bom_<sheet>, pl_<sheet>)
-      wb.tables.load("items/name");
-      await context.sync();
-      var taken = wb.tables.items.map(function (t) { return t.name; });
-      var id = safeId(newName);
-      var bomName = uniqueName("bom_" + id, taken);
-      var plName = uniqueName("pl_" + id, taken.concat([bomName]));
-      log("Naming tables " + bomName + (plT ? " / " + plName : "") + " ...");
-      bomT.name = bomName;
-      if (plT) plT.name = plName;
-      await context.sync();
-
-      copy.getRange("A2").values = [[newName]];
-      if (opts.project && String(opts.project).trim()) {
-        copy.getRange("A1").values = [[TITLE_PREFIX + String(opts.project).trim()]];
-      }
-      await context.sync();
-
-      if (opts.clear) {
-        log("Clearing entered data ...");
-        await clearInputs(context, bomT, BOM_INPUT, false);
-        if (plT) await clearInputs(context, plT, PL_INPUT, true);
-      }
-
-      // Activate the new visible sheet BEFORE applying window-view settings (showGridlines & freezePanes)
-      // so Excel Desktop initializes a clean active viewport & in-cell editor for the new sheet.
-      copy.activate();
-      await context.sync();
-
-      // Ensure dropdowns, table formulas, hidden helper row/cols, freeze panes, and print setup are all working
-      await repairBomSheet(context, wb, copy, matInfo, {
-        srcBomName: srcBom.name,
-        srcPlName: srcPl ? srcPl.name : "",
-        isActive: true,
-        resyncFormulas: srcWasHidden || lc(opts.source) === lc(BLANK)
-      }, log);
-
-      await recalculateWorkbook(context, wb, copy);
-
-      var f3 = copy.getRange("A6").load("formulas");
-      var checkM4 = copy.getRange("M4").load("values");
-      await context.sync();
-      if (String(f3.formulas[0][0]).indexOf(bomName + "[") < 0 && String(f3.formulas[0][0]).indexOf("[@") < 0) {
-        result.warnings.push("Could not confirm the S.N. formula follows the renamed table. Check column A on the new sheet.");
-      }
-      if (typeof checkM4.values[0][0] === "string" && checkM4.values[0][0].charAt(0) === "#") {
-        result.warnings.push("Formula check cell M4 returned " + checkM4.values[0][0] + ". Try clicking Repair dropdowns & formulas.");
-      }
-
-      copy.activate();
-      await context.sync();
-      copy.getRange("B6").select();
-      await context.sync();
-      result.name = newName;
     });
     return result;
   }
@@ -1370,8 +1501,9 @@
     await context.sync();
     for (var i = 0; i < wb.worksheets.items.length; i++) {
       var ws = wb.worksheets.items[i];
-      if (firstTable(ws.tables.items, "bom_")) {
-        await applyBomDataValidation(context, ws, matInfo, noop);
+      var bomT = firstTable(ws.tables.items, "bom_");
+      if (bomT) {
+        await applyBomDataValidation(context, ws, matInfo, noop, 305, bomT);
       }
     }
   }

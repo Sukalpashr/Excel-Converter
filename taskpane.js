@@ -1,7 +1,7 @@
 /* taskpane.js - UI controller for BOM Tools task pane */
 "use strict";
 
-var ADDIN_VERSION = "2.5";
+var ADDIN_VERSION = "2.6";
 var $ = function (id) { return document.getElementById(id); };
 var state = {
   ok: false,

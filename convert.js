@@ -417,6 +417,11 @@
     addGrowCf(ws, 15, 5, PL_LAST, "$AE$2", 4);
 
     ws.pageLayout.setPrintArea("A1:AA" + Math.max(tot, PL_LAST));
+    try {
+      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
+      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
+      ws.pageLayout.setPrintTitleRows("3:4");
+    } catch (ePl) { /* ignore on older hosts */ }
     ws.freezePanes.unfreeze();
     ws.freezePanes.freezeRows(4);
     return missing;
@@ -520,6 +525,11 @@
     ["P", "S", "U", "W", "Z"].forEach(function (L) { ws.getRange(L + gt).format.font.bold = true; });
 
     ws.pageLayout.setPrintArea("A1:AA" + Math.max(tot, rq));
+    try {
+      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
+      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
+      ws.pageLayout.setPrintTitleRows("3:4");
+    } catch (ePl) { /* ignore on older hosts */ }
     ws.freezePanes.unfreeze();
     ws.freezePanes.freezeRows(4);
     return missing;
@@ -1250,7 +1260,11 @@
           pauseExcel(context);
           jobs.forEach(function (job) {
             var endRow = 5 + Math.max(300, (job.data && job.data.bomRows ? job.data.bomRows.length : 300));
-            var target = job.restored.getRange("C6:C" + endRow);
+            var target = null;
+            if (job.bomT) {
+              try { target = job.bomT.columns.getItem("Materials").getDataBodyRange(); } catch (eCol) { target = null; }
+            }
+            if (!target) target = job.restored.getRange("C6:C" + endRow);
             target.dataValidation.clear();
             target.dataValidation.rule = { list: { inCellDropDown: true, source: "=Materials" } };
             target.dataValidation.ignoreBlanks = true;
@@ -1268,17 +1282,15 @@
         }
         if (dvFallbackJobs.length) {
           for (var df = 0; df < dvFallbackJobs.length; df++) {
-            await T._applyBomDataValidation(context, dvFallbackJobs[df].restored, matInfo, log);
+            await T._applyBomDataValidation(context, dvFallbackJobs[df].restored, matInfo, log, 305, dvFallbackJobs[df].bomT);
           }
         }
 
-        // Batch F: Print setup for all restored sheets (non-fatal)
+        // Batch F: Keep live restored sheets lightweight (landscape only — no fitToPages zoom or print title rows during editing)
         try {
           pauseExcel(context);
           jobs.forEach(function (job) {
             job.restored.pageLayout.orientation = Excel.PageOrientation.landscape;
-            job.restored.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-            job.restored.pageLayout.setPrintTitleRows("3:4");
           });
           await context.sync();
         } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
