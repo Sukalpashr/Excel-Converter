@@ -1,6 +1,12 @@
-# BOM Tools Excel Add-in — 3.0v patch2 (Excel 365 Lightweight Edition)
+# BOM Tools Excel Add-in — 3.1v lean (Excel 365 Lightweight Edition)
 
 A complete from-scratch rewrite of the BOM Tools Excel Add-in targeting **Microsoft Excel 365** with a **pixel-identical template**, ultra-lightweight native Excel 365 formulas, **zero-hook input-lag elimination**, full v1.8–v3.0 materials migration, and isolated Project-Only material lists with full access to previously saved materials.
+
+## What's new in 3.1v lean
+
+- **No more resident `BOM Blank` sheet (fixes the typing lag).** Every BOM sheet is now built on demand from the embedded template (`insertWorksheetsFromBase64` with `sheetNamesToInsert`), so the workbook never carries ~730 idle formulas, 20 conditional-format rules and a spill range. An old hidden `BOM Blank` from v3.0 and earlier is removed automatically the first time the add-in opens the workbook.
+- Material add/edit/remove now uses Excel's smart recalculation instead of a full workbook recalculation.
+- Add Sheet: new-sheet source is always "New blank sheet (recommended)", the name box suggests the next name and Enter adds the sheet.
 
 ## What's Fixed & Engineered in 3.0v patch2
 
@@ -16,7 +22,7 @@ A complete from-scratch rewrite of the BOM Tools Excel Add-in targeting **Micros
 
 | File | Role |
 | --- | --- |
-| `taskpane.html` | Lightweight Home-first Excel 365 task pane UI (`3.0v patch2`) |
+| `taskpane.html` | Lightweight Home-first Excel 365 task pane UI (`3.1v lean`) |
 | `app.js` | Zero-hook task pane controller, saved-library pickers, live guards, toast & session log |
 | `storage.js` | Multi-layer built-in storage with v1.8–v3.0 migration, Project-Only lists & unified material pool |
 | `sheets.js` | Lag-free Excel 365 sheet engine, bulletproof template import, bulk add & on-demand edit sync |

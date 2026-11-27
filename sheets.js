@@ -1,4 +1,4 @@
-/* sheets.js - Lightweight Excel Workbook, Template Import, Lag-Free Sheet Creation, Materials & Repair Engine (3.0v patch2) */
+/* sheets.js - Lightweight Excel Workbook, Template Import, Lag-Free Sheet Creation, Materials & Repair Engine (3.1v lean) */
 (() => {
   "use strict";
 
@@ -574,22 +574,70 @@
     }
   }
 
-  /* ---------------- Template Import (Visually Identical 2-Sheet Excel 365 Template) ---------------- */
-  async function importTemplate(log = noop) {
+
+  /* ---------------- Template on demand (NO resident hidden BOM Blank sheet = no lag) ---------------- */
+  async function getTemplateB64() {
+    let b64 = window.BOM_TEMPLATE_B64;
+    if (b64) return b64;
+    const res = await fetch(new URL("template.xlsx", location.href).href + "?t=" + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error(`Could not load template.xlsx (${res.status}).`);
+    const u = new Uint8Array(await res.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode(...u.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+
+  /* Insert only the named sheet(s) from the embedded template; returns the new worksheet objects keyed by template name */
+  async function insertTemplateSheets(context, wb, sheetNames) {
     if (!Office?.context?.requirements?.isSetSupported("ExcelApi", "1.13")) {
       throw new Error("Template import requires Microsoft 365 or Excel on the Web (ExcelApi 1.13).");
     }
-    let b64 = window.BOM_TEMPLATE_B64;
-    if (!b64) {
-      log("Fetching lightweight template.xlsx ...");
-      const res = await fetch(new URL("template.xlsx", location.href).href + "?t=" + Date.now(), { cache: "no-store" });
-      if (!res.ok) throw new Error(`Could not load template.xlsx (${res.status}).`);
-      const u = new Uint8Array(await res.arrayBuffer());
-      let bin = "";
-      for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode(...u.subarray(i, i + 0x8000));
-      b64 = btoa(bin);
+    const b64 = await getTemplateB64();
+    wb.worksheets.load("items/name");
+    await context.sync();
+    const before = new Set(wb.worksheets.items.map((w) => w.name));
+    wb.insertWorksheetsFromBase64(b64, {
+      sheetNamesToInsert: sheetNames,
+      positionType: Excel.WorksheetPositionType.end
+    });
+    await context.sync();
+    wb.worksheets.load("items/name");
+    await context.sync();
+    const added = wb.worksheets.items.filter((w) => !before.has(w.name));
+    // drop anything extra that came along (README / Formulas / unrequested sheets)
+    const want = new Set(sheetNames.map(lc));
+    const out = {};
+    for (const w of added) {
+      const key = sheetNames.find((n) => lc(w.name) === lc(n) || lc(w.name).startsWith(lc(n)));
+      if (key && !out[key]) out[key] = w;
+      else if (!want.has(lc(w.name))) { try { w.delete(); } catch { /* ignore */ } }
     }
+    await context.sync();
+    return out;
+  }
 
+  /* Remove the old hidden "BOM Blank" sheet left by v1.8–v3.0 (its ~730 live formulas, 20 CF rules and spill range
+     are what caused typing lag). Only a HIDDEN sheet with that exact name is removed. */
+  async function removeLegacyBlankIn(context, wb) {
+    const ws = wb.worksheets.getItemOrNullObject(BLANK);
+    ws.load("visibility");
+    await context.sync();
+    if (ws.isNullObject || ws.visibility === "Visible") return false;
+    ws.delete();
+    await context.sync();
+    return true;
+  }
+
+  async function removeLegacyBlank() {
+    let removed = false;
+    await runExcel(async (context) => {
+      removed = await removeLegacyBlankIn(context, context.workbook);
+    });
+    return removed;
+  }
+
+  /* ---------------- Template Import (Master sheet only) ---------------- */
+  async function importTemplate(log = noop) {
     await runExcel(async (context) => {
       const wb = context.workbook;
       let prevCalc = null;
@@ -606,51 +654,26 @@
       try {
         wb.worksheets.load("items/name");
         await context.sync();
-        const before = new Set(wb.worksheets.items.map((w) => w.name));
-
-        log("Importing lightweight Master & BOM Blank sheets ...");
-        wb.insertWorksheetsFromBase64(b64, { positionType: Excel.WorksheetPositionType.end });
-        await context.sync();
-
-        wb.worksheets.load("items/name");
-        await context.sync();
-        const added = wb.worksheets.items.filter((w) => !before.has(w.name));
-        added.forEach((w) => w.tables.load("items/name"));
-        await context.sync();
-
-        const master = added.find((w) => lc(w.name) === lc(MASTER)) ||
-                       added.find((w) => w.tables.items.some((t) => t.name === "tblMat"));
-        const blank = added.find((w) => lc(w.name) === lc(BLANK)) ||
-                      added.find((w) => w.tables.items.some((t) => t.name.startsWith("bom_")));
-
-        if (!master || !blank) {
-          added.forEach((w) => { try { w.delete(); } catch { /* ignore */ } });
+        const hasMaster = wb.worksheets.items.some((w) => lc(w.name) === lc(MASTER));
+        if (!hasMaster) {
+          log("Importing Master Unique Materials sheet ...");
+          const got = await insertTemplateSheets(context, wb, [MASTER]);
+          const master = got[MASTER];
+          if (!master) throw new Error("Template did not contain Master Unique Materials.");
+          if (master.name !== MASTER) master.name = MASTER;
           await context.sync();
-          throw new Error("Template did not contain Master Unique Materials and BOM Blank.");
         }
-
-        added.forEach((w) => {
-          if (w !== master && w !== blank && /^(README|Formulas)$/i.test(w.name.trim())) w.delete();
-        });
-        if (master.name !== MASTER) master.name = MASTER;
-        if (blank.name !== BLANK) blank.name = BLANK;
-        await context.sync();
-
-        const matInfo = await ensureMasterNames(context, wb, log);
-        // Upgrade BOM Blank via native Excel .formulas to lightweight Excel 365 LET/XMATCH/AL6# formulas (zero OOXML metadata errors!)
-        await repairBomSheet(context, wb, blank, matInfo, { upgrade365: true, ensureValidation: true }, log);
-
-        blank.visibility = Excel.SheetVisibility.hidden;
-        await context.sync();
+        await ensureMasterNames(context, wb, log);
+        if (await removeLegacyBlankIn(context, wb)) log("Removed old hidden BOM Blank sheet (it caused typing lag).");
       } finally {
         try {
           if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
+          wb.application.calculate(Excel.CalculationType.recalculate);
           await context.sync();
         } catch { /* ignore */ }
       }
     });
-    log("Lightweight Excel 365 template imported (Master Unique Materials + hidden BOM Blank).");
+    log("Master Unique Materials ready. BOM sheets are built fresh from the template when you add them.");
   }
 
   /* ---------------- Inspect Workbook ---------------- */
@@ -749,9 +772,6 @@
     await runExcel(async (context) => {
       const wb = context.workbook;
       let prevCalc = null;
-      let unhidBlank = false;
-      let blankRef = null;
-
       try {
         wb.application.load("calculationMode");
         await context.sync();
@@ -771,16 +791,24 @@
         const err = checkSheetName(newName, wb.worksheets.items.map((w) => w.name));
         if (err) throw new Error(err);
 
-        const src = wb.worksheets.items.find((w) => w.name === opts.source);
-        if (!src) throw new Error(`Source sheet "${opts.source}" was not found.`);
+        const useTemplate = opts.source === BLANK || !opts.source;
+        let src = null;
+        if (!useTemplate) {
+          src = wb.worksheets.items.find((w) => w.name === opts.source);
+          if (!src) throw new Error(`Source sheet "${opts.source}" was not found.`);
+        }
 
         wb.worksheets.items.forEach((ws) => ws.tables.load("items/name"));
         await context.sync();
-        const srcBom = firstTable(src.tables.items, "bom_");
-        const srcPl = firstTable(src.tables.items, "pl_");
-        if (!srcBom) throw new Error("Source sheet has no BOM table (bom_...).");
+        let srcBom = null;
+        let srcPl = null;
+        if (src) {
+          srcBom = firstTable(src.tables.items, "bom_");
+          srcPl = firstTable(src.tables.items, "pl_");
+          if (!srcBom) throw new Error("Source sheet has no BOM table (bom_...).");
+        }
 
-        // Place new sheet after the last visible BOM sheet
+        // Place new sheet after the last BOM sheet
         let anchor = src;
         let lastPos = -1;
         for (const ws of wb.worksheets.items) {
@@ -790,18 +818,19 @@
           }
         }
 
-        // Temporarily unhide BOM Blank (without activating it, avoiding any tab-switch repaint)
-        if (src.visibility !== "Visible") {
-          blankRef = src;
-          src.visibility = Excel.SheetVisibility.visible;
-          unhidBlank = true;
-          await context.sync();
-        }
-
-        log(`Creating "${newName}" from "${opts.source}" ...`);
+        log(`Creating "${newName}" ${useTemplate ? "from the template" : `from "${opts.source}"`} ...`);
         pauseExcel(context);
-        const copy = src.copy(Excel.WorksheetPositionType.after, anchor);
-        copy.name = newName;
+        let copy;
+        if (useTemplate) {
+          const got = await insertTemplateSheets(context, wb, [BLANK]);
+          copy = got[BLANK];
+          if (!copy) throw new Error("Template did not contain the BOM sheet.");
+          copy.name = newName;
+          if (lastPos >= 0) copy.position = lastPos + 1;
+        } else {
+          copy = src.copy(Excel.WorksheetPositionType.after, anchor);
+          copy.name = newName;
+        }
         copy.visibility = Excel.SheetVisibility.visible;
         copy.tables.load("items/name");
         await context.sync();
@@ -811,7 +840,7 @@
         if (!bomT) {
           copy.delete();
           await context.sync();
-          throw new Error("Copied sheet was missing its BOM table and was removed.");
+          throw new Error("New sheet was missing its BOM table and was removed.");
         }
         const origCopiedBomName = bomT.name;
         const origCopiedPlName = plT ? plT.name : "";
@@ -819,7 +848,7 @@
 
         wb.tables.load("items/name");
         await context.sync();
-        const needs365Upgrade = !isFormula(al6Check.formulas[0][0]);
+        const needs365Upgrade = useTemplate || !isFormula(al6Check.formulas[0][0]);
         const taken = wb.tables.items.map((t) => t.name);
         const id = safeId(newName);
         const bomName = uniqueName(`bom_${id}`, taken);
@@ -834,36 +863,32 @@
         }
         await context.sync();
 
-        if (opts.clear) {
+        if (opts.clear && !useTemplate) {
           log("Clearing entered items ...");
           await clearTableInputs(context, bomT, BOM_INPUT_COLS, false);
           if (plT) await clearTableInputs(context, plT, PL_INPUT_COLS, true);
         }
 
         await repairBomSheet(context, wb, copy, matInfo, {
-          srcBomName: srcBom.name,
+          srcBomName: srcBom ? srcBom.name : "",
           srcPlName: srcPl ? srcPl.name : "",
           origCopiedBomName,
           origCopiedPlName,
           upgrade365: needs365Upgrade,
-          ensureValidation: opts.source !== BLANK
+          ensureValidation: true
         }, log);
 
-        if (unhidBlank && blankRef) {
-          blankRef.visibility = Excel.SheetVisibility.hidden;
-          unhidBlank = false;
-        }
+        // One-time cleanup of the old resident hidden BOM Blank (v3.0 and earlier)
+        try { await removeLegacyBlankIn(context, wb); } catch { /* ignore */ }
 
         // Single clean activation & B6 selection — ZERO freezePanes, ZERO pageLayout, ZERO fullRebuild, ZERO tab flipping!
         copy.activate();
         copy.getRange("B6").select();
         await context.sync();
       } finally {
-        if (unhidBlank && blankRef) {
-          try { blankRef.visibility = Excel.SheetVisibility.hidden; } catch { /* ignore */ }
-        }
         try {
           if (prevCalc !== null) wb.application.calculationMode = prevCalc;
+          wb.application.calculate(Excel.CalculationType.recalculate);
           await context.sync();
         } catch { /* ignore */ }
       }
@@ -893,6 +918,7 @@
       try {
         log("Verifying Master sheet & workbook named ranges ...");
         const matInfo = await ensureMasterNames(context, wb, log);
+        if (await removeLegacyBlankIn(context, wb)) log("Removed old hidden BOM Blank sheet (it caused typing lag).");
 
         // Purge workbook-level volatile Print_Area / Print_Titles from legacy v1.x/v2.x workbooks
         wb.names.load("items/name");
@@ -1013,7 +1039,7 @@
       );
       const matInfo = await ensureMasterNames(context, wb);
       await refreshRangeBasedDropdowns(context, wb, matInfo);
-      wb.application.calculate(Excel.CalculationType.full);
+      wb.application.calculate(Excel.CalculationType.recalculate);
       await context.sync();
     });
     return item;
@@ -1057,7 +1083,7 @@
         formatBannerSummary([{ material: item.material, type: "modified" }], nowIso, projectMeta),
         Boolean(projectMeta)
       );
-      wb.application.calculate(Excel.CalculationType.full);
+      wb.application.calculate(Excel.CalculationType.recalculate);
       await context.sync();
     });
     return item;
@@ -1092,7 +1118,7 @@
       );
       const matInfo = await ensureMasterNames(context, wb);
       await refreshRangeBasedDropdowns(context, wb, matInfo);
-      wb.application.calculate(Excel.CalculationType.full);
+      wb.application.calculate(Excel.CalculationType.recalculate);
       await context.sync();
     });
     return target;
@@ -1186,7 +1212,7 @@
       } finally {
         try {
           if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
+          wb.application.calculate(Excel.CalculationType.recalculate);
           await context.sync();
         } catch { /* ignore */ }
       }
@@ -1382,7 +1408,7 @@
       } finally {
         try {
           if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
+          wb.application.calculate(Excel.CalculationType.recalculate);
           await context.sync();
         } catch { /* ignore */ }
       }
@@ -1483,7 +1509,7 @@
     formatStamp, actionLabel, materialStatus, validateMaterial, canonical,
     readProjectProp, writeProjectProp, getProjectMeta, setProjectMeta,
     openMaster, ensureMasterNames, applyBomValidation, repairBomSheet,
-    importTemplate, inspectWorkbook, addBomSheet, repairWorkbook,
+    importTemplate, inspectWorkbook, addBomSheet, repairWorkbook, removeLegacyBlank, insertTemplateSheets,
     listMaterials, addMaterial, addMaterialsBulk, updateMaterial, deleteMaterial,
     applyMaterialList, stampAudit, getUsedMaterialsInWorkbook,
     setMasterSnap, syncDirectMasterEdits

@@ -1,4 +1,4 @@
-/* app.js - Lightweight BOM Tools 3.0v patch2 Task Pane Controller */
+/* app.js - Lightweight BOM Tools 3.1v lean Task Pane Controller */
 (() => {
   "use strict";
 
@@ -241,6 +241,15 @@
 
       if (typeof Excel !== "undefined") {
         state.wb = await window.BomSheets.inspectWorkbook();
+        if (state.wb.hasBlank) {
+          // Old hidden "BOM Blank" (v3.0 and earlier) is what made typing laggy — remove it once, automatically
+          try {
+            if (await window.BomSheets.removeLegacyBlank()) {
+              state.wb = await window.BomSheets.inspectWorkbook();
+              showGlobalMsg("Removed the old hidden BOM Blank sheet — typing should be smooth now.", "ok");
+            }
+          } catch { /* non-fatal */ }
+        }
         if (state.wb.hasMaster) {
           // Detect & persist any direct edits typed on Master sheet before refreshing view
           const direct = await window.BomSheets.syncDirectMasterEdits((evt) => recordChangeEvent(evt));
@@ -336,11 +345,18 @@
     const sel = $("selCopySource");
     const prev = sel.value;
     const opts = [];
-    if (state.wb.hasBlank) opts.push({ v: window.BomSheets.BLANK, t: "BOM Blank (recommended)" });
-    visibleBoms.forEach((s) => opts.push({ v: s.name, t: s.name }));
-    if (!opts.length) opts.push({ v: window.BomSheets.BLANK, t: "BOM Blank (auto-import)" });
+    opts.push({ v: window.BomSheets.BLANK, t: "New blank sheet (recommended)" });
+    visibleBoms.forEach((s) => opts.push({ v: s.name, t: `Copy of ${s.name}` }));
     sel.innerHTML = opts.map((o) => `<option value="${escHtml(o.v)}">${escHtml(o.t)}</option>`).join("");
     if (prev && opts.some((o) => o.v === prev)) sel.value = prev;
+
+    const nameInput = $("inpSheetName");
+    if (nameInput && !nameInput.value) {
+      const taken = new Set(state.wb.allSheets.map(lc));
+      let n = visibleBoms.length + 1;
+      while (taken.has(lc(`BOM ${n}`))) n++;
+      nameInput.placeholder = `e.g. BOM ${n}`;
+    }
 
     const names = visibleBoms.map((s) => s.name);
     $("sheetRepairCount").textContent = `BOM sheets (${names.length})`;
@@ -886,7 +902,7 @@
           });
         }
         await refreshAll();
-        showGlobalMsg("Lightweight Excel 365 template imported (Master Unique Materials + hidden BOM Blank).", "ok");
+        showGlobalMsg("Master Unique Materials is ready. Use Add Sheet to create your first BOM.", "ok");
       } catch (err) {
         showGlobalMsg(err?.message || String(err), "err");
       } finally {
@@ -896,6 +912,9 @@
 
     // Add BOM Sheet (zero trailing Excel.run calls after activation so typing in B6 is 100% lag-free!)
     $("inpSheetName").addEventListener("input", updateSheetGuard);
+    $("inpSheetName").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !$("btnAddSheet").disabled && !state.busy) $("btnAddSheet").click();
+    });
     $("btnAddSheet").addEventListener("click", async () => {
       const name = $("inpSheetName").value.trim();
       const wasTemplateNeeded = state.wb.needsTemplate;

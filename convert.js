@@ -734,11 +734,13 @@
       projectMeta = null;
     }
 
-    // Ensure Master & hidden BOM Blank exist
+    // Ensure Master exists (BOM sheets are built fresh from the embedded template — no resident BOM Blank)
     const info = await window.BomSheets.inspectWorkbook();
-    if (!info.hasMaster || !info.hasBlank) {
-      log("Importing lightweight Master & BOM Blank template...");
+    if (!info.hasMaster) {
+      log("Importing Master Unique Materials sheet...");
       await window.BomSheets.importTemplate(log);
+    } else if (info.hasBlank) {
+      await window.BomSheets.removeLegacyBlank();
     }
 
     // Apply chosen materials list to Master
@@ -760,8 +762,6 @@
     await window.BomSheets.runExcel(async (context) => {
       const wb = context.workbook;
       let prevCalc = null;
-      let unhidBlank = false;
-      let blankWs = null;
 
       try {
         wb.application.load("calculationMode");
@@ -775,14 +775,6 @@
 
       try {
         const matInfo = await window.BomSheets.ensureMasterNames(context, wb, log);
-        blankWs = wb.worksheets.getItem(window.BomSheets.BLANK);
-        blankWs.load("visibility");
-        await context.sync();
-        if (blankWs.visibility !== "Visible") {
-          blankWs.visibility = Excel.SheetVisibility.visible;
-          unhidBlank = true;
-          await context.sync();
-        }
 
         const restoredSheets = [];
         for (const sheetName of selected) {
@@ -793,6 +785,7 @@
           log(`Restoring "${sheetName}"...`);
           const used = oldWs.getUsedRangeOrNullObject(true);
           used.load("rowCount");
+          oldWs.load("position");
           const headRng = oldWs.getRange("A1:AE6").load("values");
           await context.sync();
           const maxRow = used.isNullObject ? 80 : Math.min(600, Math.max(60, used.rowCount + 5));
@@ -838,8 +831,12 @@
           // Rename old sheet temporarily and clone clean BOM Blank in its exact position
           const tmpName = window.BomSheets.uniqueName(`__old_${window.BomSheets.safeId(sheetName).slice(0, 18)}`, [sheetName]);
           oldWs.name = tmpName;
-          const copy = blankWs.copy(Excel.WorksheetPositionType.before, oldWs);
+          const oldPos = oldWs.position;
+          const got = await window.BomSheets.insertTemplateSheets(context, wb, [window.BomSheets.BLANK]);
+          const copy = got[window.BomSheets.BLANK];
+          if (!copy) throw new Error("Template did not contain the BOM sheet.");
           copy.name = sheetName;
+          copy.position = oldPos;
           copy.visibility = Excel.SheetVisibility.visible;
           copy.tables.load("items/name");
           wb.tables.load("items/name");
@@ -899,12 +896,6 @@
           restored++;
         }
 
-        if (unhidBlank && blankWs) {
-          blankWs.visibility = Excel.SheetVisibility.hidden;
-          unhidBlank = false;
-          await context.sync();
-        }
-
         // Recalculate once so Purchase Lists populate their Materials column, then write back Stock/PO inputs
         wb.application.calculate(Excel.CalculationType.full);
         await context.sync();
@@ -943,9 +934,6 @@
           await context.sync();
         }
       } finally {
-        if (unhidBlank && blankWs) {
-          try { blankWs.visibility = Excel.SheetVisibility.hidden; } catch { /* ignore */ }
-        }
         try {
           if (prevCalc !== null) wb.application.calculationMode = prevCalc;
           wb.application.calculate(Excel.CalculationType.full);
