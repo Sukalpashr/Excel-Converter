@@ -1,1517 +1,799 @@
-/* sheets.js - Lightweight Excel Workbook, Template Import, Lag-Free Sheet Creation, Materials & Repair Engine (3.1v lean) */
-(() => {
-  "use strict";
+/* sheets.js — window.BomSheets
+ * ----------------------------------------------------------------------------
+ * Template import, lag-free sheet creation, the canonical Excel 365 formula
+ * engine, Materials CRUD with audit stamping, and per-sheet repair.
+ *
+ * Performance contract (CRITICAL — see AGENTS rules):
+ *   - NEVER register Worksheet.onChanged listeners. Direct edits on Master are
+ *     detected on-demand via snapshot diffing (readMaterials) when the user
+ *     visits Materials, refreshes, saves, or exports.
+ *   - Every Excel.run is wrapped with { delayForCellEdit: true }.
+ *   - Heavy ops switch to Excel.CalculationMode.manual and call
+ *     suspendApiCalculationUntilNextSync() / suspendScreenUpdatingUntilNextSync();
+ *     calculationMode is restored to automatic in `finally`.
+ *   - Writes are batched as 2D arrays via .values / .formulas.
+ *   - freezePanes / pageLayout / showGridlines are NEVER called on live editing
+ *     sheets after creation.
+ *
+ * Excel 365 formulas injected at runtime (NOT baked into template.xlsx):
+ *   Standalone cells: O2 (PL title), M4 (reverse XMATCH last-used row),
+ *     AL6 (hidden SORT(UNIQUE(FILTER)) spill), AB4 (ROWS of spill),
+ *     AD2 (status comparing BOM vs PL totals, flags missing Master materials).
+ *   BOM columns A/I/J/L/M: structured-ref formulas with single-LET weight
+ *     handling for kg/m · kg/m² · kg/each and a dynamic Total row at $M$4+1.
+ *   PL columns O/P/Q/R/S/T/U/W/Z/AB: O(1) INDEX($AL$6#, ROW()-5) for Mat Row,
+ *     grand-total + signature rows at $AB$4+6 / $AB$4+8.
+ */
+(function (root) {
+  'use strict';
 
-  const MASTER = "Master Unique Materials";
-  const BLANK = "BOM Blank";
-  const PROP_PROJECT = "BomProjectList";
-  const TITLE_PREFIX = "Bill of Materials for ";
-  const UNITS = ["kg/m", "kg/m²", "kg/each"];
-  const BOM_INPUT_COLS = ["Description", "Materials", "Length", "Width", "Thickness", "Qty", "Set", "Remarks"];
-  const PL_INPUT_COLS = ["Stock", "PO Weight", "PO Qty", "PO Rate", "Remarks"];
+  var META = (root.BOM_TEMPLATE_META) || {};
+  var BOM_TABLE = (META.bomTable && META.bomTable.name) || 'bom_Take_off';
+  var PL_TABLE  = (META.plTable  && META.plTable.name)  || 'pl_Take_off';
+  var MAT_TABLE = (META.matTable && META.matTable.name) || 'tblMat';
+  var MASTER_SHEET = 'Master Unique Materials';
+  var TEMPLATE_SHEET = 'BOM Blank';
 
-  const MASTER_HEADERS = {
-    material: "Material",
-    category: "Category",
-    unit: "Primary Unit",
-    lin: "Linear Weight",
-    area: "Area Weight",
-    piece: "Piece Weight",
-    sl: "Sheet Length",
-    sw: "Sheet Width",
-    remarks: "Remarks",
-    lastAction: "Last Action",
-    lastModified: "Last Modified"
-  };
-
-  const NAMED_RANGES = [
-    { name: "Materials", key: "material" },
-    { name: "LinWt", key: "lin" },
-    { name: "AreaWt", key: "area" },
-    { name: "PieceWt", key: "piece" },
-    { name: "WtUnit", key: "unit" },
-    { name: "SheetL", key: "sl" },
-    { name: "SheetW", key: "sw" }
+  var NAMED_RANGES = [
+    { name: 'Materials', refersTo: MAT_TABLE + '[Material]' },
+    { name: 'LinWt',     refersTo: MAT_TABLE + '[Linear Weight (kg/m)]' },
+    { name: 'AreaWt',    refersTo: MAT_TABLE + '[Area Weight (kg/m²)]' },
+    { name: 'PieceWt',   refersTo: MAT_TABLE + '[Piece Weight (kg/each)]' },
+    { name: 'WtUnit',    refersTo: MAT_TABLE + '[Primary Unit]' },
+    { name: 'SheetL',    refersTo: MAT_TABLE + '[Sheet Length (mm)]' },
+    { name: 'SheetW',    refersTo: MAT_TABLE + '[Sheet Width (mm)]' }
   ];
 
-  const lc = (s) => String(s ?? "").trim().toLowerCase();
-  const isFormula = (v) => typeof v === "string" && v.startsWith("=");
-  const isBlank = (v) => v === "" || v === null || v === undefined;
-  const noop = () => {};
-
-  /* Centralized Excel.run with delayForCellEdit so background add-in activity NEVER interrupts active cell typing */
-  function runExcel(fn) {
-    return Excel.run({ delayForCellEdit: true }, fn);
-  }
-
-  function pauseExcel(context) {
-    try { context.application.suspendApiCalculationUntilNextSync(); } catch { /* ignore */ }
-    try {
-      if (Office?.context?.requirements?.isSetSupported("ExcelApi", "1.10") &&
-          typeof context.application.suspendScreenUpdatingUntilNextSync === "function") {
-        context.application.suspendScreenUpdatingUntilNextSync();
-      }
-    } catch { /* ignore */ }
-  }
-
-  function safeId(s) {
-    return String(s || "").trim().replace(/[^A-Za-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") || "Sheet";
-  }
-
-  function uniqueName(base, taken) {
-    const used = new Set(taken.map(lc));
-    let name = base;
-    let i = 2;
-    while (used.has(lc(name))) name = `${base}_${i++}`;
-    return name;
-  }
-
-  function checkSheetName(name, existing) {
-    const n = String(name || "").trim();
-    if (!n) return "Enter a sheet name to continue.";
-    if (n.length > 31) return "Sheet names can be at most 31 characters.";
-    if (/[:\\/?*\[\]]/.test(n)) return "Sheet names cannot contain : \\ / ? * [ ]";
-    if (/^'|'$/.test(n)) return "Sheet name cannot start or end with an apostrophe.";
-    if (lc(n) === "history") return '"History" is reserved by Excel.';
-    if (existing.some((e) => lc(e) === lc(n))) return `"${n}" already exists in this workbook.`;
-    return "";
-  }
-
-  function formatStamp(iso) {
-    const d = iso ? new Date(iso) : new Date();
-    const t = Number.isNaN(d.getTime()) ? new Date() : d;
-    const p = (n) => (n < 10 ? "0" : "") + n;
-    return `${t.getFullYear()}-${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
-  }
-
-  function actionLabel(t) {
-    const s = lc(t);
-    if (s === "added" || s === "add") return "Added";
-    if (s === "modified" || s === "edited") return "Modified";
-    if (s === "removed" || s === "deleted") return "Removed";
-    return "";
-  }
-
-  function materialStatus(raw) {
-    const m = window.BomStore.normalizeMaterial(raw || {});
-    const missing = [];
-    if (!m.material) missing.push("Material Name");
-    if (!UNITS.includes(m.unit)) {
-      missing.push("Primary Unit");
-    } else if (m.unit === "kg/m") {
-      if (!(m.lin > 0)) missing.push("Linear Weight");
-    } else if (m.unit === "kg/each") {
-      if (!(m.piece > 0)) missing.push("Piece Weight");
-    } else if (m.unit === "kg/m²") {
-      if (!(m.area > 0)) missing.push("Area Weight");
-      if (!(m.sl > 0) || !(m.sw > 0)) missing.push("Sheet Size");
-    }
-    return { valid: missing.length === 0, missing };
-  }
-
-  function validateMaterial(raw, existingNames, mode) {
-    const m = window.BomStore.normalizeMaterial(raw || {});
-    const issues = [];
-    if (!m.material) issues.push("Material name is required.");
-    else if (m.material.startsWith("=")) issues.push("Material name cannot start with '='.");
-    else if (mode === "add" && existingNames.some((n) => lc(n) === lc(m.material))) {
-      issues.push(`"${m.material}" already exists. Click it above to edit.`);
-    }
-    if (!UNITS.includes(m.unit)) issues.push("Choose a Primary Unit.");
-    else if (m.unit === "kg/m" && !(m.lin > 0)) issues.push("Linear weight (kg/m) must be greater than 0.");
-    else if (m.unit === "kg/each" && !(m.piece > 0)) issues.push("Piece weight (kg/each) must be greater than 0.");
-    else if (m.unit === "kg/m²") {
-      if (!(m.area > 0)) issues.push("Area weight (kg/m²) must be greater than 0.");
-      if (!(m.sl > 0) || !(m.sw > 0)) issues.push("Sheet length and width (mm) must be greater than 0.");
-    }
-    return issues;
-  }
-
-  function firstTable(items, prefix) {
-    return items.find((t) => t.name.startsWith(prefix)) || null;
-  }
-
-  function replaceTableRef(formula, oldName, newName) {
-    if (!isFormula(formula) || !oldName || oldName === newName) return formula;
-    const esc = oldName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return formula.replace(new RegExp(`\\b${esc}\\[`, "gi"), `${newName}[`);
-  }
-
-  const canonical = {
-    O2: () => '=SUBSTITUTE($A$1,"Bill of Materials","Remaining Purchase List")&IF($A$2<>""," – "&$A$2,"")',
-    M4: (bom) => `=IFNA(XMATCH(TRUE,(${bom}[Description]<>"")+(${bom}[Materials]<>"")+(${bom}[Length]<>"")+(${bom}[Qty]<>"")>0,0,-1)+5,5)`,
-    AL6: (bom) => `=LET(m,FILTER(${bom}[Mat Row],ISNUMBER(${bom}[Mat Row]),""),IF(INDEX(m,1)="","",SORT(UNIQUE(m))))`,
-    AB4: () => '=IF(AL6="",0,ROWS($AL$6#))',
-    AD2: (bom, pl) =>
-      `=IF($M$4=5,"✔ Purchase list covers every BOM material",IF(COUNTIF(${bom}[Materials],"<>")>COUNT(${bom}[Mat Row]),"⚠ Material not in Master – check red cells in column C",IF(ABS(SUMIF(${pl}[Mat Row],">0",${pl}[Consumable Wt. kg])-SUMIF(${bom}[Mat Row],">0",${bom}[Total Weight (kg)]))>0.01,"⚠ Purchase list total does not match BOM total – check material names or capacity","✔ Purchase list covers every BOM material")))`,
-    bomSn: (bom, r) => `=IF(${bom}[[#This Row],[Materials]]="","",MAX(A$5:A${r - 1})+1)`,
-    bomI: (bom) => `=IF(ROW()=$M$4+1,"Total:",IF(${bom}[[#This Row],[Mat Row]]="","",IF(INDEX(WtUnit,${bom}[[#This Row],[Mat Row]])="kg/m",INDEX(LinWt,${bom}[[#This Row],[Mat Row]]),"")))`,
-    bomJ: (bom, r) => `=IF(ROW()=$M$4+1,SUM(J$5:J${r - 1}),LET(r,${bom}[[#This Row],[Mat Row]],IF(r="","",LET(u,INDEX(WtUnit,r),q,${bom}[[#This Row],[Qty]]*IF(${bom}[[#This Row],[Set]]="",1,${bom}[[#This Row],[Set]]),IF(u="kg/m",q*${bom}[[#This Row],[Length]]/1000*INDEX(LinWt,r),IF(u="kg/m²",q*${bom}[[#This Row],[Length]]*${bom}[[#This Row],[Width]]/10^6*INDEX(AreaWt,r),q*INDEX(PieceWt,r)))))))`,
-    bomL: (bom) => `=IF(OR(${bom}[[#This Row],[Mat Row]]="",${bom}[[#This Row],[Unit weight kg/m]]="",NOT(ISNUMBER(${bom}[[#This Row],[Length]]))),"",${bom}[[#This Row],[Length]]*${bom}[[#This Row],[Qty]]*IF(${bom}[[#This Row],[Set]]="",1,${bom}[[#This Row],[Set]]))`,
-    bomM: (bom) => `=IF(${bom}[[#This Row],[Materials]]="","",IFNA(XMATCH(${bom}[[#This Row],[Materials]],Materials,0),""))`,
-    plO: (pl, r) => `=IF(${pl}[[#This Row],[Mat Row]]="","",N(O${r - 1})+1)`,
-    plP: (pl) => `=IF(ROW()=$AB$4+6,"Grand Total Weight in KG :",IF(ROW()=$AB$4+8,"Requested by:",IF(${pl}[[#This Row],[Mat Row]]="","",INDEX(Materials,${pl}[[#This Row],[Mat Row]]))))`,
-    plQ: (pl) => `=IF(ROW()=$AB$4+8,"Procurement",LET(r,${pl}[[#This Row],[Mat Row]],IF(r="","",LET(u,INDEX(WtUnit,r),IF(u="kg/m",$AE$1,IF(u="kg/m²",LET(l,INDEX(SheetL,r),w,INDEX(SheetW,r),IF(AND(ISNUMBER(l),ISNUMBER(w),l*w>0),l&" x "&w,"Add size in Master")),""))))))`,
-    plR: (bom, pl) => `=IF(${pl}[[#This Row],[Mat Row]]="","",LET(r,${pl}[[#This Row],[Mat Row]],u,INDEX(WtUnit,r),IF(u="kg/m",IFERROR(ROUNDUP(ROUND(SUMIF(${bom}[Materials],${pl}[[#This Row],[Materials]],${bom}[Total Length mm])/${pl}[[#This Row],[Length (mm)]],6),0),""),IF(u="kg/m²",IFERROR(ROUNDUP(ROUND(${pl}[[#This Row],[Consumable Wt. kg]]/(INDEX(AreaWt,r)*INDEX(SheetL,r)*INDEX(SheetW,r)/10^6),6),0),""),IFERROR(ROUNDUP(ROUND(${pl}[[#This Row],[Consumable Wt. kg]]/INDEX(PieceWt,r),6),0),"")))))`,
-    plS: (bom, pl, r) => `=IF(ROW()=$AB$4+6,SUM(S$5:S${r - 1}),IF(${pl}[[#This Row],[Mat Row]]="","",SUMIF(${bom}[Materials],${pl}[[#This Row],[Materials]],${bom}[Total Weight (kg)])))`,
-    plT: (pl) => `=IF(ROW()=$AB$4+8,"Store Section:",LET(r,${pl}[[#This Row],[Mat Row]],IF(r="","",IF(INDEX(WtUnit,r)="kg/m",INDEX(LinWt,r),""))))`,
-    plU: (pl, r) => `=IF(ROW()=$AB$4+6,SUM(U$5:U${r - 1}),LET(r,${pl}[[#This Row],[Mat Row]],IF(r="","",IFERROR(LET(u,INDEX(WtUnit,r),q,${pl}[[#This Row],[Qty (nos)]],IF(u="kg/m",${pl}[[#This Row],[Length (mm)]]/1000*q*${pl}[[#This Row],[Weight Kg/m]],IF(u="kg/m²",q*INDEX(AreaWt,r)*INDEX(SheetL,r)*INDEX(SheetW,r)/10^6,q*INDEX(PieceWt,r)))),${pl}[[#This Row],[Consumable Wt. kg]]))))`,
-    plZ: (pl, r) => `=IF(ROW()=$AB$4+6,IF(COUNT(Z$5:Z${r - 1})=0,"",SUM(Z$5:Z${r - 1})),IF(ROW()=$AB$4+8,"Engineering",IF(${pl}[[#This Row],[PO Rate]]="","",${pl}[[#This Row],[PO Weight]]*${pl}[[#This Row],[PO Rate]])))`,
-    plAB: () => '=IF(ROW()-5>$AB$4,"",INDEX($AL$6#,ROW()-5))',
-    poWeight: (r) => `=IF(ROW()=$AB$4+6,IF(COUNT(W$5:W${r - 1})=0,"",SUM(W$5:W${r - 1})),IF(ROW()=$AB$4+8,"Production",""))`
-  };
-
-  /* ---------------- Project-Only Workbook Custom Property ---------------- */
-  async function readProjectProp(context, wb) {
-    try {
-      const prop = wb.properties.custom.getItemOrNullObject(PROP_PROJECT);
-      prop.load("value");
-      await context.sync();
-      if (prop.isNullObject || !prop.value) return null;
-      const parsed = JSON.parse(String(prop.value));
-      const projectName = String(parsed?.projectName || parsed?.name || "").trim();
-      if (projectName) {
-        return {
-          id: String(parsed?.id || "").trim(),
-          projectName,
-          updated: String(parsed?.updated || parsed?.created || "")
-        };
-      }
-    } catch { /* ignore */ }
+  // Reserved Excel sheet names (case-insensitive)
+  var RESERVED = /^(history|logo|print_area|print_titles|sheet1|sheet2|sheet3|sheets)$/i;
+  // Excel sheet-name rules: no : \ / ? * [ ]  , max 31 chars, cannot start/end with '
+  function validateSheetName(name, existing) {
+    if (!name) return 'Name is required';
+    if (name.length > 31) return 'Max 31 characters';
+    if (/[\\/?*[\]:]/.test(name)) return 'Cannot contain : \\ / ? * [ ]';
+    if (name.length > 0 && name[0] === "'") return 'Cannot start with an apostrophe';
+    if (name[name.length - 1] === "'") return 'Cannot end with an apostrophe';
+    if (RESERVED.test(name)) return 'Reserved name';
+    var ex = (existing || []).map(function (s) { return s.toLowerCase(); });
+    if (ex.indexOf(name.toLowerCase()) >= 0) return 'A sheet with this name already exists';
     return null;
   }
 
-  async function writeProjectProp(context, wb, meta) {
-    try {
-      const existing = wb.properties.custom.getItemOrNullObject(PROP_PROJECT);
-      await context.sync();
-      if (!existing.isNullObject) {
-        existing.delete();
-        await context.sync();
-      }
-      const name = String(meta?.projectName || meta?.name || "").trim();
-      if (name) {
-        wb.properties.custom.add(PROP_PROJECT, JSON.stringify({
-          id: meta.id || "",
-          projectName: name,
-          name,
-          updated: meta.updated || new Date().toISOString()
-        }));
-        await context.sync();
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  async function getProjectMeta() {
-    let out = null;
-    await runExcel(async (context) => {
-      out = await readProjectProp(context, context.workbook);
-    });
-    return out;
-  }
-
-  async function setProjectMeta(meta) {
-    await runExcel(async (context) => {
-      await writeProjectProp(context, context.workbook, meta);
-    });
-  }
-
-  /* ---------------- Master Sheet Access & Named Ranges ---------------- */
-  async function openMaster(context) {
-    const ws = context.workbook.worksheets.getItemOrNullObject(MASTER);
-    await context.sync();
-    if (ws.isNullObject) throw new Error(`Sheet "${MASTER}" was not found.`);
-    let t = ws.tables.getItemOrNullObject("tblMat");
-    await context.sync();
-    if (t.isNullObject) {
-      ws.tables.load("items/name");
-      await context.sync();
-      if (ws.tables.items.length === 1) {
-        t = ws.tables.items[0];
-        try { t.name = "tblMat"; await context.sync(); } catch { /* keep */ }
-      } else {
-        throw new Error('Table "tblMat" was not found on Master Unique Materials.');
-      }
-    }
-    t.load("name");
-    const hdr = t.getHeaderRowRange().load("values");
-    await context.sync();
-    const headers = hdr.values[0].map((s) => String(s).trim());
-    const idx = {};
-    for (const [k, prefix] of Object.entries(MASTER_HEADERS)) {
-      idx[k] = headers.findIndex((h) => h.startsWith(prefix));
-    }
-    for (const req of ["material", "unit", "lin", "area", "piece", "sl", "sw"]) {
-      if (idx[req] < 0) throw new Error(`Master table is missing column "${MASTER_HEADERS[req]}".`);
-    }
-    return { ws, t, tableName: t.name, headers, idx, ncols: headers.length };
-  }
-
-  function rowToMaterial(row, rowIdx, idx) {
-    const get = (k) => (idx[k] >= 0 ? row[idx[k]] : "");
-    return {
-      row: rowIdx,
-      ...window.BomStore.normalizeMaterial({
-        material: get("material"),
-        category: get("category"),
-        unit: get("unit"),
-        lin: get("lin"),
-        area: get("area"),
-        piece: get("piece"),
-        sl: get("sl"),
-        sw: get("sw"),
-        remarks: get("remarks"),
-        lastAction: get("lastAction"),
-        lastModified: get("lastModified")
-      })
-    };
-  }
-
-  async function ensureAuditColumns(context, m) {
-    if (m.idx.lastAction >= 0 && m.idx.lastModified >= 0) return m;
-    try {
-      if (m.idx.lastAction < 0) m.t.columns.add(null, null, MASTER_HEADERS.lastAction);
-      if (m.idx.lastModified < 0) m.t.columns.add(null, null, MASTER_HEADERS.lastModified);
-      await context.sync();
-      const hdr = m.t.getHeaderRowRange().load("values");
-      await context.sync();
-      m.headers = hdr.values[0].map((s) => String(s).trim());
-      for (const [k, prefix] of Object.entries(MASTER_HEADERS)) {
-        m.idx[k] = m.headers.findIndex((h) => h.startsWith(prefix));
-      }
-      m.ncols = m.headers.length;
-    } catch { /* ignore if protected */ }
-    return m;
-  }
-
-  async function writeMasterBanner(context, ws, text, isProjectOnly) {
-    try {
-      const cell = ws.getRange("A3");
-      if (!text) {
-        if (!isProjectOnly) {
-          cell.values = [[""]];
-          cell.format.font.bold = false;
-          cell.format.font.italic = false;
-          cell.format.font.color = "#475569";
-          cell.format.fill.clear();
-          await context.sync();
-        }
-        return;
-      }
-      cell.values = [[text]];
-      cell.format.font.size = 9.5;
-      cell.format.font.bold = Boolean(isProjectOnly);
-      cell.format.font.italic = !isProjectOnly;
-      cell.format.font.color = isProjectOnly ? "#B45309" : "#475569";
-      if (isProjectOnly) cell.format.fill.color = "#FEF3C7";
-      else cell.format.fill.clear();
-      await context.sync();
-    } catch { /* non-fatal */ }
-  }
-
-  function formatBannerSummary(entries, timeIso, projectMeta) {
-    const stamp = formatStamp(timeIso);
-    const prefix = projectMeta ? `PROJECT-ONLY list (${projectMeta.projectName}) · ` : "";
-    if (!entries || !entries.length) {
-      return projectMeta ? `PROJECT-ONLY list (${projectMeta.projectName}) — edits stay in this workbook only · ${stamp}` : "";
-    }
-    if (entries.length === 1) {
-      const e = entries[0];
-      return `${prefix}Last change: ${actionLabel(e.type) || "Modified"} "${e.material}" · ${stamp}`;
-    }
-    const counts = { added: 0, modified: 0, removed: 0 };
-    for (const e of entries) counts[e.type] = (counts[e.type] || 0) + 1;
-    const parts = Object.entries(counts).filter(([, v]) => v > 0).map(([k, v]) => `${v} ${k}`);
-    return `${prefix}Last change: ${parts.join(", ")} · ${stamp}`;
-  }
-
-  async function ensureMasterNames(context, wb, log = noop) {
-    const m = await openMaster(context);
-    const wantedNames = new Set(NAMED_RANGES.map((d) => lc(d.name)));
-
-    // 1. Delete worksheet-scoped shadow names + any legacy volatile Print_Area / Print_Titles
-    wb.worksheets.load("items/name");
-    await context.sync();
-    wb.worksheets.items.forEach((ws) => ws.names.load("items/name"));
-    await context.sync();
-    let delShadow = false;
-    wb.worksheets.items.forEach((ws) => {
-      ws.names.items.forEach((nm) => {
-        if (wantedNames.has(lc(nm.name))) { nm.delete(); delShadow = true; }
-      });
-    });
-    if (delShadow) await context.sync();
-
-    // 2. Load table columns + workbook defined names
-    const colInfo = {};
-    for (const def of NAMED_RANGES) {
-      const header = m.headers[m.idx[def.key]];
-      const range = m.t.columns.getItem(header).getDataBodyRange();
-      range.load(["address", "rowCount"]);
-      colInfo[def.name] = { header, range };
-    }
-    wb.names.load("items/name,items/formula");
-    await context.sync();
-
-    const existing = new Map();
-    wb.names.items.forEach((nm) => existing.set(lc(nm.name), nm));
-
-    const toCreate = [];
-    let removedAny = false;
-    for (const def of NAMED_RANGES) {
-      const info = colInfo[def.name];
-      const structFormula = `=${m.tableName}[${info.header}]`;
-      const cur = existing.get(lc(def.name));
-      let ok = false;
-      if (cur) {
-        const f = String(cur.formula || "");
-        const broken = !f || f.includes("#REF!") || f.includes("#NAME?") || /\[\d+\]/.test(f);
-        if (!broken && (lc(f) === lc(structFormula) || lc(f.replace(/\$/g, "")).includes(lc(info.range.address.replace(/\$/g, ""))))) {
-          ok = true;
-        } else {
-          try { cur.delete(); removedAny = true; } catch { /* ignore */ }
-        }
-      }
-      if (!ok) toCreate.push({ def, info, structFormula });
-    }
-    if (removedAny) { try { await context.sync(); } catch { /* ignore */ } }
-
-    let usedRangeFallback = false;
-    if (toCreate.length) {
-      let batchOk = false;
-      try {
-        toCreate.forEach((item) => wb.names.add(item.def.name, item.structFormula));
-        await context.sync();
-        batchOk = true;
-      } catch {
-        batchOk = false;
-      }
-      if (batchOk) {
-        try {
-          const checks = toCreate.map((item) => ({ item, nm: wb.names.getItem(item.def.name).load("formula") }));
-          await context.sync();
-          const bad = checks.filter((c) => String(c.nm.formula || "").includes("#REF!"));
-          if (bad.length) {
-            bad.forEach((c) => c.nm.delete());
-            await context.sync();
-            bad.forEach((c) => wb.names.add(c.item.def.name, c.item.info.range));
-            await context.sync();
-            usedRangeFallback = true;
-          }
-        } catch { /* ignore */ }
-      } else {
-        for (const item of toCreate) {
-          try {
-            wb.names.add(item.def.name, item.info.range);
-            await context.sync();
-            usedRangeFallback = true;
-          } catch (e) {
-            log(`Warning: could not define ${item.def.name} (${e.message || e}).`);
-          }
-        }
-      }
-    }
-
-    // 3. Clamp Primary Unit DV on Master to active range (max 300 rows — never 2000!)
-    const dvEnd = Math.max(200, Math.min(400, 4 + (colInfo.Materials.range.rowCount || 55) + 80));
-    try {
-      const dv = m.ws.getRange(`C5:C${dvEnd}`).dataValidation;
-      dv.clear();
-      dv.rule = { list: { inCellDropDown: true, source: "kg/m,kg/m²,kg/each" } };
-      dv.ignoreBlanks = true;
-      dv.errorAlert = {
-        showAlert: true,
-        style: Excel.DataValidationAlertStyle.stop,
-        title: "Pick a unit",
-        message: "Choose kg/m, kg/m² or kg/each."
-      };
-      await context.sync();
-    } catch { /* non-fatal */ }
-
-    return { master: m, matRangeAddress: colInfo.Materials.range.address, usedRangeFallback };
-  }
-
-  /* Bind Materials dropdown strictly to bomT[Materials] data body (never bloated C6:C2000!) */
-  async function applyBomValidation(context, ws, bomT, matInfo, log = noop) {
-    let target = null;
-    try {
-      target = bomT ? bomT.columns.getItem("Materials").getDataBodyRange() : ws.getRange("C6:C65");
-    } catch {
-      target = ws.getRange("C6:C65");
-    }
-    const alertCfg = {
-      showAlert: true,
-      style: Excel.DataValidationAlertStyle.stop,
-      title: "Not in the materials list",
-      message: "Pick a material from the dropdown (or add it in the Materials tab first)."
-    };
-    const applyWith = async (source) => {
-      target.dataValidation.clear();
-      target.dataValidation.rule = { list: { inCellDropDown: true, source } };
-      target.dataValidation.ignoreBlanks = true;
-      target.dataValidation.prompt = { showPrompt: false, title: "", message: "" };
-      target.dataValidation.errorAlert = alertCfg;
-      await context.sync();
-    };
-    try {
-      await applyWith("=Materials");
-    } catch {
-      try {
-        await applyWith(`=${matInfo.matRangeAddress}`);
-      } catch (e2) {
-        log(`Warning: could not set Materials dropdown on ${ws.name} (${e2.message || e2}).`);
-      }
-    }
-  }
-
-  /* Purge volatile Print_Area / Print_Titles defined names on legacy sheets (NEVER touches ws.pageLayout or ws.freezePanes!) */
-  async function purgeLegacyPrintNames(context, ws) {
-    try {
-      ws.names.load("items/name");
-      await context.sync();
-      let del = false;
-      ws.names.items.forEach((nm) => {
-        if (lc(nm.name).includes("print_area") || lc(nm.name).includes("print_titles")) {
-          nm.delete();
-          del = true;
-        }
-      });
-      if (del) await context.sync();
-    } catch { /* ignore */ }
-  }
-
-  /* Verify & upgrade formulas, table references, and active-table DV on a BOM sheet (never corrupts freezePanes/pageLayout/styles!) */
-  async function repairBomSheet(context, wb, ws, matInfo, opts = {}, log = noop) {
-    ws.tables.load("items/name");
-    await context.sync();
-    const bomT = firstTable(ws.tables.items, "bom_");
-    const plT = firstTable(ws.tables.items, "pl_");
-    if (!bomT) return;
-
-    const bomName = bomT.name;
-    const plName = plT ? plT.name : "";
-    const bomBody = bomT.getDataBodyRange().load(["formulas", "rowCount"]);
-    const plBody = plT ? plT.getDataBodyRange().load(["formulas", "rowCount"]) : null;
-    const rO2 = ws.getRange("O2").load("formulas");
-    const rAE1 = ws.getRange("AE1").load("values");
-    await context.sync();
-
-    pauseExcel(context);
-    if (!isFormula(rO2.formulas[0][0]) || String(rO2.formulas[0][0]).includes("#REF!")) {
-      rO2.formulas = [[canonical.O2()]];
-    }
-    // Always write native Excel 365 M4, AL6 (dynamic spill), AB4 & AD2 via .formulas so XLDAPR metadata is registered cleanly
-    ws.getRange("M4").formulas = [[canonical.M4(bomName)]];
-    ws.getRange("AL6").formulas = [[canonical.AL6(bomName)]];
-    if (plName) {
-      ws.getRange("AB4").formulas = [[canonical.AB4()]];
-      ws.getRange("AD2").formulas = [[canonical.AD2(bomName, plName)]];
-    }
-    if (isBlank(rAE1.values[0][0])) rAE1.values = [[6000]];
-
-    // Rewrite stale table refs (and upgrade formulas to pure Excel 365 LET/XMATCH/AL6# when requested)
-    let bomChanged = false;
-    const bomOut = bomBody.formulas.map((row, idx) => {
-      const rNum = 6 + idx;
-      return row.map((cell, cIdx) => {
-        let fixed = cell;
-        if (opts.srcBomName && opts.srcBomName !== bomName) fixed = replaceTableRef(fixed, opts.srcBomName, bomName);
-        if (opts.origCopiedBomName && opts.origCopiedBomName !== bomName) fixed = replaceTableRef(fixed, opts.origCopiedBomName, bomName);
-        if (opts.upgrade365) {
-          if (cIdx === 0) fixed = canonical.bomSn(bomName, rNum);
-          else if (cIdx === 8) fixed = canonical.bomI(bomName);
-          else if (cIdx === 9) fixed = canonical.bomJ(bomName, rNum);
-          else if (cIdx === 11) fixed = canonical.bomL(bomName);
-          else if (cIdx === 12) fixed = canonical.bomM(bomName);
-        }
-        if (fixed !== cell) bomChanged = true;
-        return fixed;
-      });
-    });
-    if (bomChanged) bomBody.formulas = bomOut;
-
-    if (plBody) {
-      let plChanged = false;
-      const plOut = plBody.formulas.map((row, idx) => {
-        const rNum = 6 + idx;
-        return row.map((cell, cIdx) => {
-          let fixed = cell;
-          if (opts.srcBomName && opts.srcBomName !== bomName) fixed = replaceTableRef(fixed, opts.srcBomName, bomName);
-          if (opts.origCopiedBomName && opts.origCopiedBomName !== bomName) fixed = replaceTableRef(fixed, opts.origCopiedBomName, bomName);
-          if (opts.srcPlName && opts.srcPlName !== plName) fixed = replaceTableRef(fixed, opts.srcPlName, plName);
-          if (opts.origCopiedPlName && opts.origCopiedPlName !== plName) fixed = replaceTableRef(fixed, opts.origCopiedPlName, plName);
-          if (opts.upgrade365) {
-            if (cIdx === 0) fixed = canonical.plO(plName, rNum);
-            else if (cIdx === 1) fixed = canonical.plP(plName);
-            else if (cIdx === 2) fixed = canonical.plQ(plName);
-            else if (cIdx === 3) fixed = canonical.plR(bomName, plName);
-            else if (cIdx === 4) fixed = canonical.plS(bomName, plName, rNum);
-            else if (cIdx === 5) fixed = canonical.plT(plName);
-            else if (cIdx === 6) fixed = canonical.plU(plName, rNum);
-            else if (cIdx === 11) fixed = canonical.plZ(plName, rNum);
-            else if (cIdx === 13) fixed = canonical.plAB();
-          }
-          if (fixed !== cell) plChanged = true;
-          return fixed;
-        });
-      });
-      if (plChanged) plBody.formulas = plOut;
-    }
-
-    // Keep helper rows/columns hidden without touching freezePanes or pageLayout
-    ws.getRange("5:5").rowHidden = true;
-    ws.getRange("M:M").columnHidden = true;
-    ws.getRange("AB:AB").columnHidden = true;
-    ws.getRange("AL:AL").columnHidden = true;
-    await context.sync();
-
-    if (opts.purgePrintNames) {
-      await purgeLegacyPrintNames(context, ws);
-    }
-
-    if (opts.ensureValidation || matInfo?.usedRangeFallback) {
-      await applyBomValidation(context, ws, bomT, matInfo, log);
-    }
-  }
-
-
-  /* ---------------- Template on demand (NO resident hidden BOM Blank sheet = no lag) ---------------- */
-  async function getTemplateB64() {
-    let b64 = window.BOM_TEMPLATE_B64;
-    if (b64) return b64;
-    const res = await fetch(new URL("template.xlsx", location.href).href + "?t=" + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error(`Could not load template.xlsx (${res.status}).`);
-    const u = new Uint8Array(await res.arrayBuffer());
-    let bin = "";
-    for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode(...u.subarray(i, i + 0x8000));
-    return btoa(bin);
-  }
-
-  /* Insert only the named sheet(s) from the embedded template; returns the new worksheet objects keyed by template name */
-  async function insertTemplateSheets(context, wb, sheetNames) {
-    if (!Office?.context?.requirements?.isSetSupported("ExcelApi", "1.13")) {
-      throw new Error("Template import requires Microsoft 365 or Excel on the Web (ExcelApi 1.13).");
-    }
-    const b64 = await getTemplateB64();
-    wb.worksheets.load("items/name");
-    await context.sync();
-    const before = new Set(wb.worksheets.items.map((w) => w.name));
-    wb.insertWorksheetsFromBase64(b64, {
-      sheetNamesToInsert: sheetNames,
-      positionType: Excel.WorksheetPositionType.end
-    });
-    await context.sync();
-    wb.worksheets.load("items/name");
-    await context.sync();
-    const added = wb.worksheets.items.filter((w) => !before.has(w.name));
-    // drop anything extra that came along (README / Formulas / unrequested sheets)
-    const want = new Set(sheetNames.map(lc));
-    const out = {};
-    for (const w of added) {
-      const key = sheetNames.find((n) => lc(w.name) === lc(n) || lc(w.name).startsWith(lc(n)));
-      if (key && !out[key]) out[key] = w;
-      else if (!want.has(lc(w.name))) { try { w.delete(); } catch { /* ignore */ } }
-    }
-    await context.sync();
-    return out;
-  }
-
-  /* Remove the old hidden "BOM Blank" sheet left by v1.8–v3.0 (its ~730 live formulas, 20 CF rules and spill range
-     are what caused typing lag). Only a HIDDEN sheet with that exact name is removed. */
-  async function removeLegacyBlankIn(context, wb) {
-    const ws = wb.worksheets.getItemOrNullObject(BLANK);
-    ws.load("visibility");
-    await context.sync();
-    if (ws.isNullObject || ws.visibility === "Visible") return false;
-    ws.delete();
-    await context.sync();
-    return true;
-  }
-
-  async function removeLegacyBlank() {
-    let removed = false;
-    await runExcel(async (context) => {
-      removed = await removeLegacyBlankIn(context, context.workbook);
-    });
-    return removed;
-  }
-
-  /* ---------------- Template Import (Master sheet only) ---------------- */
-  async function importTemplate(log = noop) {
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        wb.worksheets.load("items/name");
-        await context.sync();
-        const hasMaster = wb.worksheets.items.some((w) => lc(w.name) === lc(MASTER));
-        if (!hasMaster) {
-          log("Importing Master Unique Materials sheet ...");
-          const got = await insertTemplateSheets(context, wb, [MASTER]);
-          const master = got[MASTER];
-          if (!master) throw new Error("Template did not contain Master Unique Materials.");
-          if (master.name !== MASTER) master.name = MASTER;
-          await context.sync();
-        }
-        await ensureMasterNames(context, wb, log);
-        if (await removeLegacyBlankIn(context, wb)) log("Removed old hidden BOM Blank sheet (it caused typing lag).");
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.recalculate);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
-    });
-    log("Master Unique Materials ready. BOM sheets are built fresh from the template when you add them.");
-  }
-
-  /* ---------------- Inspect Workbook ---------------- */
-  async function inspectWorkbook() {
-    const out = {
-      hasMaster: false,
-      hasBlank: false,
-      needsTemplate: false,
-      projectTitle: "",
-      projectMode: null,
-      allSheets: [],
-      bomSheets: [],
-      convertedSheets: []
-    };
-    const SKIP = new Set(["master unique materials", "bom blank", "compiled purchase list", "formulas", "readme"]);
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      wb.worksheets.load("items/name,items/visibility,items/position");
-      await context.sync();
-      const sheets = wb.worksheets.items;
-      sheets.forEach((ws) => ws.tables.load("items/name"));
-      await context.sync();
-
-      out.allSheets = sheets.map((ws) => ws.name);
-      out.hasMaster = sheets.some((ws) => lc(ws.name) === lc(MASTER));
-      out.hasBlank = sheets.some((ws) => lc(ws.name) === lc(BLANK));
-      out.projectMode = await readProjectProp(context, wb);
-
-      const bomWs = sheets.filter((ws) => Boolean(firstTable(ws.tables.items, "bom_")));
-      const candConv = sheets.filter((ws) =>
-        ws.visibility === "Visible" && !SKIP.has(lc(ws.name)) && !firstTable(ws.tables.items, "bom_")
-      );
-
-      const a1Loads = bomWs.map((ws) => ws.getRange("A1").load("values"));
-      const convLoads = candConv.map((ws) => ws.getRange("A1:P4").load("values"));
-      await context.sync();
-
-      bomWs.forEach((ws, idx) => {
-        const hidden = ws.visibility !== "Visible";
-        out.bomSheets.push({ name: ws.name, hidden });
-        const t = String(a1Loads[idx].values[0][0] || "");
-        if (!out.projectTitle && !hidden && t.startsWith(TITLE_PREFIX) && !t.includes("[")) {
-          out.projectTitle = t.slice(TITLE_PREFIX.length).trim();
-        }
-      });
-
-      candConv.forEach((ws, idx) => {
-        const v = convLoads[idx].values;
-        const a1 = lc(v[0]?.[0]);
-        const o2 = lc(v[1]?.[14]);
-        const b3 = lc(v[2]?.[1]), b4 = lc(v[3]?.[1]);
-        const c3 = lc(v[2]?.[2]), c4 = lc(v[3]?.[2]);
-        const isBom = a1.includes("bill of materials") || o2.includes("purchase list") ||
-          ((b3.includes("description") || b4.includes("description")) && (c3.includes("material") || c4.includes("material")));
-        if (isBom) out.convertedSheets.push(ws.name);
-      });
-    });
-    out.needsTemplate = !out.hasMaster && out.bomSheets.length === 0 && out.convertedSheets.length === 0;
-    return out;
-  }
-
-  /* ---------------- Clear Copied Sheet Inputs (preserving formulas & restoring PO Weight footer) ---------------- */
-  async function clearTableInputs(context, table, colNames, isPl) {
-    table.columns.load("items/name");
-    await context.sync();
-    const targets = [];
-    for (const col of table.columns.items) {
-      if (colNames.includes(col.name)) {
-        const rng = col.getDataBodyRange().load(["formulas", "rowIndex"]);
-        targets.push({ name: col.name, rng });
-      }
-    }
-    await context.sync();
-    for (const item of targets) {
-      const startRow = (item.rng.rowIndex || 5) + 1;
-      let dirty = false;
-      const out = item.rng.formulas.map((row, idx) => {
-        const v = row[0];
-        if (isPl && item.name === "PO Weight") {
-          const f = canonical.poWeight(startRow + idx);
-          if (v !== f) { dirty = true; return [f]; }
-          return [v];
-        }
-        if (!isFormula(v) && v !== "") { dirty = true; return [""]; }
-        return [v];
-      });
-      if (dirty) item.rng.formulas = out;
-    }
-    await context.sync();
-  }
-
-  /* ---------------- Add Lightweight BOM Sheet (All v2.3–v2.6 Lag & Glitch Fixes Included) ---------------- */
-  async function addBomSheet(opts, log = noop) {
-    const newName = String(opts.name || "").trim();
-    const warnings = [];
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        const matInfo = await ensureMasterNames(context, wb, log);
-        wb.worksheets.load("items/name,items/position,items/visibility");
-        wb.tables.load("items/name");
-        await context.sync();
-
-        const err = checkSheetName(newName, wb.worksheets.items.map((w) => w.name));
-        if (err) throw new Error(err);
-
-        const useTemplate = opts.source === BLANK || !opts.source;
-        let src = null;
-        if (!useTemplate) {
-          src = wb.worksheets.items.find((w) => w.name === opts.source);
-          if (!src) throw new Error(`Source sheet "${opts.source}" was not found.`);
-        }
-
-        wb.worksheets.items.forEach((ws) => ws.tables.load("items/name"));
-        await context.sync();
-        let srcBom = null;
-        let srcPl = null;
-        if (src) {
-          srcBom = firstTable(src.tables.items, "bom_");
-          srcPl = firstTable(src.tables.items, "pl_");
-          if (!srcBom) throw new Error("Source sheet has no BOM table (bom_...).");
-        }
-
-        // Place new sheet after the last BOM sheet
-        let anchor = src;
-        let lastPos = -1;
-        for (const ws of wb.worksheets.items) {
-          if (ws.name !== BLANK && firstTable(ws.tables.items, "bom_") && ws.position > lastPos) {
-            anchor = ws;
-            lastPos = ws.position;
-          }
-        }
-
-        log(`Creating "${newName}" ${useTemplate ? "from the template" : `from "${opts.source}"`} ...`);
-        pauseExcel(context);
-        let copy;
-        if (useTemplate) {
-          const got = await insertTemplateSheets(context, wb, [BLANK]);
-          copy = got[BLANK];
-          if (!copy) throw new Error("Template did not contain the BOM sheet.");
-          copy.name = newName;
-          if (lastPos >= 0) copy.position = lastPos + 1;
-        } else {
-          copy = src.copy(Excel.WorksheetPositionType.after, anchor);
-          copy.name = newName;
-        }
-        copy.visibility = Excel.SheetVisibility.visible;
-        copy.tables.load("items/name");
-        await context.sync();
-
-        const bomT = firstTable(copy.tables.items, "bom_");
-        const plT = firstTable(copy.tables.items, "pl_");
-        if (!bomT) {
-          copy.delete();
-          await context.sync();
-          throw new Error("New sheet was missing its BOM table and was removed.");
-        }
-        const origCopiedBomName = bomT.name;
-        const origCopiedPlName = plT ? plT.name : "";
-        const al6Check = copy.getRange("AL6").load("formulas");
-
-        wb.tables.load("items/name");
-        await context.sync();
-        const needs365Upgrade = useTemplate || !isFormula(al6Check.formulas[0][0]);
-        const taken = wb.tables.items.map((t) => t.name);
-        const id = safeId(newName);
-        const bomName = uniqueName(`bom_${id}`, taken);
-        const plName = uniqueName(`pl_${id}`, taken.concat([bomName]));
-
-        pauseExcel(context);
-        bomT.name = bomName;
-        if (plT) plT.name = plName;
-        copy.getRange("A2").values = [[newName]];
-        if (opts.project && String(opts.project).trim()) {
-          copy.getRange("A1").values = [[TITLE_PREFIX + String(opts.project).trim()]];
-        }
-        await context.sync();
-
-        if (opts.clear && !useTemplate) {
-          log("Clearing entered items ...");
-          await clearTableInputs(context, bomT, BOM_INPUT_COLS, false);
-          if (plT) await clearTableInputs(context, plT, PL_INPUT_COLS, true);
-        }
-
-        await repairBomSheet(context, wb, copy, matInfo, {
-          srcBomName: srcBom ? srcBom.name : "",
-          srcPlName: srcPl ? srcPl.name : "",
-          origCopiedBomName,
-          origCopiedPlName,
-          upgrade365: needs365Upgrade,
-          ensureValidation: true
-        }, log);
-
-        // One-time cleanup of the old resident hidden BOM Blank (v3.0 and earlier)
-        try { await removeLegacyBlankIn(context, wb); } catch { /* ignore */ }
-
-        // Single clean activation & B6 selection — ZERO freezePanes, ZERO pageLayout, ZERO fullRebuild, ZERO tab flipping!
-        copy.activate();
-        copy.getRange("B6").select();
-        await context.sync();
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.recalculate);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
-    });
-    return { name: newName, warnings };
-  }
-
-  /* ---------------- One-Click Repair & Excel 365 Upgrade ---------------- */
-  async function repairWorkbook(opts = {}, log = noop) {
-    const selected = Array.isArray(opts.sheets) ? new Set(opts.sheets.map(lc)) : null;
-    if (selected && selected.size === 0) throw new Error("Select at least one BOM sheet to repair.");
-
-    let repaired = 0;
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        log("Verifying Master sheet & workbook named ranges ...");
-        const matInfo = await ensureMasterNames(context, wb, log);
-        if (await removeLegacyBlankIn(context, wb)) log("Removed old hidden BOM Blank sheet (it caused typing lag).");
-
-        // Purge workbook-level volatile Print_Area / Print_Titles from legacy v1.x/v2.x workbooks
-        wb.names.load("items/name");
-        wb.worksheets.load("items/name,items/visibility");
-        await context.sync();
-        let purged = false;
-        wb.names.items.forEach((nm) => {
-          if (lc(nm.name).includes("print_area") || lc(nm.name).includes("print_titles")) {
-            try { nm.delete(); purged = true; } catch { /* ignore */ }
-          }
-        });
-        if (purged) await context.sync();
-
-        const sheets = wb.worksheets.items;
-        sheets.forEach((ws) => ws.tables.load("items/name"));
-        await context.sync();
-
-        for (const ws of sheets) {
-          if (!firstTable(ws.tables.items, "bom_")) continue;
-          if (selected && !selected.has(lc(ws.name))) continue;
-          log(`Upgrading & repairing "${ws.name}" to Excel 365 formulas ...`);
-          await repairBomSheet(context, wb, ws, matInfo, {
-            upgrade365: true,
-            purgePrintNames: true,
-            ensureValidation: true
-          }, log);
-          repaired++;
-        }
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
-    });
-
-    log(`Repaired & upgraded ${repaired} BOM sheet(s).`);
-    return { sheetsRepaired: repaired };
-  }
-
-  /* ---------------- Materials CRUD & Bulk Apply ---------------- */
-  async function listMaterials() {
-    const out = { rows: [], categories: [], projectMode: null };
-    await runExcel(async (context) => {
-      const m = await openMaster(context);
-      const body = m.t.getDataBodyRange().load("values");
-      out.projectMode = await readProjectProp(context, context.workbook);
-      await context.sync();
-      const cats = new Set();
-      body.values.forEach((r, i) => {
-        const obj = rowToMaterial(r, i, m.idx);
-        if (!obj.material) return;
-        out.rows.push(obj);
-        if (obj.category) cats.add(obj.category);
-      });
-      out.categories = [...cats].sort();
-    });
-    return out;
-  }
-
-  async function refreshRangeBasedDropdowns(context, wb, matInfo) {
-    if (!matInfo?.usedRangeFallback) return;
-    wb.worksheets.load("items/name");
-    await context.sync();
-    wb.worksheets.items.forEach((ws) => ws.tables.load("items/name"));
-    await context.sync();
-    for (const ws of wb.worksheets.items) {
-      const bomT = firstTable(ws.tables.items, "bom_");
-      if (bomT) await applyBomValidation(context, ws, bomT, matInfo);
-    }
-  }
-
-  async function addMaterial(raw) {
-    const item = window.BomStore.normalizeMaterial(raw);
-    const nowIso = new Date().toISOString();
-    item.lastAction = "added";
-    item.lastModified = nowIso;
-
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      const m = await openMaster(context);
-      await ensureAuditColumns(context, m);
-      const projectMeta = await readProjectProp(context, wb);
-      const cur = m.t.getDataBodyRange().load("values");
-      await context.sync();
-      const names = cur.values.map((r) => String(r[m.idx.material] || "").trim()).filter(Boolean);
-      const errs = validateMaterial(item, names, "add");
-      if (errs.length) throw new Error(errs[0]);
-
-      // Fill first blank row if present (e.g. blank Project-Only sheet), else append row
-      const blankIdx = cur.values.findIndex((r) => !String(r[m.idx.material] || "").trim());
-      let targetRow;
-      if (blankIdx >= 0) {
-        targetRow = cur.getRow(blankIdx);
-      } else {
-        m.t.rows.add();
-        await context.sync();
-        const body = m.t.getDataBodyRange().load("rowCount");
-        await context.sync();
-        targetRow = body.getRow(body.rowCount - 1);
-      }
-
-      const vals = {
-        material: item.material, category: item.category, unit: item.unit,
-        lin: item.lin, area: item.area, piece: item.piece, sl: item.sl, sw: item.sw,
-        remarks: item.remarks, lastAction: "Added", lastModified: formatStamp(nowIso)
-      };
-      for (const [k, v] of Object.entries(vals)) {
-        if (m.idx[k] >= 0) targetRow.getCell(0, m.idx[k]).values = [[v === null ? "" : v]];
-      }
-      await context.sync();
-
-      await writeMasterBanner(
-        context, m.ws,
-        formatBannerSummary([{ material: item.material, type: "added" }], nowIso, projectMeta),
-        Boolean(projectMeta)
-      );
-      const matInfo = await ensureMasterNames(context, wb);
-      await refreshRangeBasedDropdowns(context, wb, matInfo);
-      wb.application.calculate(Excel.CalculationType.recalculate);
-      await context.sync();
-    });
-    return item;
-  }
-
-  async function updateMaterial(originalNameOrRaw, maybeRaw) {
-    const hasOrig = typeof originalNameOrRaw === "string" && maybeRaw && typeof maybeRaw === "object";
-    const lookupName = hasOrig ? originalNameOrRaw.trim() : "";
-    const item = window.BomStore.normalizeMaterial(hasOrig ? maybeRaw : originalNameOrRaw);
-    const nowIso = new Date().toISOString();
-    item.lastAction = "modified";
-    item.lastModified = nowIso;
-
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      const m = await openMaster(context);
-      await ensureAuditColumns(context, m);
-      const projectMeta = await readProjectProp(context, wb);
-      const body = m.t.getDataBodyRange().load("values");
-      await context.sync();
-      const targetKey = lc(lookupName || item.material);
-      const at = body.values.findIndex((r) => lc(r[m.idx.material]) === targetKey);
-      if (at < 0) throw new Error(`"${lookupName || item.material}" is no longer in the sheet.`);
-      const renamed = lc(item.material) !== targetKey;
-      const otherNames = body.values
-        .map((r, i) => (i === at ? "" : String(r[m.idx.material] || "").trim()))
-        .filter(Boolean);
-      const errs = validateMaterial(item, otherNames, renamed ? "add" : "edit");
-      if (errs.length) throw new Error(errs[0]);
-
-      const row = body.getRow(at);
-      for (const k of ["material", "category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"]) {
-        if (m.idx[k] >= 0) row.getCell(0, m.idx[k]).values = [[item[k] === null ? "" : item[k]]];
-      }
-      if (m.idx.lastAction >= 0) row.getCell(0, m.idx.lastAction).values = [["Modified"]];
-      if (m.idx.lastModified >= 0) row.getCell(0, m.idx.lastModified).values = [[formatStamp(nowIso)]];
-      await context.sync();
-
-      await writeMasterBanner(
-        context, m.ws,
-        formatBannerSummary([{ material: item.material, type: "modified" }], nowIso, projectMeta),
-        Boolean(projectMeta)
-      );
-      wb.application.calculate(Excel.CalculationType.recalculate);
-      await context.sync();
-    });
-    return item;
-  }
-
-  async function deleteMaterial(materialName) {
-    const target = String(materialName || "").trim();
-    const nowIso = new Date().toISOString();
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      const m = await openMaster(context);
-      const projectMeta = await readProjectProp(context, wb);
-      const body = m.t.getDataBodyRange().load(["values", "rowCount"]);
-      await context.sync();
-      const at = body.values.findIndex((r) => lc(r[m.idx.material]) === lc(target));
-      if (at < 0) throw new Error(`"${target}" was not found.`);
-
-      if (body.rowCount <= 1) {
-        const row = body.getRow(0);
-        Object.keys(MASTER_HEADERS).forEach((k) => {
-          if (m.idx[k] >= 0) row.getCell(0, m.idx[k]).values = [[""]];
-        });
-      } else {
-        m.t.rows.getItemAt(at).delete();
-      }
-      await context.sync();
-
-      await writeMasterBanner(
-        context, m.ws,
-        formatBannerSummary([{ material: target, type: "removed" }], nowIso, projectMeta),
-        Boolean(projectMeta)
-      );
-      const matInfo = await ensureMasterNames(context, wb);
-      await refreshRangeBasedDropdowns(context, wb, matInfo);
-      wb.application.calculate(Excel.CalculationType.recalculate);
-      await context.sync();
-    });
-    return target;
-  }
-
-  /* Append multiple previously saved materials into the active Master sheet (skips duplicates by name) */
-  async function addMaterialsBulk(rawItems) {
-    const clean = (Array.isArray(rawItems) ? rawItems : [])
-      .map((r) => window.BomStore.normalizeMaterial(r))
-      .filter((m) => m.material);
-    if (!clean.length) return { added: [], skipped: [] };
-
-    const nowIso = new Date().toISOString();
-    const added = [];
-    const skipped = [];
-
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      const m = await openMaster(context);
-      await ensureAuditColumns(context, m);
-      const projectMeta = await readProjectProp(context, wb);
-
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        const body = m.t.getDataBodyRange().load("values");
-        await context.sync();
-        const existing = new Set();
-        const blanks = [];
-        body.values.forEach((row, i) => {
-          const name = String(row[m.idx.material] || "").trim();
-          if (!name) blanks.push(i);
-          else existing.add(lc(name));
-        });
-
-        const toAdd = [];
-        for (const item of clean) {
-          const key = lc(item.material);
-          if (existing.has(key)) {
-            skipped.push(item.material);
-            continue;
-          }
-          existing.add(key);
-          toAdd.push({ ...item, lastAction: "added", lastModified: nowIso });
-        }
-
-        if (toAdd.length) {
-          const writeInto = (range, idx, item) => {
-            for (const k of ["material", "category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"]) {
-              if (m.idx[k] >= 0) range.getCell(idx, m.idx[k]).values = [[item[k] === null ? "" : item[k]]];
-            }
-            if (m.idx.lastAction >= 0) range.getCell(idx, m.idx.lastAction).values = [["Added"]];
-            if (m.idx.lastModified >= 0) range.getCell(idx, m.idx.lastModified).values = [[formatStamp(nowIso)]];
-          };
-
-          const useBlank = toAdd.slice(0, blanks.length);
-          const extra = toAdd.slice(blanks.length);
-          pauseExcel(context);
-          useBlank.forEach((item, k) => writeInto(body, blanks[k], item));
-          await context.sync();
-
-          if (extra.length) {
-            for (let k = 0; k < extra.length; k++) m.t.rows.add();
-            await context.sync();
-            const b2 = m.t.getDataBodyRange().load("rowCount");
-            await context.sync();
-            const first = b2.rowCount - extra.length;
-            pauseExcel(context);
-            extra.forEach((item, j) => writeInto(b2, first + j, item));
-            await context.sync();
-          }
-
-          toAdd.forEach((it) => added.push(it));
-          await writeMasterBanner(
-            context, m.ws,
-            formatBannerSummary(toAdd.map((it) => ({ material: it.material, type: "added" })), nowIso, projectMeta),
-            Boolean(projectMeta)
-          );
-          const matInfo = await ensureMasterNames(context, wb);
-          await refreshRangeBasedDropdowns(context, wb, matInfo);
-        }
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.recalculate);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
-    });
-    return { added, skipped };
-  }
-
-  async function stampAudit(entries, timeIso, projectMeta) {
-    if (!entries || !entries.length) return;
-    await runExcel(async (context) => {
-      const m = await openMaster(context);
-      const rowEntries = entries.filter((e) => e.type !== "removed" && e.material);
-      if (rowEntries.length) {
-        await ensureAuditColumns(context, m);
-        const body = m.t.getDataBodyRange().load("values");
-        await context.sync();
-        const rowMap = new Map();
-        body.values.forEach((r, i) => {
-          const k = lc(r[m.idx.material]);
-          if (k && !rowMap.has(k)) rowMap.set(k, i);
-        });
-        let touched = false;
-        for (const e of rowEntries) {
-          const at = rowMap.get(lc(e.material));
-          if (at === undefined) continue;
-          if (m.idx.lastAction >= 0) body.getCell(at, m.idx.lastAction).values = [[actionLabel(e.type) || "Modified"]];
-          if (m.idx.lastModified >= 0) body.getCell(at, m.idx.lastModified).values = [[formatStamp(e.time || timeIso)]];
-          touched = true;
-        }
-        if (touched) await context.sync();
-      }
-      await writeMasterBanner(
-        context, m.ws,
-        formatBannerSummary(entries, timeIso, projectMeta),
-        Boolean(projectMeta)
-      );
-    });
-  }
-
-  /* Replace or sync the Master Unique Materials table from a given list (batched for speed) */
-  async function applyMaterialList(list, opts = {}) {
-    const syncRemovals = Boolean(opts.syncRemovals);
-    const replaceAll = Boolean(opts.replaceAll);
-    const projectMeta = opts.projectMeta === undefined ? undefined : opts.projectMeta;
-    const normalized = list.map(window.BomStore.normalizeMaterial).filter((m) => m.material);
-    const res = { added: 0, updated: 0, removed: 0 };
-
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      const m = await openMaster(context);
-      await ensureAuditColumns(context, m);
-      if (projectMeta !== undefined) {
-        await writeProjectProp(context, wb, projectMeta);
-      }
-      const activeProject = projectMeta !== undefined ? projectMeta : await readProjectProp(context, wb);
-
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        const body = m.t.getDataBodyRange().load(["values", "formulas", "rowCount"]);
-        await context.sync();
-
-        if (replaceAll) {
-          // Fast full replacement (used for switching Project-Only <-> Global Master)
-          const targetCount = Math.max(1, normalized.length);
-          if (body.rowCount > targetCount) {
-            for (let i = body.rowCount - 1; i >= targetCount; i--) m.t.rows.getItemAt(i).delete();
-            await context.sync();
-          } else if (body.rowCount < targetCount) {
-            for (let i = body.rowCount; i < targetCount; i++) m.t.rows.add();
-            await context.sync();
-          }
-          const b2 = m.t.getDataBodyRange().load("rowCount");
-          await context.sync();
-
-          const grid = [];
-          for (let i = 0; i < targetCount; i++) {
-            const rNum = 5 + i;
-            const item = normalized[i];
-            const row = new Array(m.ncols).fill("");
-            if (item) {
-              if (m.idx.material >= 0) row[m.idx.material] = item.material;
-              if (m.idx.category >= 0) row[m.idx.category] = item.category;
-              if (m.idx.unit >= 0) row[m.idx.unit] = item.unit;
-              if (m.idx.lin >= 0) row[m.idx.lin] = item.lin ?? "";
-              if (m.idx.area >= 0) row[m.idx.area] = item.area ?? "";
-              if (m.idx.piece >= 0) row[m.idx.piece] = item.piece ?? "";
-              if (m.idx.sl >= 0) row[m.idx.sl] = item.sl ?? "";
-              if (m.idx.sw >= 0) row[m.idx.sw] = item.sw ?? "";
-              if (m.idx.remarks >= 0) row[m.idx.remarks] = item.remarks;
-              if (m.idx.lastAction >= 0 && item.lastAction) row[m.idx.lastAction] = actionLabel(item.lastAction);
-              if (m.idx.lastModified >= 0 && item.lastModified) row[m.idx.lastModified] = formatStamp(item.lastModified);
-            }
-            // Preserve calculated Sheet Area (col 8) & Sheet Weight (col 9) formulas
-            const cArea = m.headers.findIndex((h) => h.startsWith("Sheet Area"));
-            const cWt = m.headers.findIndex((h) => h.startsWith("Sheet Weight"));
-            if (cArea >= 0) row[cArea] = `=IF(AND(ISNUMBER(G${rNum}),ISNUMBER(H${rNum})),G${rNum}*H${rNum}/10^6,"")`;
-            if (cWt >= 0) row[cWt] = `=IF(AND(ISNUMBER(I${rNum}),ISNUMBER(E${rNum})),I${rNum}*E${rNum},"")`;
-            grid.push(row);
-          }
-          pauseExcel(context);
-          b2.formulas = grid;
-          await context.sync();
-          res.added = normalized.length;
-        } else {
-          // Incremental sync (adds missing, updates modified, optionally removes deleted)
-          const byName = new Map();
-          const blanks = [];
-          body.values.forEach((row, i) => {
-            const name = String(row[m.idx.material] || "").trim();
-            if (!name) blanks.push(i);
-            else if (!byName.has(lc(name))) byName.set(lc(name), i);
+  // ---- helpers ----
+  function run(opts, body) {
+    if (typeof opts === 'function') { body = opts; opts = {}; }
+    opts = opts || {};
+    var ctxOpts = { delayForCellEdit: true };
+    return Excel.run(ctxOpts, function (ctx) {
+      var app = ctx.workbook.application;
+      var prevMode = null;
+      var p = Promise.resolve();
+      if (opts.heavy) {
+        p = p.then(function () {
+          prevMode = Excel.CalculationMode;       // capture enum reference
+          return ctx.sync().then(function () {
+            app.calculationMode = 'Manual';
+            app.suspendApiCalculationUntilNextSync();
+            app.suspendScreenUpdatingUntilNextSync();
           });
-          const wanted = new Map(normalized.map((item) => [lc(item.material), item]));
-          const toAdd = [];
-
-          pauseExcel(context);
-          for (const item of normalized) {
-            const at = byName.get(lc(item.material));
-            if (at === undefined) { toAdd.push(item); continue; }
-            const curObj = rowToMaterial(body.values[at], at, m.idx);
-            const ch = window.BomStore.changedFields(curObj, item);
-            let did = false;
-            for (const k of ch) {
-              if (m.idx[k] < 0 || isFormula(body.formulas[at][m.idx[k]])) continue;
-              body.getCell(at, m.idx[k]).values = [[item[k] ?? ""]];
-              did = true;
-            }
-            if (did) {
-              if (m.idx.lastAction >= 0 && item.lastAction) body.getCell(at, m.idx.lastAction).values = [[actionLabel(item.lastAction)]];
-              if (m.idx.lastModified >= 0 && item.lastModified) body.getCell(at, m.idx.lastModified).values = [[formatStamp(item.lastModified)]];
-              res.updated++;
-            }
-          }
-
-          const writeInto = (range, idx, item) => {
-            for (const k of ["material", "category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"]) {
-              if (m.idx[k] >= 0) range.getCell(idx, m.idx[k]).values = [[item[k] ?? ""]];
-            }
-            if (m.idx.lastAction >= 0 && item.lastAction) range.getCell(idx, m.idx.lastAction).values = [[actionLabel(item.lastAction)]];
-            if (m.idx.lastModified >= 0 && item.lastModified) range.getCell(idx, m.idx.lastModified).values = [[formatStamp(item.lastModified)]];
-          };
-
-          const useBlank = toAdd.slice(0, blanks.length);
-          const extra = toAdd.slice(blanks.length);
-          useBlank.forEach((item, k) => writeInto(body, blanks[k], item));
-          await context.sync();
-
-          if (extra.length) {
-            for (let k = 0; k < extra.length; k++) m.t.rows.add();
-            await context.sync();
-            const b2 = m.t.getDataBodyRange().load("rowCount");
-            await context.sync();
-            const first = b2.rowCount - extra.length;
-            pauseExcel(context);
-            extra.forEach((item, j) => writeInto(b2, first + j, item));
-            await context.sync();
-          }
-
-          if (syncRemovals && wanted.size > 0) {
-            const b3 = m.t.getDataBodyRange().load(["values", "rowCount"]);
-            await context.sync();
-            const delIdx = [];
-            b3.values.forEach((row, i) => {
-              const name = String(row[m.idx.material] || "").trim();
-              if (name && !wanted.has(lc(name))) delIdx.push(i);
-            });
-            if (delIdx.length && delIdx.length < b3.rowCount) {
-              for (let i = delIdx.length - 1; i >= 0; i--) m.t.rows.getItemAt(delIdx[i]).delete();
-              await context.sync();
-              res.removed = delIdx.length;
-            }
-          }
-          res.added = toAdd.length;
+        });
+      }
+      return p.then(function () { return body(ctx); }).then(function (r) {
+        if (opts.heavy) {
+          // restore automatic calc on the same context (suspend* auto-end with the batch)
+          app.calculationMode = 'Automatic';
         }
-
-        await writeMasterBanner(
-          context, m.ws,
-          formatBannerSummary(opts.lastChange?.items || [], opts.lastChange?.time, activeProject),
-          Boolean(activeProject)
-        );
-        const matInfo = await ensureMasterNames(context, wb);
-        await refreshRangeBasedDropdowns(context, wb, matInfo);
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.recalculate);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
-    });
-    return res;
-  }
-
-  /* Collect all material names currently referenced across visible BOM sheets */
-  async function getUsedMaterialsInWorkbook() {
-    const used = new Set();
-    await runExcel(async (context) => {
-      const wb = context.workbook;
-      wb.worksheets.load("items/name,items/visibility");
-      await context.sync();
-      wb.worksheets.items.forEach((ws) => ws.tables.load("items/name"));
-      await context.sync();
-      const ranges = [];
-      for (const ws of wb.worksheets.items) {
-        if (ws.name === BLANK && ws.visibility !== "Visible") continue;
-        const bomT = firstTable(ws.tables.items, "bom_");
-        if (!bomT) continue;
-        try {
-          ranges.push(bomT.columns.getItem("Materials").getDataBodyRange().load("values"));
-        } catch { /* ignore */ }
-      }
-      await context.sync();
-      for (const r of ranges) {
-        for (const row of r.values) {
-          const name = String(row[0] || "").trim();
-          if (name) used.add(lc(name));
+        return ctx.sync().then(function () { return r; });
+      }, function (err) {
+        if (opts.heavy) {
+          try { app.calculationMode = 'Automatic'; } catch (e) {}
         }
-      }
+        throw err;
+      });
     });
-    return used;
   }
 
-  /* ---------------- Zero-Hook On-Demand Master Sheet Edit Detection ----------------
-   * IMPORTANT: We intentionally NEVER register ws.onChanged.add(...)!
-   * Attaching Worksheet.onChanged in Excel Desktop installs a persistent COM/WebView2 event hook
-   * that causes workbook-wide typing lag whenever the add-in pane is open (present since v1.8).
-   * Instead, direct edits typed on Master Unique Materials are detected on-demand whenever the
-   * user switches to Materials, clicks Refresh, saves, exports, or isolates a project list.
-   */
-  const snapState = { rows: null, busy: false };
-
-  function setMasterSnap(list) {
-    if (Array.isArray(list)) snapState.rows = list.map(window.BomStore.normalizeMaterial);
+  function sheetExists(ctx, name) {
+    var sh = ctx.workbook.worksheets.getItemOrNullObject(name);
+    return ctx.sync().then(function () { return !sh.isNullObject; });
+  }
+  function listSheetNames(ctx) {
+    var sh = ctx.workbook.worksheets.load('name');
+    return ctx.sync().then(function () { return sh.items.map(function (s) { return s.name; }); });
+  }
+  function isBomSheetName(name) {
+    // BOM sheets are any sheet that is NOT the Master, NOT BOM Blank, NOT flattened.
+    // The repair/convert functions decide their own inclusion lists.
+    return name !== MASTER_SHEET && name !== TEMPLATE_SHEET;
   }
 
-  async function syncDirectMasterEdits(onEvent) {
-    if (snapState.busy) return null;
-    snapState.busy = true;
-    try {
-      const cur = await listMaterials();
-      if (!snapState.rows) {
-        snapState.rows = cur.rows;
-        return { cur, detected: false };
-      }
-      const d = window.BomStore.diffLists(cur.rows, snapState.rows);
-      if (!d.added.length && !d.modified.length && !d.removed.length) {
-        return { cur, detected: false };
-      }
+  // ============================================================
+  // TEMPLATE IMPORT
+  // ============================================================
 
-      const nowIso = new Date().toISOString();
-      const items = [];
-      d.added.forEach((m) => items.push({ type: "added", material: { ...m, lastAction: "added", lastModified: nowIso }, fields: [], time: nowIso }));
-      d.modified.forEach((c) => items.push({ type: "modified", material: { ...c.next, lastAction: "modified", lastModified: nowIso }, fields: c.fields, time: nowIso }));
-      d.removed.forEach((m) => items.push({ type: "removed", material: m, fields: [], time: nowIso }));
+  function ensureTemplate() {
+    return run(function (ctx) {
+      var ws = ctx.workbook.worksheets;
+      var bom = ws.getItemOrNullObject(TEMPLATE_SHEET);
+      var mas = ws.getItemOrNullObject(MASTER_SHEET);
+      return ctx.sync().then(function () {
+        if (bom.isNullObject || mas.isNullObject) {
+          return importTemplateIntoWorkbook(ctx).then(function () {
+            return { imported: true };
+          });
+        }
+        return { imported: false };
+      });
+    });
+  }
 
-      const lastChange = window.BomStore.buildLastChange("sheet", items, nowIso);
-      const stampEntries = items.map((it) => ({ material: it.material.material, type: it.type, time: nowIso }));
+  // Inserts the two template sheets from window.BOM_TEMPLATE_B64, then injects
+  // the canonical Excel 365 formulas and recreates named ranges.
+  function importTemplateIntoWorkbook(ctx) {
+    var b64 = root.BOM_TEMPLATE_B64;
+    if (!b64) return Promise.reject(new Error('BOM_TEMPLATE_B64 missing'));
+    var sheets = ctx.workbook.worksheets;
+    // insertWorksheetsFromBase64 accepts a base64 string of an .xlsx package.
+    sheets.insertWorksheetsFromBase64(b64, { sheetNamesToInsert: [TEMPLATE_SHEET, MASTER_SHEET] });
+    return ctx.sync().then(function () {
+      // After import, fetch the two new sheets and inject formulas / recreate names.
+      return injectFormulasIntoSheet(ctx, TEMPLATE_SHEET).then(function () {
+        return recreateNamedRanges(ctx);
+      });
+    });
+  }
 
-      try { await stampAudit(stampEntries, nowIso, cur.projectMode); } catch { /* non-fatal */ }
+  function importTemplate() { return ensureTemplate(); }
 
-      // Update the rows with fresh audit timestamps before persisting
-      const stampedMap = new Map(items.filter((i) => i.type !== "removed").map((i) => [lc(i.material.material), i.material]));
-      const updatedRows = cur.rows.map((r) => stampedMap.get(lc(r.material)) || r);
+  // ============================================================
+  // NAMED RANGES (workbook-scoped, A1 fallback)
+  // ============================================================
 
-      if (cur.projectMode) {
-        await window.BomStore.saveProjectList(cur.projectMode, updatedRows, lastChange);
-      } else {
-        await window.BomStore.writeGlobalMaster(updatedRows, lastChange);
-      }
-      snapState.rows = updatedRows;
-      const evt = { source: "sheet", time: nowIso, projectMode: cur.projectMode, items };
-      if (typeof onEvent === "function") onEvent(evt);
-      return { cur: { ...cur, rows: updatedRows }, detected: true, evt };
-    } catch {
-      return null;
-    } finally {
-      snapState.busy = false;
+  function recreateNamedRanges(ctx) {
+    var wb = ctx.workbook;
+    // Purge any sheet-scoped shadows first: get all names, delete ones whose
+    // scope is a worksheet and whose name is one of ours.
+    var names = wb.names.load('name,scope,worksheet');
+    return ctx.sync().then(function () {
+      var ours = {};
+      NAMED_RANGES.forEach(function (n) { ours[n.name.toLowerCase()] = true; });
+      names.items.forEach(function (nm) {
+        if (ours[nm.name.toLowerCase()] && nm.scope === 'Worksheet') {
+          nm.delete();
+        }
+      });
+      // Add workbook-scoped names. Use try/catch per name with A1 fallback.
+      NAMED_RANGES.forEach(function (n) {
+        try {
+          wb.names.add(n.name, n.refersTo);
+        } catch (e) {
+          // Fall back to an absolute A1 range on the Master sheet.
+          var fb = a1FallbackForNamedRange(n.name);
+          if (fb) {
+            try { wb.names.add(n.name, "'" + MASTER_SHEET + "'!" + fb); } catch (e2) {}
+          }
+        }
+      });
+      return ctx.sync();
+    });
+  }
+
+  // A1 fallback if structured references aren't accepted for some reason.
+  // tblMat lives at A4:M4 header + data rows 5..N. We use the column letter.
+  function a1FallbackForNamedRange(name) {
+    // Column letters in tblMat: A=Material, C=Primary Unit, D=Lin, E=Area, F=Piece,
+    // G=SheetL, H=SheetW. Use generous end row 999.
+    var map = {
+      materials: 'A5:A999', linwt: 'D5:D999', areawt: 'E5:E999',
+      piecewt: 'F5:F999', wtunit: 'C5:C999', sheetl: 'G5:G999', sheetw: 'H5:H999'
+    };
+    return map[name.toLowerCase()] || null;
+  }
+
+  function purgeVolatileNames(ctx) {
+    // Delete workbook- or sheet-scoped Print_Area / Print_Titles names.
+    var names = ctx.workbook.names.load('name,scope');
+    return ctx.sync().then(function () {
+      names.items.forEach(function (nm) {
+        var ln = nm.name.toLowerCase();
+        if (ln === 'print_area' || ln === 'print_titles' ||
+            ln.indexOf('!print_area') >= 0 || ln.indexOf('!print_titles') >= 0) {
+          try { nm.delete(); } catch (e) {}
+        }
+      });
+      return ctx.sync();
+    });
+  }
+
+  // ============================================================
+  // FORMULA ENGINE (canonical Excel 365 formulas)
+  // ============================================================
+
+  // Build the 2D formula array for the BOM table data rows (A6:M65).
+  function bomFormulas() {
+    var out = [];
+    for (var r = 6; r <= 65; r++) {
+      var prev = r - 1;
+      // A: S.N.
+      var A = '=IF(' + BOM_TABLE + '[@Materials]="","",MAX(A$5:A' + prev + ')+1)';
+      // B-H: user inputs (Description, Materials, Length, Width, Thickness, Qty, Set)
+      var B = '', C = '', D = '', E = '', F = '', G = '', H = '';
+      // I: Unit weight kg/m  (single-LET; only kg/m materials show weight here)
+      var I = '=IF(ROW()=$M$4+1,"Total:",IF(' + BOM_TABLE + '[@Mat Row]="","",LET(u,INDEX(WtUnit,' + BOM_TABLE + '[@Mat Row]),IF(u="kg/m",INDEX(LinWt,' + BOM_TABLE + '[@Mat Row]),""))))';
+      // J: Total Weight (kg) (single-LET handling all three units + Total row sum)
+      var J = '=IF(ROW()=$M$4+1,SUM(J$5:J' + prev + '),IF(' + BOM_TABLE + '[@Mat Row]="","",LET(u,INDEX(WtUnit,' + BOM_TABLE + '[@Mat Row]),q,' + BOM_TABLE + '[@Qty],s,IF(' + BOM_TABLE + '[@Set]="",1,' + BOM_TABLE + '[@Set]),IF(u="kg/m",q*s*' + BOM_TABLE + '[@Length]/1000*INDEX(LinWt,' + BOM_TABLE + '[@Mat Row]),IF(u="kg/m²",q*s*' + BOM_TABLE + '[@Length]*' + BOM_TABLE + '[@Width]/10^6*INDEX(AreaWt,' + BOM_TABLE + '[@Mat Row]),q*s*INDEX(PieceWt,' + BOM_TABLE + '[@Mat Row]))))))';
+      // K: Remarks (user input)
+      var K = '';
+      // L: Total Length mm
+      var L = '=IF(OR(' + BOM_TABLE + '[@Mat Row]="",' + BOM_TABLE + '[@[Unit weight kg/m]]="",NOT(ISNUMBER(' + BOM_TABLE + '[@Length]))),"",' + BOM_TABLE + '[@Length]*' + BOM_TABLE + '[@Qty]*IF(' + BOM_TABLE + '[@Set]="",1,' + BOM_TABLE + '[@Set]))';
+      // M: Mat Row (XMATCH against Materials)
+      var M = '=IFNA(XMATCH(' + BOM_TABLE + '[@Materials],Materials,0),"")';
+      out.push([A, B, C, D, E, F, G, H, I, J, K, L, M]);
     }
+    return out;
   }
 
-  window.BomSheets = {
-    MASTER, BLANK, PROP_PROJECT, UNITS,
-    runExcel, pauseExcel, safeId, uniqueName, checkSheetName,
-    formatStamp, actionLabel, materialStatus, validateMaterial, canonical,
-    readProjectProp, writeProjectProp, getProjectMeta, setProjectMeta,
-    openMaster, ensureMasterNames, applyBomValidation, repairBomSheet,
-    importTemplate, inspectWorkbook, addBomSheet, repairWorkbook, removeLegacyBlank, insertTemplateSheets,
-    listMaterials, addMaterial, addMaterialsBulk, updateMaterial, deleteMaterial,
-    applyMaterialList, stampAudit, getUsedMaterialsInWorkbook,
-    setMasterSnap, syncDirectMasterEdits
+  // Build the 2D formula array for the Purchase List table data rows (O6:AB48).
+  // Columns O..AB map to S(15) N(14) -> O=15,P=16,Q=17,R=18,S=19,T=20,U=21,V=22,W=23,X=24,Y=25,Z=26,AA=27,AB=28
+  // table column order in pl_Take_off:
+  //   SN(O), Materials(P), Length(mm)(Q), Qty(nos)(R), Consumable Wt kg(S),
+  //   Weight Kg/m(T), Total Weight(kg)(U), Stock(V), PO Weight(W), PO Qty(X),
+  //   PO Rate(Y), Amount(Z), Remarks(AA), Mat Row(AB)
+  function plFormulas() {
+    var out = [];
+    for (var r = 6; r <= 48; r++) {
+      var prev = r - 1;
+      // O: SN
+      var O = '=IF(' + PL_TABLE + '[@Mat Row]="","",N(O' + prev + ')+1)';
+      // P: Materials (Grand Total + Requested by + INDEX)
+      var P = '=IF(ROW()=$AB$4+6,"Grand Total Weight in KG :",IF(ROW()=$AB$4+8,"Requested by:",IF(' + PL_TABLE + '[@Mat Row]="","",INDEX(Materials,' + PL_TABLE + '[@Mat Row]))))';
+      // Q: Length (mm) — LET with unit dispatch + sheet-size lookup for kg/m²
+      var Q = '=IF(ROW()=$AB$4+8,"Procurement",IF(' + PL_TABLE + '[@Mat Row]="","",LET(u,INDEX(WtUnit,' + PL_TABLE + '[@Mat Row]),IF(u="kg/m",$AE$1,IF(u="kg/m²",IFERROR(IF(INDEX(SheetL,' + PL_TABLE + '[@Mat Row])*INDEX(SheetW,' + PL_TABLE + '[@Mat Row])>0,INDEX(SheetL,' + PL_TABLE + '[@Mat Row])&" x "&INDEX(SheetW,' + PL_TABLE + '[@Mat Row]),"Add size in Master"),"Add size in Master"),"")))))';
+      // R: Qty (nos) — ROUNDUP per unit
+      var R = '=IF(' + PL_TABLE + '[@Mat Row]="","",LET(u,INDEX(WtUnit,' + PL_TABLE + '[@Mat Row]),IF(u="kg/m",IFERROR(ROUNDUP(ROUND(SUMIF(' + BOM_TABLE + '[Materials],' + PL_TABLE + '[@Materials],' + BOM_TABLE + '[Total Length mm])/' + PL_TABLE + '[@[Length (mm)]],6),0),""),IF(u="kg/m²",IFERROR(ROUNDUP(ROUND(' + PL_TABLE + '[@[Consumable Wt. kg]]/(INDEX(AreaWt,' + PL_TABLE + '[@Mat Row])*INDEX(SheetL,' + PL_TABLE + '[@Mat Row])*INDEX(SheetW,' + PL_TABLE + '[@Mat Row])/10^6),6),0),""),IFERROR(ROUNDUP(ROUND(' + PL_TABLE + '[@[Consumable Wt. kg]]/INDEX(PieceWt,' + PL_TABLE + '[@Mat Row]),6),0),""))))';
+      // S: Consumable Wt. kg (Total row + SUMIF)
+      var S = '=IF(ROW()=$AB$4+6,SUM(S$5:S' + prev + '),IF(' + PL_TABLE + '[@Mat Row]="","",SUMIF(' + BOM_TABLE + '[Materials],' + PL_TABLE + '[@Materials],' + BOM_TABLE + '[Total Weight (kg)])))';
+      // T: Weight Kg/m (signature + kg/m only)
+      var T = '=IF(ROW()=$AB$4+8,"Store Section:",IF(' + PL_TABLE + '[@Mat Row]="","",IF(INDEX(WtUnit,' + PL_TABLE + '[@Mat Row])="kg/m",INDEX(LinWt,' + PL_TABLE + '[@Mat Row]),"")))';
+      // U: Total Weight (kg) (Total row + LET per unit)
+      var U = '=IF(ROW()=$AB$4+6,SUM(U$5:U' + prev + '),IF(' + PL_TABLE + '[@Mat Row]="","",LET(u,INDEX(WtUnit,' + PL_TABLE + '[@Mat Row]),IFERROR(IF(u="kg/m",' + PL_TABLE + '[@[Length (mm)]]/1000*' + PL_TABLE + '[@[Qty (nos)]]*' + PL_TABLE + '[@[Weight Kg/m]],IF(u="kg/m²",' + PL_TABLE + '[@[Qty (nos)]]*INDEX(AreaWt,' + PL_TABLE + '[@Mat Row])*INDEX(SheetL,' + PL_TABLE + '[@Mat Row])*INDEX(SheetW,' + PL_TABLE + '[@Mat Row])/10^6,' + PL_TABLE + '[@[Qty (nos)]]*INDEX(PieceWt,' + PL_TABLE + '[@Mat Row]))),' + PL_TABLE + '[@[Consumable Wt. kg]]))))';
+      // V: Stock (user input)
+      var V = '';
+      // W: PO Weight footer (Total row + Production signature)
+      var W = '=IF(ROW()=$AB$4+6,IF(COUNT(W$5:W' + prev + ')=0,"",SUM(W$5:W' + prev + ')),IF(ROW()=$AB$4+8,"Production",""))';
+      // X: PO Qty (user input)
+      var X = '';
+      // Y: PO Rate (user input)
+      var Y = '';
+      // Z: Amount (Total row + Engineering signature + per-row amount)
+      var Z = '=IF(ROW()=$AB$4+6,IF(COUNT(Z$5:Z' + prev + ')=0,"",SUM(Z$5:Z' + prev + ')),IF(ROW()=$AB$4+8,"Engineering",IF(' + PL_TABLE + '[@[PO Rate]]="","",' + PL_TABLE + '[@[PO Weight]]*' + PL_TABLE + '[@[PO Rate]])))';
+      // AA: Remarks (user input)
+      var AA = '';
+      // AB: Mat Row — O(1) INDEX into the AL6# spill
+      var AB = '=IFERROR(INDEX($AL$6#,ROW()-5),"")';
+      out.push([O, P, Q, R, S, T, U, V, W, X, Y, Z, AA, AB]);
+    }
+    return out;
+  }
+
+  // Standalone cells on every BOM sheet
+  var STANDALONE_FORMULAS = {
+    'O2':  '=SUBSTITUTE($A$1,"Bill of Materials","Remaining Purchase List")&IF($A$2<>""," – "&$A$2,"")',
+    'M4':  '=IFNA(XMATCH(TRUE,(' + BOM_TABLE + '[Description]<>"")+(' + BOM_TABLE + '[Materials]<>"")+(' + BOM_TABLE + '[Length]<>"")+(' + BOM_TABLE + '[Qty]<>"")>0,0,-1)+5,5)',
+    'AL6': '=LET(m,FILTER(' + BOM_TABLE + '[Mat Row],ISNUMBER(' + BOM_TABLE + '[Mat Row]),""),IF(INDEX(m,1)="","",SORT(UNIQUE(m))))',
+    'AB4': '=IF(AL6="",0,ROWS($AL$6#))',
+    'AD2': '=IF($M$4=5,"ℹ BOM is empty",IF(SUMPRODUCT((' + BOM_TABLE + '[Materials]<>"")*(' + BOM_TABLE + '[Mat Row]=""))>0,"⚠ "&SUMPRODUCT((' + BOM_TABLE + '[Materials]<>"")*(' + BOM_TABLE + '[Mat Row]=""))&" BOM row(s) use a material missing from Master",IF(COUNT(' + BOM_TABLE + '[Mat Row])>$AB$4,"⚠ "&(COUNT(' + BOM_TABLE + '[Mat Row])-$AB$4)&" material(s) missing from Purchase List","✔ Purchase list covers every BOM material")))'
   };
-})();
+
+  // Inject every formula into a sheet (used after import / on add-sheet / on repair).
+  function injectFormulasIntoSheet(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    var rngBom = sh.getRange('A6:M65');
+    var rngPl  = sh.getRange('O6:AB48');
+    rngBom.formulas = bomFormulas();
+    rngPl.formulas = plFormulas();
+    // standalone cells
+    var keys = Object.keys(STANDALONE_FORMULAS);
+    keys.forEach(function (addr) {
+      sh.getRange(addr).formulas = [[STANDALONE_FORMULAS[addr]]];
+    });
+    // hide column AL so the spill is invisible (AB already hidden in template)
+    sh.getRange('AL:AL').columnHidden = true;
+    return ctx.sync();
+  }
+
+  function injectFormulas(sheetName) {
+    return run({ heavy: true }, function (ctx) {
+      return injectFormulasIntoSheet(ctx, sheetName);
+    });
+  }
+
+  // Reapply Data Validation on the active table ranges.
+  function reapplyDataValidation(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    // BOM: Materials dropdown on C6:C65 (list = Materials named range)
+    var bomMat = sh.getRange('C6:C65').dataValidation;
+    bomMat.rule = { list: { in: '=Materials' } };
+    bomMat.prompt = { show: true, title: 'Material', message: 'Pick a material from the Master Unique Materials sheet.' };
+    bomMat.errorAlert = { show: true, style: 'Stop', title: 'Not in the materials list',
+      message: 'Pick a material from the dropdown (or add it to the Master Unique Materials sheet first).' };
+    return ctx.sync();
+  }
+  function reapplyMasterDataValidation(ctx) {
+    var sh = ctx.workbook.worksheets.getItem(MASTER_SHEET);
+    var dv = sh.getRange('C5:C300').dataValidation;
+    dv.rule = { list: { in: '"kg/m,kg/m²,kg/each"' } };
+    dv.prompt = { show: true, title: 'Primary Unit',
+      message: 'kg/m = by length, kg/m² = by area, kg/each = per piece' };
+    dv.errorAlert = { show: true, style: 'Stop', title: 'Pick a unit',
+      message: 'Choose kg/m, kg/m² or kg/each.' };
+    return ctx.sync();
+  }
+
+  // ============================================================
+  // SHEET CREATION
+  // ============================================================
+
+  function addSheet(name, opts) {
+    opts = opts || {};
+    return run({ heavy: true }, function (ctx) {
+      var ws = ctx.workbook.worksheets;
+      // Ensure template is present (import if missing)
+      var bom = ws.getItemOrNullObject(TEMPLATE_SHEET);
+      var mas = ws.getItemOrNullObject(MASTER_SHEET);
+      return ctx.sync().then(function () {
+        if (bom.isNullObject || mas.isNullObject) {
+          return importTemplateIntoWorkbook(ctx);
+        }
+      }).then(function () {
+        // Decide what to copy from
+        var copyFrom = opts.copyFrom;
+        var sourceSheet = null;
+        if (copyFrom && copyFrom !== '__blank__') {
+          sourceSheet = ws.getItem(copyFrom);
+        } else if (!copyFrom) {
+          // default: blank BOM from template
+          sourceSheet = ws.getItem(TEMPLATE_SHEET);
+        }
+        var newSheet;
+        if (sourceSheet) {
+          newSheet = sourceSheet.copy(Excel.WorksheetPositionType.after, ws.getActiveWorksheet());
+          newSheet.name = name;
+        } else {
+          newSheet = ws.add(name);
+          // copy from BOM Blank template structure (typed headers + styles + tables)
+          var tmpl = ws.getItem(TEMPLATE_SHEET);
+          var rngAll = tmpl.getUsedRange();
+          newSheet.getUsedRange().copyFrom(rngAll, Excel.RangeCopyType.all);
+        }
+        return ctx.sync().then(function () {
+          // Rename tables bom_* / pl_* on the new sheet so they don't collide with template tables.
+          return renameTablesOnSheet(ctx, name).then(function () {
+            return injectFormulasIntoSheet(ctx, name);
+          }).then(function () {
+            return reapplyDataValidation(ctx, name);
+          });
+        }).then(function () {
+          // Optional: project title in A1
+          if (opts.projectTitle) {
+            newSheet.getRange('A1').values = [[opts.projectTitle]];
+          }
+          // Optional: clear entered BOM/PO inputs while preserving formulas/PO Weight footers
+          if (opts.clearInputs) {
+            clearBomAndPoInputs(ctx, name);
+          }
+          // Optional: pre-sync Master from saved Master (Project-Only if a project is active)
+          if (opts.preSync) {
+            return preSyncMaster(ctx);
+          }
+        });
+      }).then(function () {
+        return { name: name, created: true };
+      });
+    });
+  }
+
+  function renameTablesOnSheet(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    var tables = sh.tables.load('name');
+    return ctx.sync().then(function () {
+      var renames = [];
+      tables.items.forEach(function (t) {
+        var n = t.name;
+        if (n === BOM_TABLE || n.indexOf(BOM_TABLE + '_') === 0) {
+          var suffix = '_' + sanitizeName(sheetName).slice(0, 16);
+          var newName = BOM_TABLE + suffix;
+          renames.push(renameTableSafely(ctx, sh, t, newName));
+        } else if (n === PL_TABLE || n.indexOf(PL_TABLE + '_') === 0) {
+          var suffix2 = '_' + sanitizeName(sheetName).slice(0, 16);
+          var newName2 = PL_TABLE + suffix2;
+          renames.push(renameTableSafely(ctx, sh, t, newName2));
+        }
+      });
+      return Promise.all(renames).then(function () {});
+    });
+  }
+  function renameTableSafely(ctx, sheet, table, newName) {
+    // Use the canonical rewrite pattern: drop and re-add to fully purge stale refs.
+    return new Promise(function (resolve) {
+      try {
+        table.name = newName;
+        ctx.sync().then(resolve, function () {
+          // If collision (rare), append a counter.
+          try {
+            table.name = newName + '_' + Math.floor(Math.random() * 9999);
+            ctx.sync().then(resolve, resolve);
+          } catch (e) { resolve(); }
+        });
+      } catch (e) { resolve(); }
+    });
+  }
+  function sanitizeName(s) { return String(s || '').replace(/[^A-Za-z0-9_]/g, '_'); }
+
+  // Clear user-typed BOM (B-H, K) and PO (V, X, Y, AA) input cells. Formulas in
+  // A, I, J, L, M and O, P, Q, R, S, T, U, W, Z, AB are preserved.
+  function clearBomAndPoInputs(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    var blanksBom = makeBlanks(60, 7); // B6:H65 (7 cols)
+    var blanksK = makeBlanks(60, 1);
+    var blanksV = makeBlanks(43, 1);
+    var blanksXY = makeBlanks(43, 2); // X6:Y65 — but PL is rows 6-48; use 43 rows
+    var blanksAA = makeBlanks(43, 1);
+    sh.getRange('B6:H65').values = blanksBom;
+    sh.getRange('K6:K65').values = blanksK;
+    sh.getRange('V6:V48').values = blanksV;
+    sh.getRange('X6:Y48').values = blanksXY;
+    sh.getRange('AA6:AA48').values = blanksAA;
+    // (W = PO Weight has formulas; do NOT clear)
+    return ctx.sync();
+  }
+  function makeBlanks(rows, cols) {
+    var out = [];
+    for (var i = 0; i < rows; i++) {
+      var row = []; for (var j = 0; j < cols; j++) row.push(null);
+      out.push(row);
+    }
+    return out;
+  }
+
+  // Pre-sync Master Unique Materials from saved Master slot (Project-Only if active).
+  function preSyncMaster(ctx) {
+    if (!root.BomStore) return Promise.resolve();
+    return root.BomStore.getMaster().then(function (materials) {
+      if (!materials || !materials.length) return;
+      return writeMaterialsToMaster(ctx, materials).then(function () {
+        return reapplyMasterDataValidation(ctx);
+      });
+    });
+  }
+
+  // ============================================================
+  // MATERIALS READ / WRITE
+  // ============================================================
+
+  // Map a tblMat row (array of 13 columns) -> material object.
+  // Cols: A Material, B Category, C Primary Unit, D Lin, E Area, F Piece,
+  //       G SheetL, H SheetW, I SheetArea(formula), J SheetWt(formula),
+  //       K Remarks, L Last Action, M Last Modified
+  function rowToMat(row) {
+    if (!row) return null;
+    var name = row[0];
+    if (name === '' || name === null || name === undefined) return null;
+    return {
+      name: String(name),
+      category: row[1] || '',
+      unit: row[2] || '',
+      linear: num(row[3]), area: num(row[4]), piece: num(row[5]),
+      sheetL: num(row[6]), sheetW: num(row[7]),
+      remarks: row[10] || '',
+      lastAction: row[11] || '',
+      lastModified: row[12] || ''
+    };
+  }
+  function num(v) { return (v === '' || v === null || v === undefined) ? null : Number(v); }
+  function matToRow(m) {
+    return [
+      m.name || '', m.category || '', m.unit || '',
+      m.linear === null ? null : m.linear,
+      m.area === null ? null : m.area,
+      m.piece === null ? null : m.piece,
+      m.sheetL === null ? null : m.sheetL,
+      m.sheetW === null ? null : m.sheetW,
+      null, null, // I, J are formulas (let Excel recompute)
+      m.remarks || '', m.lastAction || '', m.lastModified || ''
+    ];
+  }
+
+  // Read Master Unique Materials A4:M{last} into material objects.
+  // On-demand snapshot — no onChanged listener.
+  function readMaterials() {
+    return run(function (ctx) {
+      var sh = ctx.workbook.worksheets.getItem(MASTER_SHEET);
+      // tblMat starts at A4 with header row 4 + data 5+. We read A5:M304 (generous).
+      var rng = sh.getRange('A5:M304');
+      rng.load('values');
+      return ctx.sync().then(function () {
+        var vals = rng.values;
+        var out = [];
+        for (var i = 0; i < vals.length; i++) {
+          var m = rowToMat(vals[i]);
+          if (m) out.push(m);
+        }
+        // Update Row 3 summary banner with material count
+        sh.getRange('A3').values = [['Last snapshot: ' + out.length + ' materials · ' + new Date().toLocaleString()]];
+        return ctx.sync().then(function () { return out; });
+      });
+    });
+  }
+
+  // Snapshot diff vs last-known. Returns { added, modified, removed, all }.
+  function snapshotDiff() {
+    return Promise.all([
+      readMaterials(),
+      root.BomStore ? root.BomStore.getMaster() : Promise.resolve([])
+    ]).then(function (r) {
+      var current = r[0] || [];
+      var known = r[1] || [];
+      var byNameCur = {}; current.forEach(function (m) { byNameCur[m.name] = m; });
+      var byNameKn = {}; known.forEach(function (m) { byNameKn[m.name] = m; });
+      var added = [], modified = [], removed = [];
+      current.forEach(function (m) {
+        if (!byNameKn[m.name]) added.push(m);
+        else if (JSON.stringify(m) !== JSON.stringify(byNameKn[m.name])) modified.push(m);
+      });
+      known.forEach(function (m) {
+        if (!byNameCur[m.name]) removed.push(m);
+      });
+      return { added: added, modified: modified, removed: removed, all: current };
+    });
+  }
+
+  // Rewrite Master Unique Materials tblMat from a materials array.
+  function writeMaterialsToMaster(ctx, materials) {
+    var sh = ctx.workbook.worksheets.getItem(MASTER_SHEET);
+    var tbl = sh.tables.getItem(MAT_TABLE);
+    // Resize tblMat data range to fit materials (header at row 4, data from row 5).
+    var rowCount = Math.max(materials.length, 1);
+    var newRef = 'A4:M' + (4 + rowCount);
+    tbl.resize(newRef);
+    // Build values 2D array (rowCount rows × 13 cols).
+    var rows = materials.map(matToRow);
+    while (rows.length < rowCount) {
+      rows.push(['', '', '', null, null, null, null, null, null, null, '', '', '']);
+    }
+    var dataRange = sh.getRange('A5:M' + (4 + rowCount));
+    dataRange.values = rows;
+    // Re-inject the I/J formulas for the new range (Sheet Area, Sheet Weight)
+    var formulas = [];
+    for (var r = 0; r < rowCount; r++) {
+      var rowNum = 5 + r;
+      formulas.push([
+        '=IF(AND(ISNUMBER(G' + rowNum + '),ISNUMBER(H' + rowNum + ')),G' + rowNum + '*H' + rowNum + '/10^6,"")',
+        '=IF(AND(ISNUMBER(I' + rowNum + '),ISNUMBER(E' + rowNum + ')),I' + rowNum + '*E' + rowNum + ',"")'
+      ]);
+    }
+    sh.getRange('I5:J' + (4 + rowCount)).formulas = formulas;
+    // Update Row 3 summary banner
+    sh.getRange('A3').values = [['Last saved: ' + materials.length + ' materials · ' + new Date().toLocaleString()]];
+    return ctx.sync();
+  }
+
+  function writeMaterials(materials) {
+    return run({ heavy: true }, function (ctx) {
+      return writeMaterialsToMaster(ctx, materials).then(function () {
+        return reapplyMasterDataValidation(ctx);
+      });
+    });
+  }
+
+  // ============================================================
+  // MATERIALS CRUD + AUDIT STAMPING
+  // ============================================================
+
+  function addMaterial(mat) {
+    return run({ heavy: true }, function (ctx) {
+      return readMaterialsInto(ctx).then(function (cur) {
+        // Reject duplicate name (case-insensitive)
+        var exists = cur.some(function (m) { return m.name.toLowerCase() === mat.name.toLowerCase(); });
+        if (exists) throw new Error('A material named "' + mat.name + '" already exists');
+        mat.lastAction = 'Added';
+        mat.lastModified = new Date().toISOString();
+        cur.push(mat);
+        return writeMaterialsToMaster(ctx, cur).then(function () {
+          stampAuditRow(ctx, cur.length, mat); // L/M on the new row
+          return ctx.sync().then(function () {
+            if (root.BomStore) root.BomStore.recordAudit({ action: 'Added', name: mat.name, at: mat.lastModified });
+            if (root.BomStore) root.BomStore.saveMaster(cur);
+            return mat;
+          });
+        });
+      });
+    });
+  }
+
+  function updateMaterial(name, mat) {
+    return run({ heavy: true }, function (ctx) {
+      return readMaterialsInto(ctx).then(function (cur) {
+        var idx = cur.findIndex(function (m) { return m.name === name; });
+        if (idx < 0) throw new Error('Material not found: ' + name);
+        // If renaming, ensure new name is unique
+        if (mat.name && mat.name.toLowerCase() !== name.toLowerCase()) {
+          var clash = cur.some(function (m, i) { return i !== idx && m.name.toLowerCase() === mat.name.toLowerCase(); });
+          if (clash) throw new Error('A material named "' + mat.name + '" already exists');
+        }
+        mat.lastAction = 'Modified';
+        mat.lastModified = new Date().toISOString();
+        cur[idx] = Object.assign({}, cur[idx], mat);
+        return writeMaterialsToMaster(ctx, cur).then(function () {
+          stampAuditRow(ctx, idx + 1, cur[idx]);
+          return ctx.sync().then(function () {
+            if (root.BomStore) root.BomStore.recordAudit({ action: 'Modified', name: cur[idx].name, at: cur[idx].lastModified });
+            if (root.BomStore) root.BomStore.saveMaster(cur);
+            return cur[idx];
+          });
+        });
+      });
+    });
+  }
+
+  function removeMaterial(name) {
+    return run({ heavy: true }, function (ctx) {
+      return readMaterialsInto(ctx).then(function (cur) {
+        var idx = cur.findIndex(function (m) { return m.name === name; });
+        if (idx < 0) throw new Error('Material not found: ' + name);
+        var removed = cur.splice(idx, 1)[0];
+        return writeMaterialsToMaster(ctx, cur).then(function () {
+          return ctx.sync().then(function () {
+            if (root.BomStore) root.BomStore.recordAudit({ action: 'Removed', name: removed.name, at: new Date().toISOString() });
+            if (root.BomStore) root.BomStore.saveMaster(cur);
+            return removed;
+          });
+        });
+      });
+    });
+  }
+
+  // Stamp L/M columns on a given data row (1-based index among data rows; row in sheet = idx + 4)
+  function stampAuditRow(ctx, dataIdx, mat) {
+    var sh = ctx.workbook.worksheets.getItem(MASTER_SHEET);
+    var rowNum = 4 + dataIdx;
+    sh.getRange('L' + rowNum + ':M' + rowNum).values = [[mat.lastAction || '', mat.lastModified || '']];
+    // Row 3 summary banner
+    sh.getRange('A3').values = [['Last action: ' + mat.lastAction + ' "' + mat.name + '" · ' + new Date().toLocaleString()]];
+  }
+
+  function readMaterialsInto(ctx) {
+    var sh = ctx.workbook.worksheets.getItem(MASTER_SHEET);
+    var rng = sh.getRange('A5:M304');
+    rng.load('values');
+    return ctx.sync().then(function () {
+      var out = [];
+      rng.values.forEach(function (row) {
+        var m = rowToMat(row);
+        if (m) out.push(m);
+      });
+      return out;
+    });
+  }
+
+  // ============================================================
+  // WORKBOOK STATUS
+  // ============================================================
+
+  function getWorkbookStatus() {
+    return run(function (ctx) {
+      var ws = ctx.workbook.worksheets.load('name');
+      var wbProps = ctx.workbook.properties;
+      wbProps.load('items');
+      return ctx.sync().then(function () {
+        var names = ws.items.map(function (s) { return s.name; });
+        var bomSheets = names.filter(function (n) {
+          return n !== MASTER_SHEET && n !== TEMPLATE_SHEET;
+        });
+        var hasBomBlank = names.indexOf(TEMPLATE_SHEET) >= 0;
+        var hasMaster = names.indexOf(MASTER_SHEET) >= 0;
+        // Try to read BomProjectList custom property
+        var bomProjectList = null;
+        try {
+          var prop = ctx.workbook.properties.getItemOrNullObject('BomProjectList');
+          return ctx.sync().then(function () {
+            if (!prop.isNullObject) bomProjectList = prop.value;
+            return finishStatus(bomSheets, hasBomBlank, hasMaster, bomProjectList);
+          });
+        } catch (e) {
+          return finishStatus(bomSheets, hasBomBlank, hasMaster, null);
+        }
+      });
+    });
+  }
+  function finishStatus(bomSheets, hasBomBlank, hasMaster, bomProjectList) {
+    var activeProject = root.BomStore ? root.BomStore.getActiveProject() : null;
+    return {
+      bomCount: bomSheets.length,
+      bomSheets: bomSheets,
+      hasBomBlank: hasBomBlank,
+      hasMaster: hasMaster,
+      needsImport: !hasBomBlank || !hasMaster,
+      activeProject: activeProject,
+      bomProjectList: bomProjectList,
+      isProjectOnly: !!activeProject || !!bomProjectList
+    };
+  }
+
+  // ============================================================
+  // REPAIR (per-sheet)
+  // ============================================================
+
+  function repairSheet(sheetName) {
+    return run({ heavy: true }, function (ctx) {
+      // 1) recreate workbook named ranges (purges shadowing sheet-scoped names)
+      return recreateNamedRanges(ctx).then(function () {
+        // 2) reapply active-table Data Validation
+        if (sheetName === MASTER_SHEET) {
+          return reapplyMasterDataValidation(ctx);
+        }
+        return reapplyDataValidation(ctx, sheetName).then(function () {
+          // 3) upgrade to Excel 365 formulas
+          return injectFormulasIntoSheet(ctx, sheetName);
+        });
+      }).then(function () {
+        // 4) purge volatile Print_Area / Print_Titles names
+        return purgeVolatileNames(ctx);
+      }).then(function () {
+        return { repaired: true, sheet: sheetName };
+      });
+    });
+  }
+
+  function repairAll(sheetNames) {
+    var arr = sheetNames.slice();
+    var chain = Promise.resolve();
+    arr.forEach(function (n) {
+      chain = chain.then(function () { return repairSheet(n); });
+    });
+    return chain;
+  }
+
+  // ============================================================
+  // PUBLIC API
+  // ============================================================
+  root.BomSheets = {
+    // constants
+    BOM_TABLE: BOM_TABLE, PL_TABLE: PL_TABLE, MAT_TABLE: MAT_TABLE,
+    MASTER_SHEET: MASTER_SHEET, TEMPLATE_SHEET: TEMPLATE_SHEET,
+    NAMED_RANGES: NAMED_RANGES, STANDALONE_FORMULAS: STANDALONE_FORMULAS,
+    // template + sheets
+    ensureTemplate: ensureTemplate,
+    importTemplate: importTemplate,
+    importTemplateIntoWorkbook: importTemplateIntoWorkbook,
+    addSheet: addSheet,
+    listSheetNames: listSheetNames,
+    validateSheetName: validateSheetName,
+    isBomSheetName: isBomSheetName,
+    // formulas + named ranges
+    injectFormulas: injectFormulas,
+    injectFormulasIntoSheet: injectFormulasIntoSheet,
+    bomFormulas: bomFormulas,
+    plFormulas: plFormulas,
+    recreateNamedRanges: recreateNamedRanges,
+    purgeVolatileNames: purgeVolatileNames,
+    reapplyDataValidation: reapplyDataValidation,
+    reapplyMasterDataValidation: reapplyMasterDataValidation,
+    // materials
+    readMaterials: readMaterials,
+    snapshotDiff: snapshotDiff,
+    writeMaterials: writeMaterials,
+    writeMaterialsToMaster: writeMaterialsToMaster,
+    addMaterial: addMaterial,
+    updateMaterial: updateMaterial,
+    removeMaterial: removeMaterial,
+    // status + repair
+    getWorkbookStatus: getWorkbookStatus,
+    repairSheet: repairSheet,
+    repairAll: repairAll,
+    // helpers exposed for convert.js
+    _run: run,
+    _clearBomAndPoInputs: clearBomAndPoInputs,
+    _renameTablesOnSheet: renameTablesOnSheet
+  };
+})(typeof window !== 'undefined' ? window : this);

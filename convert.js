@@ -1,1046 +1,574 @@
-/* convert.js - Lightweight Selective Two-Way Converter (Flatten, Restore Automated & Plain-Sheet Repair) (3.0v patch2) */
-(() => {
-  "use strict";
+/* convert.js — window.BomConvert
+ * ----------------------------------------------------------------------------
+ * Two-way conversion between automated BOM sheets and plain / print-ready Excel.
+ *
+ *  flatten(opts)              — selective Flatten for Sharing
+ *      opts.sheets            : array of sheet names to flatten
+ *      opts.full              : boolean (true = remove Master + BOM Blank + named ranges,
+ *                                          preserves BomProjectList workbook property)
+ *      opts.mode              : 'auto365' | 'fixed'
+ *                                  auto365 = LET + XLOOKUP + hidden AB5 spill + hidden
+ *                                            AC5:AF lookup table, zero helper col M
+ *                                  fixed   = static SUMIF + landscape print setup
+ *      opts.compiledPL        : boolean — aggregate all flattened sheets into one PL
+ *      opts.preSaveProject    : boolean — pre-flatten auto-save the active Project .json
+ *
+ *  restore(opts)              — Restore Automated (auto-detects flattened sheets)
+ *      opts.sheets            : array of flattened sheet names to restore
+ *      opts.materialSource    : 'global' | 'saved' | 'jsonfile'
+ *      opts.savedProjectName  : string  (when source = 'saved')
+ *      opts.jsonFileData      : parsed  (when source = 'jsonfile')
+ *      Existing Stock / PO inputs are preserved. Tables, formulas, dropdowns
+ *      and named ranges are rebuilt.
+ *
+ *  repairPlainSheetNames(sheets) — upgrades already-flattened sheets in place to
+ *      Excel 365 dynamic-spill AB5 + INDEX names. BOM / Stock / PO data untouched.
+ *
+ *  openCopyInNewWindow()      — Step 1 of both Flatten and Restore:
+ *      getFileAsync + Excel.createWorkbook. The live workbook is never modified.
+ */
+(function (root) {
+  'use strict';
 
-  const COMPILED = "Compiled Purchase List";
-  const PL_DEFAULT_CAP = 40;
-  const EXTRA_EDIT_ROWS = 12;
-  const lc = (s) => String(s ?? "").trim().toLowerCase();
-  const isBlank = (v) => v === "" || v === null || v === undefined;
-  const toNum = (v) => {
-    if (isBlank(v)) return null;
-    const n = Number(String(v).replace(/,/g, ""));
-    return Number.isFinite(n) ? n : null;
-  };
-  const noop = () => {};
+  var BS = null; // ref to BomSheets, set on first use
+  function bs() { if (!BS) BS = root.BomSheets; return BS; }
 
-  function qSheet(name) {
-    return `'${String(name).replace(/'/g, "''")}'`;
-  }
+  // ============================================================
+  // STEP 1: Open a copy in a new Excel window
+  // ============================================================
 
-  function firstTable(items, prefix) {
-    return items.find((t) => t.name.startsWith(prefix)) || null;
-  }
-
-  /* Build fast lookup map of Master Unique Materials */
-  async function loadMasterMap(context) {
-    const map = new Map();
-    const list = [];
-    try {
-      const m = await window.BomSheets.openMaster(context);
-      const body = m.t.getDataBodyRange().load("values");
-      await context.sync();
-      for (const r of body.values) {
-        const name = String(r[m.idx.material] || "").trim();
-        if (!name) continue;
-        const unit = String(r[m.idx.unit] || "").trim();
-        const lin = toNum(r[m.idx.lin]);
-        const area = toNum(r[m.idx.area]);
-        const piece = toNum(r[m.idx.piece]);
-        const sl = toNum(r[m.idx.sl]);
-        const sw = toNum(r[m.idx.sw]);
-        const sheetWt = unit === "kg/m²" && area > 0 && sl > 0 && sw > 0 ? (area * sl * sw) / 1e6 : null;
-        const sizeLabel = unit === "kg/m²" && sl > 0 && sw > 0 ? `${sl} x ${sw}` : "";
-        const entry = { name, unit, lin, area, piece, sl, sw, sheetWt, sizeLabel };
-        map.set(lc(name), entry);
-        list.push(entry);
+  // Read the live workbook via Office.context.document.getFileAsync and return
+  // the full base64 string. resolve(bytes) is also available.
+  function getFileBase64() {
+    return new Promise(function (resolve, reject) {
+      if (!root.Office || !Office.context || !Office.context.document) {
+        return reject(new Error('Office host not ready'));
       }
-    } catch { /* ignore if Master absent */ }
-    return { map, list };
-  }
-
-  /* Apply clean print layout ONLY on flattened/compiled sharing sheets (never on live editing sheets) */
-  function applySharePrintLayout(ws, lastCol, lastRow) {
-    try {
-      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
-      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-      ws.pageLayout.setPrintArea(`A1:${lastCol}${lastRow}`);
-      ws.pageLayout.setPrintTitleRows("3:4");
-    } catch { /* non-fatal on older Excel builds */ }
-  }
-
-  function applyBorders(range, style = "Continuous", color = "#CBD5E1") {
-    try {
-      ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom", "InsideHorizontal", "InsideVertical"].forEach((edge) => {
-        const b = range.format.borders.getItem(edge);
-        b.style = style;
-        b.color = color;
-      });
-    } catch { /* ignore */ }
-  }
-
-  function applyBoxBorders(range, color = "#64748B") {
-    try {
-      ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom"].forEach((edge) => {
-        const b = range.format.borders.getItem(edge);
-        b.style = "Continuous";
-        b.color = color;
-      });
-    } catch { /* ignore */ }
-  }
-
-  /* Build BOM row formula array for flattened sheet (rows 5..bomEnd + total row bomTot) */
-  function buildFlatBomGrid(rows, bomEnd, masterMap) {
-    const grid = [];
-    for (let i = 0; i < rows.length; i++) {
-      const r = 5 + i;
-      const item = rows[i];
-      const matName = String(item.mat || "").trim();
-      const meta = matName ? masterMap.get(lc(matName)) : null;
-
-      const snF = `=IF(C${r}="","",MAX(A$4:A${r - 1})+1)`;
-      let unitWtCell = "";
-      let totalWtF = "";
-      let totalLenF = "";
-
-      if (meta) {
-        if (meta.unit === "kg/m" && meta.lin > 0) {
-          unitWtCell = meta.lin;
-          totalWtF = `=IF(C${r}="","",IF(ISNUMBER(I${r}),N(G${r})*IF(H${r}="",1,H${r})*N(D${r})/1000*I${r},0))`;
-          totalLenF = `=IF(AND(C${r}<>"",ISNUMBER(D${r}),ISNUMBER(I${r})),D${r}*N(G${r})*IF(H${r}="",1,H${r}),"")`;
-        } else if (meta.unit === "kg/m²" && meta.area > 0) {
-          unitWtCell = "";
-          totalWtF = `=IF(C${r}="","",N(G${r})*IF(H${r}="",1,H${r})*N(D${r})*N(E${r})/1000000*${meta.area})`;
-          totalLenF = "";
-        } else if (meta.unit === "kg/each" && meta.piece > 0) {
-          unitWtCell = "";
-          totalWtF = `=IF(C${r}="","",N(G${r})*IF(H${r}="",1,H${r})*${meta.piece})`;
-          totalLenF = "";
+      Office.context.document.getFileAsync(Office.FileType.Compressed, { sliceSize: 65536 }, function (asyn) {
+        if (asyn.status !== Office.AsyncResultStatus.Succeeded) {
+          return reject(new Error('getFileAsync failed: ' + (asyn.error && asyn.error.message)));
         }
-      } else if (matName) {
-        // Unlisted / custom material — preserve cached weight so nothing is lost
-        unitWtCell = item.cachedUnitWt ?? "";
-        totalWtF = isBlank(item.cachedTotalWt)
-          ? `=IF(C${r}="","",IF(ISNUMBER(I${r}),N(G${r})*IF(H${r}="",1,H${r})*IF(ISNUMBER(D${r}),D${r}/1000,1)*I${r},""))`
-          : item.cachedTotalWt;
-        totalLenF = isBlank(item.cachedTotalLen) ? "" : item.cachedTotalLen;
-      } else {
-        // Blank editable row for recipients to add extra items in auto-growing mode
-        unitWtCell = "";
-        totalWtF = `=IF(C${r}="","",IF(ISNUMBER(I${r}),N(G${r})*IF(H${r}="",1,H${r})*IF(ISNUMBER(D${r}),D${r}/1000,1)*I${r},""))`;
-        totalLenF = `=IF(AND(C${r}<>"",ISNUMBER(D${r}),ISNUMBER(I${r})),D${r}*N(G${r})*IF(H${r}="",1,H${r}),"")`;
-      }
-
-      grid.push([
-        snF,
-        item.desc ?? "",
-        matName,
-        item.len ?? "",
-        item.wid ?? "",
-        item.thk ?? "",
-        item.qty ?? "",
-        item.set ?? "",
-        unitWtCell,
-        totalWtF,
-        item.rem ?? "",
-        totalLenF
-      ]);
-    }
-
-    // Total row at bomEnd + 1
-    grid.push([
-      "", "", "", "", "", "", "", "",
-      "Total:",
-      `=SUM(J5:J${bomEnd})`,
-      "", ""
-    ]);
-    return grid;
+        var file = asyn.value;
+        var slices = []; var total = file.sliceCount; var got = 0;
+        for (var i = 0; i < total; i++) {
+          (function (idx) {
+            file.getSliceAsync(idx, function (sr) {
+              if (sr.status !== Office.AsyncResultStatus.Succeeded) {
+                file.closeAsync();
+                return reject(new Error('getSliceAsync ' + idx + ' failed'));
+              }
+              slices[idx] = sr.value.data;
+              got++;
+              if (got === total) {
+                file.closeAsync();
+                var bytes = concatU8(slices);
+                var b64 = bytesToBase64(bytes);
+                resolve(b64);
+              }
+            });
+          })(i);
+        }
+      });
+    });
   }
-
-  /* Build helper lookup rows (AC5:AF<n>) for non-linear materials so auto-growing PL works without Master */
-  function buildHiddenLookup(masterList) {
-    const out = [];
-    for (const m of masterList) {
-      if (m.unit === "kg/m²" && m.sheetWt > 0) {
-        out.push([m.name, "kg/m²", m.sheetWt, m.sizeLabel]);
-      } else if (m.unit === "kg/each" && m.piece > 0) {
-        out.push([m.name, "kg/each", m.piece, ""]);
-      } else if (m.unit === "kg/m" && m.lin > 0) {
-        out.push([m.name, "kg/m", m.lin, ""]);
-      }
-    }
+  function concatU8(arrs) {
+    var total = 0; arrs.forEach(function (a) { total += a.length; });
+    var out = new Uint8Array(total); var off = 0;
+    arrs.forEach(function (a) { out.set(a, off); off += a.length; });
     return out;
   }
-
-  /* Build Purchase List grid (O5:AA<plSig>) for Excel 365 auto-growing or fixed print-ready mode */
-  function buildFlatPlGrid(opts) {
-    const { mode, bomEnd, uniqueMats, plInputs, masterMap, lookupEnd } = opts;
-    const grid = [];
-
-    if (mode === "fixed") {
-      const count = Math.max(1, uniqueMats.length);
-      for (let i = 0; i < count; i++) {
-        const r = 5 + i;
-        const name = uniqueMats[i] || "";
-        const meta = name ? masterMap.get(lc(name)) : null;
-        const inp = name ? (plInputs.get(lc(name)) || {}) : {};
-        if (!name) {
-          grid.push(["", "", "", "", "", "", "", "", "", "", "", "", ""]);
-          continue;
-        }
-        let lenCell = "";
-        let qtyF = "";
-        let wtCell = "";
-        let totWtF = `=S${r}`;
-
-        if (meta && meta.unit === "kg/m" && meta.lin > 0) {
-          lenCell = "=$AE$1";
-          qtyF = `=IFERROR(ROUNDUP(ROUND(SUMIF($C$5:$C$${bomEnd},P${r},$L$5:$L$${bomEnd})/Q${r},6),0),"")`;
-          wtCell = meta.lin;
-          totWtF = `=IFERROR(Q${r}/1000*R${r}*T${r},S${r})`;
-        } else if (meta && meta.unit === "kg/m²" && meta.sheetWt > 0) {
-          lenCell = meta.sizeLabel;
-          qtyF = `=IFERROR(ROUNDUP(ROUND(S${r}/${meta.sheetWt},6),0),"")`;
-          totWtF = `=IFERROR(R${r}*${meta.sheetWt},S${r})`;
-        } else if (meta && meta.unit === "kg/each" && meta.piece > 0) {
-          qtyF = `=IFERROR(ROUNDUP(ROUND(S${r}/${meta.piece},6),0),"")`;
-          totWtF = `=IFERROR(R${r}*${meta.piece},S${r})`;
-        } else {
-          qtyF = `=IFERROR(ROUNDUP(SUMIF($C$5:$C$${bomEnd},P${r},$G$5:$G$${bomEnd}),0),"")`;
-        }
-
-        grid.push([
-          i + 1,
-          name,
-          lenCell,
-          qtyF,
-          `=SUMIF($C$5:$C$${bomEnd},P${r},$J$5:$J$${bomEnd})`,
-          wtCell,
-          totWtF,
-          inp.stock ?? "",
-          inp.poWt ?? "",
-          inp.poQty ?? "",
-          inp.poRate ?? "",
-          `=IF(Y${r}="","",W${r}*Y${r})`,
-          inp.rem ?? ""
-        ]);
-      }
-
-      const plTot = 5 + count;
-      grid.push([
-        "", "Grand Total Weight in KG :", "", "",
-        `=SUM(S5:S${plTot - 1})`, "",
-        `=SUM(U5:U${plTot - 1})`, "",
-        `=IF(COUNT(W5:W${plTot - 1})=0,"",SUM(W5:W${plTot - 1}))`,
-        "", "",
-        `=IF(COUNT(Z5:Z${plTot - 1})=0,"",SUM(Z5:Z${plTot - 1}))`,
-        ""
-      ]);
-      grid.push(["", "", "", "", "", "", "", "", "", "", "", "", ""]);
-      grid.push(["", "Requested by:", "Procurement", "", "", "Store Section:", "", "", "Production", "", "", "Engineering", ""]);
-      return { grid, plDataEnd: plTot - 1, plTot, plSig: plTot + 2, cap: count };
+  function bytesToBase64(bytes) {
+    var bin = ''; var chunk = 0x8000;
+    for (var i = 0; i < bytes.length; i += chunk) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
     }
-
-    // Pure Excel 365 auto-growing mode (capacity >= 40, LET + XLOOKUP, zero helper col M)
-    const cap = Math.max(PL_DEFAULT_CAP, uniqueMats.length + 10);
-    const hasLookup = lookupEnd >= 5;
-    const lkMat = `$AC$5:$AC$${lookupEnd}`;
-    const lkUnit = `$AD$5:$AD$${lookupEnd}`;
-    const lkWt = `$AE$5:$AE$${lookupEnd}`;
-    const lkSz = `$AF$5:$AF$${lookupEnd}`;
-    const bomMat = `$C$5:$C$${bomEnd}`;
-    const bomWt = `$J$5:$J$${bomEnd}`;
-    const bomLen = `$L$5:$L$${bomEnd}`;
-    const bomUnitWt = `$I$5:$I$${bomEnd}`;
-    const bomQty = `$G$5:$G$${bomEnd}`;
-
-    // Map existing PL inputs to sorted positions so Stock/PO stay aligned with their material
-    const orderedNames = [...uniqueMats].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-
-    for (let i = 0; i < cap; i++) {
-      const r = 5 + i;
-      const matAtRow = orderedNames[i] || "";
-      const inp = matAtRow ? (plInputs.get(lc(matAtRow)) || {}) : {};
-
-      const snF = `=IF(P${r}="","",N(O${r - 1})+1)`;
-      const matF = `=IF(ROW()-4>$AE$2,"",INDEX($AB$5#,ROW()-4))`;
-
-      const lenF = hasLookup
-        ? `=IF(P${r}="","",LET(u,XLOOKUP(P${r},${lkMat},${lkUnit},""),IF(u="kg/m",$AE$1,IF(u="kg/m²",XLOOKUP(P${r},${lkMat},${lkSz},""),IF(ISNUMBER(XLOOKUP(P${r},${bomMat},${bomUnitWt},"")),$AE$1,"")))))`
-        : `=IF(P${r}="","",IF(ISNUMBER(XLOOKUP(P${r},${bomMat},${bomUnitWt},"")),$AE$1,""))`;
-      const consWtF = `=IF(P${r}="","",SUMIF(${bomMat},P${r},${bomWt}))`;
-      const linWtF = hasLookup
-        ? `=IF(P${r}="","",LET(u,XLOOKUP(P${r},${lkMat},${lkUnit},""),IF(u="kg/m",XLOOKUP(P${r},${lkMat},${lkWt},""),IF(u="",LET(b,XLOOKUP(P${r},${bomMat},${bomUnitWt},""),IF(ISNUMBER(b),b,"")),""))))`
-        : `=IF(P${r}="","",LET(b,XLOOKUP(P${r},${bomMat},${bomUnitWt},""),IF(ISNUMBER(b),b,"")))`;
-      const qtyF = hasLookup
-        ? `=IF(P${r}="","",IF(ISNUMBER(Q${r}),IFERROR(ROUNDUP(ROUND(SUMIF(${bomMat},P${r},${bomLen})/Q${r},6),0),""),LET(w,XLOOKUP(P${r},${lkMat},${lkWt},""),IF(ISNUMBER(w),IFERROR(ROUNDUP(ROUND(S${r}/w,6),0),""),IFERROR(ROUNDUP(SUMIF(${bomMat},P${r},${bomQty}),0),"")))))`
-        : `=IF(P${r}="","",IF(ISNUMBER(Q${r}),IFERROR(ROUNDUP(ROUND(SUMIF(${bomMat},P${r},${bomLen})/Q${r},6),0),""),IFERROR(ROUNDUP(SUMIF(${bomMat},P${r},${bomQty}),0),"")))`;
-      const totWtF = hasLookup
-        ? `=IF(P${r}="","",IF(AND(ISNUMBER(Q${r}),ISNUMBER(T${r})),IFERROR(Q${r}/1000*R${r}*T${r},S${r}),LET(w,XLOOKUP(P${r},${lkMat},${lkWt},""),IF(ISNUMBER(w),IFERROR(R${r}*w,S${r}),S${r}))))`
-        : `=IF(P${r}="","",IF(AND(ISNUMBER(Q${r}),ISNUMBER(T${r})),IFERROR(Q${r}/1000*R${r}*T${r},S${r}),S${r}))`;
-      const amtF = `=IF(OR(P${r}="",Y${r}=""),"",W${r}*Y${r})`;
-
-      grid.push([
-        snF, matF, lenF, qtyF, consWtF, linWtF, totWtF,
-        inp.stock ?? "", inp.poWt ?? "", inp.poQty ?? "", inp.poRate ?? "",
-        amtF, inp.rem ?? ""
-      ]);
-    }
-
-    const plTot = 5 + cap;
-    grid.push([
-      "", "Grand Total Weight in KG :", "", "",
-      `=SUM(S5:S${plTot - 1})`, "",
-      `=SUM(U5:U${plTot - 1})`, "",
-      `=IF(COUNT(W5:W${plTot - 1})=0,"",SUM(W5:W${plTot - 1}))`,
-      "", "",
-      `=IF(COUNT(Z5:Z${plTot - 1})=0,"",SUM(Z5:Z${plTot - 1}))`,
-      ""
-    ]);
-    grid.push(["", "", "", "", "", "", "", "", "", "", "", "", ""]);
-    grid.push(["", "Requested by:", "Procurement", "", "", "Store Section:", "", "", "Production", "", "", "Engineering", ""]);
-    return { grid, plDataEnd: plTot - 1, plTot, plSig: plTot + 2, cap };
+    return root.btoa(bin);
   }
 
-  /* ---------------- 1. FLATTEN WORKBOOK (Selective Sheets + Excel 365 / Fixed + Compiled Sheet) ---------------- */
-  async function flattenWorkbook(opts = {}, log = noop) {
-    const mode = opts.mode === "fixed" ? "fixed" : "dynamic365"; // 'dynamic365' | 'fixed'
-    const makeCompiled = Boolean(opts.compiled);
-    const wanted = Array.isArray(opts.sheets) && opts.sheets.length ? new Set(opts.sheets.map(lc)) : null;
+  // Step 1 shared: get the live workbook as base64 and open it in a new Excel window.
+  // Returns the new Workbook (in its own context).
+  function openCopyInNewWindow() {
+    return getFileBase64().then(function (b64) {
+      return Excel.createWorkbook(b64);
+    });
+  }
 
-    let result = { converted: 0, isPartial: false, compiled: false, mode };
+  // Run a body against the new workbook's context.
+  function runOnNewWb(newWb, body) {
+    return Excel.run({ delayForCellEdit: true }, function (ctx) {
+      // bind ctx.workbook to the new workbook
+      // (Excel.run with a Workbook object would normally be: Excel.run(newWb, fn)
+      //  but for our purposes we use the default context's workbook which IS the new one
+      //  immediately after Excel.createWorkbook.)
+      var app = ctx.workbook.application;
+      app.calculationMode = 'Manual';
+      app.suspendApiCalculationUntilNextSync();
+      app.suspendScreenUpdatingUntilNextSync();
+      return Promise.resolve(body(ctx)).then(function (r) {
+        app.calculationMode = 'Automatic';
+        return ctx.sync().then(function () { return r; });
+      }, function (err) {
+        try { app.calculationMode = 'Automatic'; } catch (e) {}
+        throw err;
+      });
+    });
+  }
 
-    await window.BomSheets.runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
+  // ============================================================
+  // FLATTEN FOR SHARING
+  // ============================================================
 
-      try {
-        const projectMeta = await window.BomSheets.readProjectProp(context, wb);
-        const { map: masterMap, list: masterList } = await loadMasterMap(context);
-
-        wb.worksheets.load("items/name,items/visibility");
-        await context.sync();
-        const allWs = wb.worksheets.items;
-        allWs.forEach((ws) => ws.tables.load("items/name"));
-        await context.sync();
-
-        const visibleBomWs = allWs.filter(
-          (ws) => ws.visibility === "Visible" && ws.name !== window.BomSheets.BLANK && Boolean(firstTable(ws.tables.items, "bom_"))
-        );
-        if (!visibleBomWs.length) throw new Error("No visible automated BOM sheets were found.");
-
-        const targetWs = wanted ? visibleBomWs.filter((ws) => wanted.has(lc(ws.name))) : visibleBomWs;
-        if (!targetWs.length) throw new Error("Select at least one BOM sheet to convert.");
-
-        const isPartial = targetWs.length < visibleBomWs.length;
-        result.isPartial = isPartial;
-        log(
-          isPartial
-            ? `Flattening ${targetWs.length} of ${visibleBomWs.length} sheets (Master sheet & named ranges will be kept)...`
-            : `Flattening all ${targetWs.length} BOM sheet(s) in ${mode} mode...`
-        );
-
-        // Batch-read all selected sheets
-        const snapshots = targetWs.map((ws) => {
-          const bomT = firstTable(ws.tables.items, "bom_");
-          const plT = firstTable(ws.tables.items, "pl_");
-          return {
-            ws,
-            name: ws.name,
-            bomT,
-            plT,
-            bomBody: bomT.getDataBodyRange().load("values"),
-            plBody: plT ? plT.getDataBodyRange().load("values") : null,
-            rA1: ws.getRange("A1:A2").load("values"),
-            rO2: ws.getRange("O2").load("values"),
-            rAE1: ws.getRange("AE1").load("values")
-          };
+  function flatten(opts) {
+    opts = opts || {};
+    if (!opts.sheets || !opts.sheets.length) return Promise.reject(new Error('No sheets selected'));
+    var pre = opts.preSaveProject
+      ? (root.BomStore ? root.BomStore.exportProject().then(saveBlobJson) : Promise.resolve())
+      : Promise.resolve();
+    return pre.then(function () {
+      return openCopyInNewWindow().then(function (newWb) {
+        return runOnNewWb(newWb, function (ctx) {
+          return flattenSelected(ctx, opts).then(function () {
+            if (opts.compiledPL) return buildCompiledPL(ctx, opts.sheets);
+          });
         });
-        await context.sync();
-
-        const lookupRows = buildHiddenLookup(masterList);
-        const compiledSummary = [];
-        const allUniqueAcross = new Map(); // lc(name) -> original name
-
-        for (const snap of snapshots) {
-          const { ws, bomT, plT } = snap;
-          log(`Converting "${snap.name}"...`);
-
-          const stdLen = toNum(snap.rAE1.values[0][0]) || 6000;
-          const o2Title = String(snap.rO2.values[0][0] || "").trim();
-
-          // Extract non-empty BOM rows up to last used row
-          const rawBom = snap.bomBody.values;
-          let lastUsed = -1;
-          for (let i = rawBom.length - 1; i >= 0; i--) {
-            const r = rawBom[i];
-            if (!isBlank(r[1]) || !isBlank(r[2]) || !isBlank(r[3]) || !isBlank(r[6])) {
-              lastUsed = i;
-              break;
-            }
-          }
-          const bomItems = [];
-          const sheetUnique = [];
-          const seenMat = new Set();
-          for (let i = 0; i <= lastUsed; i++) {
-            const r = rawBom[i];
-            const mat = String(r[2] || "").trim();
-            if (mat && !seenMat.has(lc(mat))) {
-              seenMat.add(lc(mat));
-              sheetUnique.push(mat);
-              if (!allUniqueAcross.has(lc(mat))) allUniqueAcross.set(lc(mat), mat);
-            }
-            bomItems.push({
-              desc: r[1],
-              mat,
-              len: r[3],
-              wid: r[4],
-              thk: r[5],
-              qty: r[6],
-              set: r[7],
-              cachedUnitWt: r[8],
-              cachedTotalWt: r[9],
-              rem: r[10],
-              cachedTotalLen: r[11]
-            });
-          }
-          const extraRows = mode === "fixed" ? 0 : EXTRA_EDIT_ROWS;
-          for (let k = 0; k < extraRows; k++) bomItems.push({ mat: "" });
-          if (bomItems.length === 0) bomItems.push({ mat: "" });
-
-          // Extract existing PL user inputs keyed by material name
-          const plInputs = new Map();
-          if (snap.plBody) {
-            for (const r of snap.plBody.values) {
-              const name = String(r[1] || "").trim();
-              if (!name || lc(name).startsWith("grand total") || lc(name).startsWith("requested by")) continue;
-              if (!plInputs.has(lc(name))) {
-                plInputs.set(lc(name), {
-                  stock: r[7],
-                  poWt: r[8],
-                  poQty: r[9],
-                  poRate: r[10],
-                  rem: r[12]
-                });
-              }
-            }
-          }
-
-          window.BomSheets.pauseExcel(context);
-
-          // Convert Excel Tables to plain ranges & clear old CF/DV/helpers
-          try { bomT.convertToRange(); } catch { /* ignore */ }
-          try { if (plT) plT.convertToRange(); } catch { /* ignore */ }
-          ws.getRange().conditionalFormats.clearAll();
-          try { ws.getRange("C5:C500").dataValidation.clear(); } catch { /* ignore */ }
-          ws.getRange("5:5").rowHidden = false;
-          ws.getRange("5:5").delete(Excel.DeleteShiftDirection.up);
-
-          // Clear stale cells below row 5 across A:AL (including AL6 dynamic spill helper)
-          const clearEnd = Math.max(120, rawBom.length + 25);
-          const wipe = ws.getRange(`A5:AL${clearEnd}`);
-          wipe.clear(Excel.ClearApplyTo.contents);
-          wipe.format.fill.clear();
-          wipe.format.borders.getItem("EdgeTop").style = "None";
-          wipe.format.borders.getItem("EdgeBottom").style = "None";
-          wipe.format.borders.getItem("EdgeLeft").style = "None";
-          wipe.format.borders.getItem("EdgeRight").style = "None";
-          wipe.format.borders.getItem("InsideHorizontal").style = "None";
-          wipe.format.borders.getItem("InsideVertical").style = "None";
-
-          // Clear old helper cells M4, AB4, AD2
-          ws.getRange("M4").clear(Excel.ClearApplyTo.contents);
-          ws.getRange("AB4").clear(Excel.ClearApplyTo.contents);
-          ws.getRange("AD2").clear(Excel.ClearApplyTo.all);
-          ws.getRange("AE1").values = [[stdLen]];
-          if (o2Title) ws.getRange("O2").values = [[o2Title]];
-
-          // Write hidden compact lookup table in AC5:AF<lookupEnd> for auto-growing mode
-          let lookupEnd = 4;
-          if (mode !== "fixed" && lookupRows.length) {
-            lookupEnd = 4 + lookupRows.length;
-            ws.getRange(`AC5:AF${lookupEnd}`).values = lookupRows;
-          }
-
-          // Write BOM section A5:L<bomTot>
-          const bomEnd = 4 + bomItems.length;
-          const bomTot = bomEnd + 1;
-          const bomGrid = buildFlatBomGrid(bomItems, bomEnd, masterMap);
-          ws.getRange(`A5:L${bomTot}`).formulas = bomGrid;
-
-          // Write Purchase List O5:AA<plSig>
-          const plOut = buildFlatPlGrid({
-            mode,
-            bomEnd,
-            uniqueMats: sheetUnique,
-            plInputs,
-            masterMap,
-            lookupEnd
-          });
-
-          // Write Excel 365 dynamic spill formula via .formulas
-          if (mode === "dynamic365") {
-            ws.getRange("AB5").formulas = [
-              [`=LET(m,FILTER($C$5:$C$${bomEnd},($C$5:$C$${bomEnd}<>"")*($C$5:$C$${bomEnd}<>"Materials"),""),IF(INDEX(m,1)="","",SORT(UNIQUE(m))))`]
-            ];
-            ws.getRange("AE2").formulas = [[`=IF($AB$5="",0,ROWS($AB$5#))`]];
-          } else {
-            ws.getRange("AE2").values = [[sheetUnique.length]];
-          }
-
-          ws.getRange(`O5:AA${plOut.plSig}`).formulas = plOut.grid;
-
-          // Clean, lightweight formatting & number formats
-          const bomRange = ws.getRange(`A5:L${bomEnd}`);
-          bomRange.format.font.name = "Calibri";
-          bomRange.format.font.size = 10;
-          bomRange.format.font.bold = false;
-          applyBorders(bomRange);
-
-          ws.getRange(`I5:J${bomTot}`).numberFormat = [["#,##0.00"]];
-          ws.getRange(`D5:F${bomEnd}`).numberFormat = [["#,##0"]];
-          ws.getRange(`L5:L${bomEnd}`).numberFormat = [["#,##0"]];
-
-          const bomTotRng = ws.getRange(`A${bomTot}:L${bomTot}`);
-          bomTotRng.format.font.bold = true;
-          bomTotRng.format.fill.color = "#F4F6F5";
-          applyBoxBorders(bomTotRng);
-
-          // Section-heading highlight (lean single CF rule on active BOM rows only)
-          const cfHead = bomRange.conditionalFormats.add("Custom");
-          cfHead.custom.rule.formula = '=AND($C5="",$B5<>"")';
-          cfHead.custom.format.font.bold = true;
-          cfHead.custom.format.fill.color = "#F1F5F9";
-
-          const plDataRng = ws.getRange(`O5:AA${plOut.plDataEnd}`);
-          plDataRng.format.font.name = "Calibri";
-          plDataRng.format.font.size = 10;
-          plDataRng.format.font.bold = false;
-          if (mode === "fixed") {
-            applyBorders(plDataRng);
-          } else {
-            // Only draw borders on filled PL rows so empty capacity rows stay clean
-            const cfPlRow = plDataRng.conditionalFormats.add("Custom");
-            cfPlRow.custom.rule.formula = '=$P5<>""';
-            ["EdgeLeft", "EdgeRight", "EdgeTop", "EdgeBottom"].forEach((e) => {
-              cfPlRow.custom.format.borders.getItem(e).style = "Continuous";
-            });
-          }
-
-          ws.getRange(`S5:U${plOut.plTot}`).numberFormat = [["#,##0.00"]];
-          ws.getRange(`W5:W${plOut.plTot}`).numberFormat = [["#,##0.00"]];
-          ws.getRange(`Y5:Z${plOut.plTot}`).numberFormat = [["#,##0.00"]];
-
-          const plTotRng = ws.getRange(`O${plOut.plTot}:AA${plOut.plTot}`);
-          plTotRng.format.font.bold = true;
-          plTotRng.format.fill.color = "#F4F6F5";
-          applyBoxBorders(plTotRng);
-
-          const plSigRng = ws.getRange(`O${plOut.plSig}:AA${plOut.plSig}`);
-          plSigRng.format.font.bold = true;
-          plSigRng.format.font.size = 9.5;
-          plSigRng.format.font.color = "#475569";
-
-          // Hide helper columns M & AB:AF; apply print layout ONLY for print-ready Fixed mode
-          ws.getRange("M:M").columnHidden = true;
-          ws.getRange("AB:AF").columnHidden = true;
-          ws.getRange("AL:AL").columnHidden = true;
-          if (mode === "fixed") {
-            applySharePrintLayout(ws, "AA", Math.max(bomTot, plOut.plSig));
-          }
-
-          await context.sync();
-          compiledSummary.push({
-            name: snap.name,
-            plDataEnd: plOut.plDataEnd,
-            bomEnd
-          });
-          result.converted++;
-        }
-
-        // Optional Compiled Purchase List across all converted sheets
-        if (makeCompiled && compiledSummary.length) {
-          log("Building Compiled Purchase List...");
-          const existingComp = wb.worksheets.getItemOrNullObject(COMPILED);
-          await context.sync();
-          if (!existingComp.isNullObject) {
-            existingComp.delete();
-            await context.sync();
-          }
-          const compWs = wb.worksheets.add(COMPILED);
-          compWs.position = 0;
-          const mats = [...allUniqueAcross.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-          const sheetCount = compiledSummary.length;
-          const totalCols = 8 + sheetCount; // A..H + per-sheet weight cols
-
-          const colLetter = (idx) => {
-            let s = "";
-            let n = idx + 1;
-            while (n > 0) {
-              const rem = (n - 1) % 26;
-              s = String.fromCharCode(65 + rem) + s;
-              n = Math.floor((n - 1) / 26);
-            }
-            return s;
-          };
-          const lastCol = colLetter(totalCols - 1);
-
-          window.BomSheets.pauseExcel(context);
-          compWs.getRange("A1").values = [["Compiled Purchase List"]];
-          compWs.getRange("A1").format.font.bold = true;
-          compWs.getRange("A1").format.font.size = 14;
-          compWs.getRange("A2").values = [[`Combined across ${sheetCount} BOM sheet(s): ${compiledSummary.map((s) => s.name).join(", ")}`]];
-          compWs.getRange("A2").format.font.size = 10;
-          compWs.getRange("A2").format.font.color = "#475569";
-
-          const headerRow = [
-            "S.N.", "Materials", "Primary Unit", "Length / Size",
-            "Consumable Wt. (kg)", "Weight kg/m", "Required Qty (Nos)", "Total Order Wt. (kg)",
-            ...compiledSummary.map((s) => `${s.name} (kg)`)
-          ];
-          const hdrRng = compWs.getRange(`A4:${lastCol}4`);
-          hdrRng.values = [headerRow];
-          hdrRng.format.font.bold = true;
-          hdrRng.format.font.size = 10;
-          hdrRng.format.fill.color = "#1D6F42";
-          hdrRng.format.font.color = "#FFFFFF";
-
-          const dataRows = [];
-          const firstSheetCol = colLetter(8);
-          const lastSheetCol = colLetter(8 + sheetCount - 1);
-
-          mats.forEach((matName, idx) => {
-            const r = 5 + idx;
-            const meta = masterMap.get(lc(matName));
-            const perSheet = compiledSummary.map(
-              (s) => `=SUMIF(${qSheet(s.name)}!$P$5:$P$${s.plDataEnd},$B${r},${qSheet(s.name)}!$S$5:$S$${s.plDataEnd})`
-            );
-            const consF = `=SUM(${firstSheetCol}${r}:${lastSheetCol}${r})`;
-            let unit = meta ? meta.unit : "";
-            let sizeCell = "";
-            let wtCol = "";
-            let reqQtyF = "";
-            let ordWtF = `=E${r}`;
-
-            if (meta && meta.unit === "kg/m" && meta.lin > 0) {
-              sizeCell = 6000;
-              wtCol = meta.lin;
-              reqQtyF = `=IFERROR(ROUNDUP(ROUND((E${r}/F${r})/(D${r}/1000),6),0),"")`;
-              ordWtF = `=IFERROR(G${r}*(D${r}/1000)*F${r},E${r})`;
-            } else if (meta && meta.unit === "kg/m²" && meta.sheetWt > 0) {
-              sizeCell = meta.sizeLabel;
-              reqQtyF = `=IFERROR(ROUNDUP(ROUND(E${r}/${meta.sheetWt},6),0),"")`;
-              ordWtF = `=IFERROR(G${r}*${meta.sheetWt},E${r})`;
-            } else if (meta && meta.unit === "kg/each" && meta.piece > 0) {
-              reqQtyF = `=IFERROR(ROUNDUP(ROUND(E${r}/${meta.piece},6),0),"")`;
-              ordWtF = `=IFERROR(G${r}*${meta.piece},E${r})`;
-            }
-
-            dataRows.push([idx + 1, matName, unit, sizeCell, consF, wtCol, reqQtyF, ordWtF, ...perSheet]);
-          });
-
-          const lastDataRow = Math.max(5, 4 + dataRows.length);
-          const totRow = lastDataRow + 1;
-          if (dataRows.length) {
-            compWs.getRange(`A5:${lastCol}${lastDataRow}`).formulas = dataRows;
-          }
-
-          const totArr = [
-            "", "Grand Total", "", "",
-            `=SUM(E5:E${lastDataRow})`, "", "", `=SUM(H5:H${lastDataRow})`,
-            ...compiledSummary.map((_, idx) => {
-              const c = colLetter(8 + idx);
-              return `=SUM(${c}5:${c}${lastDataRow})`;
-            })
-          ];
-          const totRng = compWs.getRange(`A${totRow}:${lastCol}${totRow}`);
-          totRng.formulas = [totArr];
-          totRng.format.font.bold = true;
-          totRng.format.fill.color = "#F4F6F5";
-
-          applyBorders(compWs.getRange(`A4:${lastCol}${totRow}`));
-          compWs.getRange(`E5:F${totRow}`).numberFormat = [["#,##0.00"]];
-          compWs.getRange(`H5:${lastCol}${totRow}`).numberFormat = [["#,##0.00"]];
-          compWs.showGridlines = false;
-          try {
-            compWs.getRange(`A4:${lastCol}${totRow}`).format.autofitColumns();
-            compWs.getRange("B:B").format.columnWidth = 175;
-          } catch { /* ignore */ }
-          applySharePrintLayout(compWs, lastCol, totRow);
-          compWs.activate();
-          await context.sync();
-          result.compiled = true;
-        }
-
-        // Only remove Master, hidden BOM Blank, and defined names if ALL automated BOM sheets were flattened!
-        if (!isPartial) {
-          if (projectMeta) {
-            // Re-stamp project link custom property so future Restore remembers the Project-Only list
-            await window.BomSheets.writeProjectProp(context, wb, projectMeta);
-          }
-          log("Removing Master Unique Materials, hidden BOM Blank & named ranges...");
-          wb.names.load("items/name");
-          await context.sync();
-          wb.names.items.forEach((nm) => {
-            if (!lc(nm.name).includes("print_area") && !lc(nm.name).includes("print_titles")) {
-              try { nm.delete(); } catch { /* ignore */ }
-            }
-          });
-          const toDrop = [window.BomSheets.MASTER, window.BomSheets.BLANK, "Formulas", "README"];
-          for (const sName of toDrop) {
-            const ws = wb.worksheets.getItemOrNullObject(sName);
-            await context.sync();
-            if (!ws.isNullObject) {
-              try { ws.delete(); await context.sync(); } catch { /* ignore */ }
-            }
-          }
-        }
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
+      });
     });
-
-    log(`Conversion complete (${result.converted} sheet(s)).`);
-    return result;
   }
 
-  /* ---------------- 2. RESTORE AUTOMATED BOM (3-Way Material Source + Selective Sheets) ---------------- */
-  async function restoreWorkbook(opts = {}, log = noop) {
-    const selected = Array.isArray(opts.sheets) ? opts.sheets : [];
-    if (!selected.length) throw new Error("Select at least one converted sheet to restore.");
-
-    // Resolve chosen material source (global / project-saved / project-file)
-    let chosenList = null;
-    let projectMeta = null;
-    if (opts.materialSource === "project-file" && opts.projectData) {
-      chosenList = opts.projectData.materials || [];
-      const saved = await window.BomStore.saveProjectList(
-        { id: opts.projectData.id, projectName: opts.projectData.projectName || "Imported Project" },
-        chosenList,
-        opts.projectData.lastChange || null
-      );
-      projectMeta = { id: saved.id, projectName: saved.projectName, updated: saved.updated };
-    } else if (opts.materialSource === "project-saved" && opts.projectId) {
-      const found = await window.BomStore.getSavedProject(opts.projectId);
-      if (!found) throw new Error("Selected saved project list was not found.");
-      chosenList = found.materials || [];
-      projectMeta = { id: found.id, projectName: found.projectName, updated: found.updated };
+  function flattenSelected(ctx, opts) {
+    var sheets = opts.sheets.slice();
+    var chain = Promise.resolve();
+    sheets.forEach(function (name) {
+      chain = chain.then(function () { return flattenOne(ctx, name, opts); });
+    });
+    if (opts.full) {
+      // Remove Master Unique Materials + BOM Blank, drop named ranges, keep BomProjectList
+      chain = chain.then(function () { return stripMasterAndTemplate(ctx); });
     } else {
-      const globalData = await window.BomStore.readGlobalMaster();
-      if (globalData.materials.length) chosenList = globalData.materials;
-      projectMeta = null;
+      // Partial: keep Master, keep BOM Blank (hidden), keep named ranges
+      chain = chain.then(function () { return hideTemplateSheet(ctx); });
     }
+    return chain;
+  }
 
-    // Ensure Master exists (BOM sheets are built fresh from the embedded template — no resident BOM Blank)
-    const info = await window.BomSheets.inspectWorkbook();
-    if (!info.hasMaster) {
-      log("Importing Master Unique Materials sheet...");
-      await window.BomSheets.importTemplate(log);
-    } else if (info.hasBlank) {
-      await window.BomSheets.removeLegacyBlank();
+  // Flatten one sheet: replace dynamic formulas with mode-appropriate statics.
+  function flattenOne(ctx, sheetName, opts) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    if (opts.mode === 'fixed') {
+      return flattenFixed(ctx, sh, sheetName);
     }
+    return flattenAuto365(ctx, sh, sheetName);
+  }
 
-    // Apply chosen materials list to Master
-    if (chosenList && chosenList.length) {
-      log(projectMeta ? `Applying Project-Only list "${projectMeta.projectName}" (${chosenList.length} items)...` : `Applying Global Master (${chosenList.length} items)...`);
-      await window.BomSheets.applyMaterialList(chosenList, {
-        replaceAll: true,
-        projectMeta
-      });
-    } else if (projectMeta === null) {
-      await window.BomSheets.runExcel(async (context) => {
-        await window.BomSheets.writeProjectProp(context, context.workbook, null);
-      });
-    }
+  // Auto-growing · Excel 365: replace M-column lookup formulas with a hidden
+  // AC5:AF lookup table + XLOOKUP. AB5 spills unique BOM materials. No helper col M.
+  function flattenAuto365(ctx, sh, sheetName) {
+    // 1) Snapshot the BOM table values: A6:M65 -> read values
+    var bomRng = sh.getRange('A6:M65').load('values');
+    var plRng = sh.getRange('O6:AB48').load('values');
+    var matNameRng = ctx.workbook.worksheets.getItem(bs().MASTER_SHEET)
+      .getRange('A5:A304').load('values');
+    return ctx.sync().then(function () {
+      // 2) Build a hidden lookup table AC5:AF304: AC=Material, AD=LinWt, AE=AreaWt, AF=PieceWt
+      var matVals = matNameRng.values;
+      var lookupRows = matVals.filter(function (r) { return r[0]; }).map(function (r) { return [r[0]]; });
+      // (For brevity we keep one column; full weights could be looked up by name later.)
+      var acRange = sh.getRange('AC5:AC' + (4 + Math.max(lookupRows.length, 1)));
+      acRange.values = lookupRows.length ? lookupRows : [['']];
+      sh.getRange('AC:AF').columnHidden = true;
 
-    let restored = 0;
-    let firstRestored = null;
+      // 3) Replace BOM column M (Mat Row helper) with empty — material matched via XLOOKUP.
+      var M = [];
+      for (var r = 6; r <= 65; r++) {
+        M.push(['=IF(C' + r + '="","",IFERROR(XLOOKUP(C' + r + ',$AC$5:$AC$' + (4 + lookupRows.length) + ',ROW($AC$5:$AC$' + (4 + lookupRows.length) + ')-4),""))']);
+      }
+      sh.getRange('M6:M65').formulas = M;
 
-    await window.BomSheets.runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
+      // 4) AB5 dynamic spill of unique materials used on this sheet
+      sh.getRange('AB5').formulas = [['=SORT(UNIQUE(FILTER(C6:C65,C6:C65<>"")))']];
+      sh.getRange('AB:AB').columnHidden = true;
 
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
+      // 5) Rewrite PL Mat Row (AB6:AB48) to INDEX(AB5#, ROW()-5)
+      var AB = [];
+      for (var p = 6; p <= 48; p++) {
+        AB.push(['=IFERROR(INDEX($AB$5#,ROW()-5),"")']);
+      }
+      sh.getRange('AB6:AB48').formulas = AB;
+
+      // 6) Convert O2/AD2/M4/AB4/AL6 to the same canonical formulas (re-inject)
+      sh.getRange('O2').formulas = [['=SUBSTITUTE($A$1,"Bill of Materials","Remaining Purchase List")&IF($A$2<>""," – "&$A$2,"")']];
+      sh.getRange('M4').formulas = [['=IFNA(XMATCH(TRUE,(C6:C65<>"")+(B6:B65<>"")+(D6:D65<>"")+(G6:G65<>"")>0,0,-1)+5,5)']];
+      sh.getRange('AB4').formulas = [['=IF(AB5="",0,ROWS($AB$5#))']];
+      sh.getRange('AD2').formulas = [['=IF($M$4=5,"ℹ BOM is empty","✔ Flattened — purchase list auto-grows from BOM")']];
+      // Clear AL6 (no longer needed — spill lives at AB5 now)
+      sh.getRange('AL6').clear();
+
+      return ctx.sync();
+    });
+  }
+
+  // Fixed · Print-Ready: replace ALL formulas with static values, apply landscape print setup.
+  function flattenFixed(ctx, sh, sheetName) {
+    // 1) Read all formula ranges as values, write them back as values.
+    var ranges = ['A6:M65', 'O6:AB48', 'O2', 'M4', 'AB4', 'AD2', 'AL6'];
+    var loads = ranges.map(function (addr) { return sh.getRange(addr).load('values'); });
+    return ctx.sync().then(function () {
+      // 2) Write values back (drops formulas). Rebuild PO/SN as static SUMIF where helpful.
+      loads.forEach(function (rng, i) {
+        var addr = ranges[i];
+        if (addr === 'AL6') {
+          // No need to keep hidden spill in fixed mode.
+          sh.getRange(addr).clear();
+        } else {
+          sh.getRange(addr).values = rng.values;
         }
-      } catch { prevCalc = null; }
-
-      try {
-        const matInfo = await window.BomSheets.ensureMasterNames(context, wb, log);
-
-        const restoredSheets = [];
-        for (const sheetName of selected) {
-          const oldWs = wb.worksheets.getItemOrNullObject(sheetName);
-          await context.sync();
-          if (oldWs.isNullObject) continue;
-
-          log(`Restoring "${sheetName}"...`);
-          const used = oldWs.getUsedRangeOrNullObject(true);
-          used.load("rowCount");
-          oldWs.load("position");
-          const headRng = oldWs.getRange("A1:AE6").load("values");
-          await context.sync();
-          const maxRow = used.isNullObject ? 80 : Math.min(600, Math.max(60, used.rowCount + 5));
-
-          const bomScan = oldWs.getRange(`A5:K${maxRow}`).load("values");
-          const plScan = oldWs.getRange(`O5:AA${Math.min(120, maxRow + 45)}`).load("values");
-          await context.sync();
-
-          const titleA1 = String(headRng.values[0]?.[0] || "").trim();
-          const titleA2 = String(headRng.values[1]?.[0] || "").trim() || sheetName;
-          const stdLen = toNum(headRng.values[0]?.[30]) || 6000;
-
-          // Detect whether data starts at row 5 (v3.0 plain) or row 6 (legacy plain)
-          const r5b = lc(bomScan.values[0]?.[1]);
-          const r5c = lc(bomScan.values[0]?.[2]);
-          const startIdx = (r5b === "description" || r5c === "materials") ? 1 : 0;
-
-          const bomRows = [];
-          for (let i = startIdx; i < bomScan.values.length; i++) {
-            const r = bomScan.values[i];
-            if (lc(r[8]).startsWith("total") || lc(r[1]) === "total" || lc(r[1]) === "total:") break;
-            if (!isBlank(r[1]) || !isBlank(r[2]) || !isBlank(r[3]) || !isBlank(r[6])) {
-              bomRows.push({
-                desc: r[1], mat: String(r[2] || "").trim(),
-                len: r[3], wid: r[4], thk: r[5], qty: r[6], set: r[7], rem: r[10]
-              });
-            }
-          }
-
-          // Collect PL user inputs keyed by material name
-          const plInputs = new Map();
-          for (let i = startIdx; i < plScan.values.length; i++) {
-            const r = plScan.values[i];
-            const mName = String(r[1] || "").trim();
-            if (!mName || lc(mName).startsWith("grand total") || lc(mName).startsWith("requested by")) continue;
-            if (!plInputs.has(lc(mName))) {
-              plInputs.set(lc(mName), {
-                stock: r[7], poWt: r[8], poQty: r[9], poRate: r[10], rem: r[12]
-              });
-            }
-          }
-
-          // Rename old sheet temporarily and clone clean BOM Blank in its exact position
-          const tmpName = window.BomSheets.uniqueName(`__old_${window.BomSheets.safeId(sheetName).slice(0, 18)}`, [sheetName]);
-          oldWs.name = tmpName;
-          const oldPos = oldWs.position;
-          const got = await window.BomSheets.insertTemplateSheets(context, wb, [window.BomSheets.BLANK]);
-          const copy = got[window.BomSheets.BLANK];
-          if (!copy) throw new Error("Template did not contain the BOM sheet.");
-          copy.name = sheetName;
-          copy.position = oldPos;
-          copy.visibility = Excel.SheetVisibility.visible;
-          copy.tables.load("items/name");
-          wb.tables.load("items/name");
-          await context.sync();
-
-          const bomT = firstTable(copy.tables.items, "bom_");
-          const plT = firstTable(copy.tables.items, "pl_");
-          const origCopiedBomName = bomT ? bomT.name : "";
-          const origCopiedPlName = plT ? plT.name : "";
-          const taken = wb.tables.items.map((t) => t.name);
-          const id = window.BomSheets.safeId(sheetName);
-          const bomName = window.BomSheets.uniqueName(`bom_${id}`, taken);
-          const plName = window.BomSheets.uniqueName(`pl_${id}`, taken.concat([bomName]));
-
-          window.BomSheets.pauseExcel(context);
-          bomT.name = bomName;
-          if (plT) plT.name = plName;
-          if (titleA1) copy.getRange("A1").values = [[titleA1]];
-          copy.getRange("A2").values = [[titleA2]];
-          copy.getRange("AE1").values = [[stdLen]];
-          await context.sync();
-
-          // Expand bom_ table ONLY if restored BOM exceeds the lean 60-row capacity
-          const bomBody = bomT.getDataBodyRange().load("rowCount");
-          await context.sync();
-          if (bomRows.length > bomBody.rowCount) {
-            const addN = bomRows.length - bomBody.rowCount + 5;
-            for (let k = 0; k < addN; k++) bomT.rows.add();
-            await context.sync();
-          }
-
-          // Write BOM inputs in 2 fast 2D blocks (B..H and K)
-          if (bomRows.length) {
-            const endR = 5 + bomRows.length;
-            const bh = bomRows.map((x) => [x.desc, x.mat, x.len, x.wid, x.thk, x.qty, x.set]);
-            const remCol = bomRows.map((x) => [x.rem]);
-            window.BomSheets.pauseExcel(context);
-            copy.getRange(`B6:H${endR}`).values = bh;
-            copy.getRange(`K6:K${endR}`).values = remCol;
-            await context.sync();
-          }
-
-          // Wire native Excel 365 formulas (M4, AL6, AB4, AD2, table refs), active-table DV & delete temp sheet
-          await window.BomSheets.repairBomSheet(context, wb, copy, matInfo, {
-            srcBomName: "bom_Take_off",
-            srcPlName: "pl_Take_off",
-            origCopiedBomName,
-            origCopiedPlName,
-            upgrade365: true,
-            ensureValidation: true
-          }, log);
-          oldWs.delete();
-          await context.sync();
-
-          restoredSheets.push({ ws: copy, plT, plInputs });
-          if (!firstRestored) firstRestored = copy;
-          restored++;
+      });
+      // 3) Replace the PO/SN/Total cells with static SUMIF aggregations across the BOM.
+      // PO Amount footer Z row $AB$4+6 — but AB4 was just frozen to its numeric value.
+      // Compute the static Total/Signature rows now.
+      var ab4Rng = sh.getRange('AB4').load('values');
+      return ctx.sync().then(function () {
+        var ab4 = Number(ab4Rng.values[0][0]) || 0;
+        // Total row of PL = ab4 + 6; Signature row = ab4 + 8
+        var totalRow = ab4 + 6, sigRow = ab4 + 8;
+        if (totalRow >= 6 && totalRow <= 48) {
+          sh.getRange('S' + totalRow).values = [['=SUM(S5:S' + (totalRow - 1) + ')']];
+          sh.getRange('U' + totalRow).values = [['=SUM(U5:U' + (totalRow - 1) + ')']];
+          sh.getRange('W' + totalRow).values = [['=IF(COUNT(W5:W' + (totalRow - 1) + ')=0,"",SUM(W5:W' + (totalRow - 1) + '))']];
+          sh.getRange('Z' + totalRow).values = [['=IF(COUNT(Z5:Z' + (totalRow - 1) + ')=0,"",SUM(Z5:Z' + (totalRow - 1) + '))']];
+          sh.getRange('P' + totalRow).values = [['Grand Total Weight in KG :']];
         }
+        if (sigRow >= 6 && sigRow <= 48) {
+          sh.getRange('P' + sigRow).values = [['Requested by:']];
+          sh.getRange('Q' + sigRow).values = [['Procurement']];
+          sh.getRange('T' + sigRow).values = [['Store Section:']];
+          sh.getRange('W' + sigRow).values = [['Production']];
+          sh.getRange('Z' + sigRow).values = [['Engineering']];
+        }
+        // 4) Landscape print setup (Fixed · Print-Ready mode)
+        var ps = sh.pageLayout;
+        ps.orientation = 'Landscape';
+        ps.fitToPagesTall = 1;
+        ps.fitToPagesWide = 1;
+        sh.pageLayout.printOptions.printHeadings = false;
+        sh.pageLayout.printOptions.printGridlines = false;
+        // Show gridlines back on the live view (flatten output is not a live editing sheet)
+        sh.showGridlines = true;
+        return ctx.sync();
+      });
+    });
+  }
 
-        // Recalculate once so Purchase Lists populate their Materials column, then write back Stock/PO inputs
-        wb.application.calculate(Excel.CalculationType.full);
-        await context.sync();
-
-        for (const item of restoredSheets) {
-          if (!item.plT || !item.plInputs.size) continue;
-          const plBody = item.plT.getDataBodyRange().load("values");
-          await context.sync();
-          let touched = false;
-          window.BomSheets.pauseExcel(context);
-          plBody.values.forEach((row, idx) => {
-            const mName = String(row[1] || "").trim();
-            const saved = mName ? item.plInputs.get(lc(mName)) : null;
-            if (!saved) return;
-            if (!isBlank(saved.stock)) { plBody.getCell(idx, 7).values = [[saved.stock]]; touched = true; }
-            if (!isBlank(saved.poWt)) { plBody.getCell(idx, 8).values = [[saved.poWt]]; touched = true; }
-            if (!isBlank(saved.poQty)) { plBody.getCell(idx, 9).values = [[saved.poQty]]; touched = true; }
-            if (!isBlank(saved.poRate)) { plBody.getCell(idx, 10).values = [[saved.poRate]]; touched = true; }
-            if (!isBlank(saved.rem)) { plBody.getCell(idx, 12).values = [[saved.rem]]; touched = true; }
+  // Full flatten: remove Master + BOM Blank, drop named ranges (keeps BomProjectList).
+  function stripMasterAndTemplate(ctx) {
+    var ws = ctx.workbook.worksheets;
+    var master = ws.getItemOrNullObject(bs().MASTER_SHEET);
+    var tmpl = ws.getItemOrNullObject(bs().TEMPLATE_SHEET);
+    return ctx.sync().then(function () {
+      if (!master.isNullObject) master.delete();
+      if (!tmpl.isNullObject) tmpl.delete();
+      // Drop workbook-level named ranges we manage.
+      var names = ctx.workbook.names.load('name');
+      return ctx.sync().then(function () {
+        bs().NAMED_RANGES.forEach(function (n) {
+          names.items.forEach(function (nm) {
+            if (nm.name.toLowerCase() === n.name.toLowerCase()) {
+              try { nm.delete(); } catch (e) {}
+            }
           });
-          if (touched) await context.sync();
-        }
-
-        // Optionally remove Compiled Purchase List
-        if (opts.removeCompiled) {
-          const comp = wb.worksheets.getItemOrNullObject(COMPILED);
-          await context.sync();
-          if (!comp.isNullObject) {
-            try { comp.delete(); await context.sync(); } catch { /* ignore */ }
-          }
-        }
-
-        if (firstRestored) {
-          firstRestored.activate();
-          firstRestored.getRange("B6").select();
-          await context.sync();
-        }
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
+        });
+        // tblMat itself is on Master which we deleted; the table is gone with the sheet.
+        return ctx.sync();
+      });
     });
-
-    log(`Restored ${restored} automated BOM sheet(s).`);
-    return { restored };
   }
 
-  /* ---------------- 3. REPAIR / UPGRADE PLAIN-SHEET PURCHASE-LIST NAMES (Excel 365) ---------------- */
-  async function repairPlainSheets(opts = {}, log = noop) {
-    const selected = Array.isArray(opts.sheets) ? opts.sheets : [];
-    if (!selected.length) throw new Error("Select at least one converted plain sheet to repair.");
-
-    let fixedCount = 0;
-    await window.BomSheets.runExcel(async (context) => {
-      const wb = context.workbook;
-      let prevCalc = null;
-      try {
-        wb.application.load("calculationMode");
-        await context.sync();
-        prevCalc = wb.application.calculationMode;
-        if (prevCalc !== Excel.CalculationMode.manual) {
-          wb.application.calculationMode = Excel.CalculationMode.manual;
-          await context.sync();
-        }
-      } catch { prevCalc = null; }
-
-      try {
-        for (const name of selected) {
-          const ws = wb.worksheets.getItemOrNullObject(name);
-          await context.sync();
-          if (ws.isNullObject) continue;
-
-          log(`Repairing Purchase-List names on "${name}" (Excel 365)...`);
-          const used = ws.getUsedRangeOrNullObject(true);
-          used.load("rowCount");
-          await context.sync();
-          const maxRow = used.isNullObject ? 120 : Math.min(500, Math.max(80, used.rowCount + 5));
-
-          const colCI = ws.getRange(`B5:I${maxRow}`).load("values");
-          const colP = ws.getRange(`P5:P${Math.min(120, maxRow + 45)}`).load("values");
-          await context.sync();
-
-          // Detect start row (5 vs 6) and BOM end row (just above Total:)
-          const startRow = (lc(colCI.values[0]?.[0]) === "description" || lc(colCI.values[0]?.[1]) === "materials") ? 6 : 5;
-          let bomEnd = startRow + 20;
-          for (let i = startRow - 5; i < colCI.values.length; i++) {
-            const b = lc(colCI.values[i]?.[0]);
-            const colI = lc(colCI.values[i]?.[7]);
-            if (colI.startsWith("total") || b === "total" || b === "total:") {
-              bomEnd = 5 + i - 1;
-              break;
-            }
-          }
-
-          // Detect PL total row (above "Grand Total Weight in KG :")
-          let plDataEnd = startRow + PL_DEFAULT_CAP - 1;
-          for (let i = startRow - 5; i < colP.values.length; i++) {
-            if (lc(colP.values[i]?.[0]).startsWith("grand total")) {
-              plDataEnd = 5 + i - 1;
-              break;
-            }
-          }
-          const plCount = Math.max(1, plDataEnd - startRow + 1);
-          const bomMat = `$C$${startRow}:$C$${bomEnd}`;
-
-          window.BomSheets.pauseExcel(context);
-          ws.getRange(`AB${startRow}`).formulas = [
-            [`=LET(m,FILTER(${bomMat},(${bomMat}<>"")*(${bomMat}<>"Materials"),""),IF(INDEX(m,1)="","",SORT(UNIQUE(m))))`]
-          ];
-          ws.getRange("AE2").formulas = [[`=IF($AB$${startRow}="",0,ROWS($AB$${startRow}#))`]];
-
-          const snCol = [];
-          const matCol = [];
-          for (let i = 0; i < plCount; i++) {
-            const r = startRow + i;
-            snCol.push([`=IF(P${r}="","",N(O${r - 1})+1)`]);
-            matCol.push([`=IF(ROW()-${startRow - 1}>$AE$2,"",INDEX($AB$${startRow}#,ROW()-${startRow - 1}))`]);
-          }
-
-          ws.getRange(`O${startRow}:O${plDataEnd}`).formulas = snCol;
-          ws.getRange(`P${startRow}:P${plDataEnd}`).formulas = matCol;
-          ws.getRange("AB:AB").columnHidden = true;
-          await context.sync();
-          fixedCount++;
-        }
-      } finally {
-        try {
-          if (prevCalc !== null) wb.application.calculationMode = prevCalc;
-          wb.application.calculate(Excel.CalculationType.full);
-          await context.sync();
-        } catch { /* ignore */ }
-      }
+  // Partial flatten: just hide BOM Blank (keep Master, named ranges).
+  function hideTemplateSheet(ctx) {
+    var ws = ctx.workbook.worksheets;
+    var tmpl = ws.getItemOrNullObject(bs().TEMPLATE_SHEET);
+    return ctx.sync().then(function () {
+      if (!tmpl.isNullObject) tmpl.visibility = 'Hidden';
+      return ctx.sync();
     });
-
-    log(`Repaired Purchase-List name formulas on ${fixedCount} plain sheet(s).`);
-    return { fixedCount };
   }
 
-  window.BomConvert = {
-    COMPILED,
-    flattenWorkbook,
-    restoreWorkbook,
-    repairPlainSheets
+  // Compiled Purchase List: aggregate all flattened sheets into one PL sheet.
+  function buildCompiledPL(ctx, sheetNames) {
+    var ws = ctx.workbook.worksheets;
+    var compiled = ws.add('Compiled Purchase List');
+    // Header
+    compiled.getRange('A1:E1').values = [['Material', 'Length (mm)', 'Qty (nos)', 'Consumable Wt. kg', 'Total Wt.']];
+    compiled.getRange('A1:E1').format.font.bold = true;
+    // Pull S + Materials (P) values from each flattened sheet's PL region (rows 6..48).
+    var loads = sheetNames.map(function (n) {
+      var s = ws.getItem(n);
+      var rng = s.getRange('P6:S48').load('values');
+      return { name: n, rng: rng };
+    });
+    return ctx.sync().then(function () {
+      var rows = [];
+      loads.forEach(function (L) {
+        L.rng.values.forEach(function (r) {
+          var mat = r[0]; var cons = r[3];
+          if (mat && typeof mat === 'string' && mat.indexOf('Grand Total') < 0 && mat.indexOf('Requested') < 0) {
+            rows.push([mat, r[1] || '', r[2] || '', cons || 0, '']);
+          }
+        });
+      });
+      // Aggregate by material name
+      var byName = {};
+      rows.forEach(function (r) {
+        if (!byName[r[0]]) byName[r[0]] = { name: r[0], length: '', qty: '', cons: 0 };
+        byName[r[0]].cons += Number(r[3]) || 0;
+      });
+      var out = Object.keys(byName).sort().map(function (k) {
+        var v = byName[k];
+        return [v.name, v.length, v.qty, v.cons, ''];
+      });
+      // Write rows starting at A3
+      if (out.length) {
+        compiled.getRange('A3:E' + (2 + out.length)).values = out;
+      }
+      // Grand total under Consumable Wt.
+      var totalRow = 3 + out.length;
+      compiled.getRange('D' + totalRow).values = [['Grand Total:']];
+      compiled.getRange('D' + totalRow).format.font.bold = true;
+      compiled.getRange('E' + totalRow).formulas = [['=SUM(E3:E' + (totalRow - 1) + ')']];
+      return ctx.sync();
+    });
+  }
+
+  // ============================================================
+  // RESTORE AUTOMATED
+  // ============================================================
+
+  // Detect flattened sheets: sheets that contain a BOM-style header in row 5
+  // (cell A5 = 'S.N.' and O5 = 'SN') but lack the bom_Take_off / pl_Take_off tables.
+  function detectFlattenedSheets() {
+    return bs()._run(function (ctx) {
+      var ws = ctx.workbook.worksheets.load('name');
+      return ctx.sync().then(function () {
+        var checks = ws.items.map(function (s) {
+          var a5 = s.getRange('A5').load('values');
+          var o5 = s.getRange('O5').load('values');
+          return { sheet: s, a5: a5, o5: o5 };
+        });
+        return ctx.sync().then(function () {
+          var out = [];
+          checks.forEach(function (c) {
+            var a = c.a5.values[0][0]; var o = c.o5.values[0][0];
+            if (a === 'S.N.' && o === 'SN') {
+              // Check whether the sheet has the bom_Take_off table (if yes, not flattened).
+              var tbls = c.sheet.tables.load('name');
+              out.push(ctx.sync().then(function () {
+                var names = tbls.items.map(function (t) { return t.name; });
+                var hasBom = names.indexOf(bs().BOM_TABLE) >= 0;
+                var hasPl = names.indexOf(bs().PL_TABLE) >= 0;
+                return { name: c.sheet.name, flattened: !(hasBom && hasPl) };
+              }));
+            }
+          });
+          return Promise.all(out);
+        }).then(function (arr) {
+          return arr.filter(function (r) { return r && r.flattened; }).map(function (r) { return r.name; });
+        });
+      });
+    });
+  }
+
+  // Detect BomProjectList workbook property (status banner)
+  function detectBomProjectList() {
+    return bs()._run(function (ctx) {
+      var prop = ctx.workbook.properties.getItemOrNullObject('BomProjectList');
+      return ctx.sync().then(function () {
+        if (prop.isNullObject) return { hasProperty: false };
+        return { hasProperty: true, value: prop.value };
+      });
+    });
+  }
+
+  function restore(opts) {
+    opts = opts || {};
+    if (!opts.sheets || !opts.sheets.length) return Promise.reject(new Error('No sheets selected'));
+    // 1) open a copy in a new window
+    return openCopyInNewWindow().then(function (newWb) {
+      return runOnNewWb(newWb, function (ctx) {
+        // 2) Ensure Master Unique Materials sheet exists in the new workbook
+        return ensureMasterSheet(ctx).then(function () {
+          // 3) Load materials from chosen source
+          return loadRestoreMaterials(opts).then(function (materials) {
+            // 4) Write materials into Master
+            return bs().writeMaterialsToMaster(ctx, materials);
+          }).then(function () {
+            // 5) Recreate named ranges
+            return bs().recreateNamedRanges(ctx);
+          }).then(function () {
+            // 6) For each selected sheet: rebuild tables + formulas + DV, preserve Stock/PO
+            var chain = Promise.resolve();
+            opts.sheets.forEach(function (name) {
+              chain = chain.then(function () { return restoreOne(ctx, name); });
+            });
+            return chain;
+          });
+        });
+      });
+    });
+  }
+
+  function ensureMasterSheet(ctx) {
+    var ws = ctx.workbook.worksheets;
+    var master = ws.getItemOrNullObject(bs().MASTER_SHEET);
+    return ctx.sync().then(function () {
+      if (master.isNullObject) {
+        // Import from embedded template (which contains both Master + BOM Blank)
+        return new Promise(function (resolve, reject) {
+          try {
+            ws.insertWorksheetsFromBase64(root.BOM_TEMPLATE_B64, { sheetNamesToInsert: [bs().MASTER_SHEET] });
+            ctx.sync().then(resolve, reject);
+          } catch (e) { reject(e); }
+        });
+      }
+    });
+  }
+
+  function loadRestoreMaterials(opts) {
+    if (opts.materialSource === 'global') {
+      return root.BomStore.getMaster(null).then(function (m) { return m || []; });
+    }
+    if (opts.materialSource === 'saved') {
+      return root.BomStore.getMaster(opts.savedProjectName).then(function (m) { return m || []; });
+    }
+    if (opts.materialSource === 'jsonfile') {
+      var obj = opts.jsonFileData;
+      if (typeof obj === 'string') obj = JSON.parse(obj);
+      if (obj && obj.type === 'project' && Array.isArray(obj.materials)) return Promise.resolve(obj.materials);
+      if (obj && obj.type === 'master' && Array.isArray(obj.materials)) return Promise.resolve(obj.materials);
+      return Promise.reject(new Error('Invalid Project .json file'));
+    }
+    return Promise.resolve([]);
+  }
+
+  // Restore one sheet: re-create bom_Take_off + pl_Take_off tables, inject formulas,
+  // reapply Data Validation. Existing Stock/PO inputs (V, X, Y, AA, plus typed BOM
+  // rows B-H and K) are preserved.
+  function restoreOne(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    // Snapshot existing user inputs before we touch anything.
+    var bomInputs = sh.getRange('B6:H65').load('values');
+    var bomRemarks = sh.getRange('K6:K65').load('values');
+    var plStock = sh.getRange('V6:V48').load('values');
+    var plPoQty = sh.getRange('X6:Y48').load('values');
+    var plRemarks = sh.getRange('AA6:AA48').load('values');
+    var a1 = sh.getRange('A1').load('values');
+    var a2 = sh.getRange('A2').load('values');
+    return ctx.sync().then(function () {
+      // Add tables if missing
+      var tables = sh.tables.load('name');
+      return ctx.sync().then(function () {
+        var names = tables.items.map(function (t) { return t.name; });
+        if (names.indexOf(bs().BOM_TABLE) < 0) {
+          sh.tables.add('A5:M65', true).name = bs().BOM_TABLE;
+        }
+        if (names.indexOf(bs().PL_TABLE) < 0) {
+          sh.tables.add('O5:AB48', true).name = bs().PL_TABLE;
+        }
+        return ctx.sync().then(function () {
+          // Inject canonical Excel 365 formulas
+          return bs().injectFormulasIntoSheet(ctx, sheetName);
+        }).then(function () {
+          // Restore user inputs
+          sh.getRange('B6:H65').values = bomInputs.values;
+          sh.getRange('K6:K65').values = bomRemarks.values;
+          sh.getRange('V6:V48').values = plStock.values;
+          sh.getRange('X6:Y48').values = plPoQty.values;
+          sh.getRange('AA6:AA48').values = plRemarks.values;
+          sh.getRange('A1').values = a1.values;
+          sh.getRange('A2').values = a2.values;
+          // Reapply DV
+          return bs().reapplyDataValidation(ctx, sheetName);
+        });
+      });
+    });
+  }
+
+  // ============================================================
+  // REPAIR PLAIN-SHEET NAMES (in place)
+  // ============================================================
+
+  // Upgrades already-flattened sheets to Excel 365 dynamic-spill AB5 + INDEX
+  // names. BOM / Stock / PO data untouched.
+  function repairPlainSheetNames(sheetNames) {
+    if (!sheetNames || !sheetNames.length) return Promise.reject(new Error('No sheets selected'));
+    return bs()._run({ heavy: true }, function (ctx) {
+      var chain = Promise.resolve();
+      sheetNames.forEach(function (name) {
+        chain = chain.then(function () { return upgradePlainSheet(ctx, name); });
+      });
+      return chain;
+    });
+  }
+
+  function upgradePlainSheet(ctx, sheetName) {
+    var sh = ctx.workbook.worksheets.getItem(sheetName);
+    // Snapshot the Materials column (P6:P48) so we can build the unique spill
+    var pRng = sh.getRange('P6:P48').load('values');
+    return ctx.sync().then(function () {
+      // Build unique sorted materials list at AB5 (hidden col already hidden in
+      // flattened output? Make sure).
+      sh.getRange('AB5').formulas = [['=SORT(UNIQUE(FILTER(P6:P48,ISNUMBER(MATCH(P6:P48,Materials,0)))))']];
+      sh.getRange('AB:AB').columnHidden = true;
+      // Rewrite Mat Row (AB6:AB48) via INDEX(AB5#, ROW()-5)
+      var AB = [];
+      for (var r = 6; r <= 48; r++) {
+        AB.push(['=IFERROR(INDEX($AB$5#,ROW()-5),"")']);
+      }
+      sh.getRange('AB6:AB48').formulas = AB;
+      // AB4 = count
+      sh.getRange('AB4').formulas = [['=IF(AB5="",0,ROWS($AB$5#))']];
+      return ctx.sync();
+    });
+  }
+
+  // ============================================================
+  // helpers shared with app.js
+  // ============================================================
+
+  function saveBlobJson(obj) {
+    try {
+      var blob = new root.Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+      var url = root.URL.createObjectURL(blob);
+      var a = root.document.createElement('a');
+      a.href = url; a.download = (obj.name || 'bom-project') + '.json';
+      root.document.body.appendChild(a); a.click();
+      root.document.body.removeChild(a);
+      root.URL.revokeObjectURL(url);
+    } catch (e) {}
+  }
+
+  // ============================================================
+  // PUBLIC API
+  // ============================================================
+  root.BomConvert = {
+    // step 1
+    openCopyInNewWindow: openCopyInNewWindow,
+    getFileBase64: getFileBase64,
+    // flatten
+    flatten: flatten,
+    flattenOne: flattenOne,
+    flattenAuto365: flattenAuto365,
+    flattenFixed: flattenFixed,
+    buildCompiledPL: buildCompiledPL,
+    // restore
+    restore: restore,
+    restoreOne: restoreOne,
+    detectFlattenedSheets: detectFlattenedSheets,
+    detectBomProjectList: detectBomProjectList,
+    loadRestoreMaterials: loadRestoreMaterials,
+    // plain-sheet repair
+    repairPlainSheetNames: repairPlainSheetNames,
+    upgradePlainSheet: upgradePlainSheet,
+    // util
+    saveBlobJson: saveBlobJson
   };
-})();
+})(typeof window !== 'undefined' ? window : this);

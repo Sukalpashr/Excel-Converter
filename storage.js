@@ -1,776 +1,544 @@
-/* storage.js - Built-in Storage, Full v1.8-v3.0 Migration, Project-Only Lists & Saved Library Pool (3.0v patch2) */
-(() => {
-  "use strict";
+/* storage.js — window.BomStore
+ * ----------------------------------------------------------------------------
+ * Built-in storage for the BOM Tools add-in. No backend required.
+ *
+ * Layers (written in parallel, read with first-wins):
+ *   1. IndexedDB  — primary, async, large
+ *   2. OPFS       — Origin Private File System, async, large (when supported)
+ *   3. localStorage — sync, small (~5 MB), always available fallback
+ *
+ * Project-Only isolation:
+ *   - The GLOBAL master lives under key "bom_global_master".
+ *   - Each project lives under key "bom_project:<name>".
+ *   - Switching the active scope only changes which slot BomStore.getMaster()
+ *     returns. The Global slot and GitHub remote are NEVER touched by project
+ *     operations unless the user explicitly pushes Global.
+ *
+ * JSON shapes:
+ *   Master  : { type:"master",  version, exportedAt, materials:[...] }
+ *   Project : { type:"project",  version, exportedAt, name, bomProjectList,
+ *               materials:[...], sheets:[{name, bom:[], po:[]}] }
+ *
+ *   Importing a "project"-typed file via importMaster() is REJECTED — only
+ *   importProject() accepts project files.
+ *
+ * Offline API (optional): when hosted on localhost and /api/health responds,
+ *   BomStore also pulls/pushes from /api/master and /api/projects. Detection
+ *   is best-effort; absence is silent.
+ */
+(function (root) {
+  'use strict';
 
-  const VERSION = "3.0v patch2";
-  const DB_NAME = "BomToolsV3DB";
-  const DB_STORE = "kv";
-  const LEGACY_DB_NAME = "BomToolsLocalDB";
-  const LEGACY_DB_STORE = "kv";
-  const LEGACY_IDB_GLOBAL = "localMasterJson";
-  const LEGACY_LS_GLOBAL = "bomLocalMasterJson";
-  const LEGACY_OPFS_GLOBAL = "master-materials.json";
+  var DB_NAME = 'bom_tools';
+  var DB_STORE = 'kv';
+  var DB_VERSION = 1;
+  var LS_PREFIX = 'bom_tools:';
+  var KEY_GLOBAL = 'bom_global_master';
+  var KEY_PROJECT_PREFIX = 'bom_project:';
+  var KEY_ACTIVE_PROJECT = 'bom_active_project';
+  var KEY_AUDIT = 'bom_audit_log';
 
-  const LS_GLOBAL = "bomTools_globalMaster_v3";
-  const LS_PROJECTS = "bomTools_projectLists_v3";
-  const LS_TOKEN = "bomTools_ghToken_v3";
-  const LEGACY_LS_TOKEN = "bomGhToken";
-  const OPFS_GLOBAL = "bom-global-master.json";
-  const OPFS_PROJECTS = "bom-project-lists.json";
+  var DEFAULT_MATERIALS = []; // populated lazily from the embedded Master sheet
 
-  const UNITS = ["kg/m", "kg/m²", "kg/each"];
-  const COMPARE_FIELDS = ["category", "unit", "lin", "area", "piece", "sl", "sw", "remarks"];
+  // ---------- small utils ----------
+  function nowISO() { return new Date().toISOString(); }
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  function promise(fn) { return new Promise(fn); }
+  function logErr(label, err) { console.warn('[BomStore] ' + label + ':', err && err.message || err); }
 
-  const lc = (s) => String(s ?? "").trim().toLowerCase();
-  const isNil = (v) => v === null || v === undefined || (typeof v === "number" && Number.isNaN(v));
-  const toNum = (v) => {
-    if (v === null || v === undefined || v === "") return null;
-    const n = Number(String(v).replace(/,/g, ""));
-    return Number.isFinite(n) ? n : null;
-  };
-  const slugify = (name) =>
-    String(name || "project").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
-
-  function normAction(v) {
-    const s = lc(v);
-    if (s === "add" || s === "added") return "added";
-    if (s === "edit" || s === "edited" || s === "mod" || s === "modified" || s === "updated") return "modified";
-    if (s === "remove" || s === "removed" || s === "deleted") return "removed";
-    return "";
+  // ---------- listeners ----------
+  var listeners = {};
+  function on(evt, cb) {
+    (listeners[evt] = listeners[evt] || []).push(cb);
+    return function () { off(evt, cb); };
+  }
+  function off(evt, cb) {
+    var arr = listeners[evt]; if (!arr) return;
+    var i = arr.indexOf(cb); if (i >= 0) arr.splice(i, 1);
+  }
+  function emit(evt, payload) {
+    var arr = listeners[evt]; if (!arr) return;
+    arr.slice().forEach(function (cb) { try { cb(payload); } catch (e) { logErr('listener', e); } });
   }
 
-  function normalizeMaterial(raw) {
-    const unit = String(raw?.unit ?? "").trim();
-    return {
-      material: String(raw?.material ?? "").trim(),
-      category: String(raw?.category ?? "").trim(),
-      unit,
-      lin: unit === "kg/m" ? toNum(raw?.lin) : null,
-      area: unit === "kg/m²" ? toNum(raw?.area) : null,
-      piece: unit === "kg/each" ? toNum(raw?.piece) : null,
-      sl: unit === "kg/m²" ? toNum(raw?.sl) : null,
-      sw: unit === "kg/m²" ? toNum(raw?.sw) : null,
-      remarks: String(raw?.remarks ?? "").trim(),
-      lastAction: normAction(raw?.lastAction),
-      lastModified: raw?.lastModified ? String(raw.lastModified).trim() : ""
-    };
-  }
-
-  function cleanForJson(m) {
-    const n = normalizeMaterial(m);
-    const o = {
-      material: n.material,
-      category: n.category,
-      unit: n.unit,
-      lin: n.lin,
-      area: n.area,
-      piece: n.piece,
-      sl: n.sl,
-      sw: n.sw,
-      remarks: n.remarks
-    };
-    if (n.lastAction) o.lastAction = n.lastAction;
-    if (n.lastModified) o.lastModified = n.lastModified;
-    return o;
-  }
-
-  function sameVal(a, b) {
-    const x = isNil(a) || a === "" ? null : a;
-    const y = isNil(b) || b === "" ? null : b;
-    if (x === null || y === null) return x === y;
-    if (typeof x === "number" && typeof y === "number") return Math.abs(x - y) < 1e-9;
-    return String(x).trim() === String(y).trim();
-  }
-
-  function changedFields(a, b) {
-    return COMPARE_FIELDS.filter((k) => !sameVal(a[k], b[k]));
-  }
-
-  function diffLists(curr, prev) {
-    const mapA = new Map();
-    const mapB = new Map();
-    for (const m of curr) if (m.material && !mapA.has(lc(m.material))) mapA.set(lc(m.material), m);
-    for (const m of prev) if (m.material && !mapB.has(lc(m.material))) mapB.set(lc(m.material), m);
-    const added = [];
-    const modified = [];
-    const removed = [];
-    for (const [k, m] of mapA) {
-      if (!mapB.has(k)) {
-        added.push(m);
-      } else {
-        const fields = changedFields(mapB.get(k), m);
-        if (fields.length) modified.push({ material: m.material, fields, next: m, prev: mapB.get(k) });
-      }
-    }
-    for (const [k, m] of mapB) if (!mapA.has(k)) removed.push(m);
-    return { added, modified, removed };
-  }
-
-  function buildLastChange(source, items, timeIso) {
-    if (!items || !items.length) return null;
-    const time = timeIso || new Date().toISOString();
-    const cleanItems = items
-      .map((it) => ({
-        material: typeof it.material === "string" ? it.material : it.material?.material || "",
-        type: normAction(it.type) || "modified",
-        time: it.time || time,
-        ...(it.fields && it.fields.length ? { fields: [...it.fields] } : {})
-      }))
-      .filter((x) => x.material);
-    if (!cleanItems.length) return null;
-    const kinds = new Set(cleanItems.map((x) => x.type));
-    return {
-      time,
-      type: kinds.size === 1 ? [...kinds][0] : "mixed",
-      source: source || "panel",
-      items: cleanItems
-    };
-  }
-
-  function serializeMaster(list, lastChange, updatedIso) {
-    const payload = {
-      version: 3,
-      type: "master",
-      updated: updatedIso || new Date().toISOString(),
-      ...(lastChange ? { lastChange } : {}),
-      materials: list.map(cleanForJson)
-    };
-    return JSON.stringify(payload, null, 2) + "\n";
-  }
-
-  function serializeProject(projectName, list, lastChange, id, updatedIso) {
-    const cleanName = String(projectName || "Project").trim();
-    const payload = {
-      version: 3,
-      type: "project",
-      id: id || slugify(cleanName),
-      project: cleanName,
-      projectName: cleanName,
-      updated: updatedIso || new Date().toISOString(),
-      ...(lastChange ? { lastChange } : {}),
-      materials: list.map(cleanForJson)
-    };
-    return JSON.stringify(payload, null, 2) + "\n";
-  }
-
-  function parseJsonText(text) {
-    const raw = JSON.parse(text);
-    const isObj = raw && typeof raw === "object" && !Array.isArray(raw);
-    const arr = Array.isArray(raw) ? raw : Array.isArray(raw?.materials) ? raw.materials : [];
-    const materials = arr.map(normalizeMaterial).filter((m) => m.material);
-    return {
-      type: isObj && raw.type === "project" ? "project" : "master",
-      id: isObj ? String(raw.id || "") : "",
-      projectName: isObj ? String(raw.projectName || raw.project || raw.name || "").trim() : "",
-      updated: isObj ? String(raw.updated || "") : "",
-      lastChange: isObj ? raw.lastChange || null : null,
-      materials
-    };
-  }
-
-  /* ---------------- Multi-Layer Storage (OPFS + IndexedDB v3 & legacy v1.8-v2.6 + localStorage + Offline LTS) ---------------- */
-  let offlineDetected = null;
-
-  function isOfflineHost() {
-    try {
-      const h = location.hostname;
-      return h === "localhost" || h === "127.0.0.1" || location.search.includes("offline=1");
-    } catch {
-      return false;
-    }
-  }
-
-  async function detectOfflineApi() {
-    if (offlineDetected !== null) return offlineDetected;
-    if (!isOfflineHost()) {
-      offlineDetected = false;
-      return false;
-    }
-    try {
-      const r = await fetch("/api/health", { cache: "no-store" });
-      offlineDetected = r.ok;
-    } catch {
-      offlineDetected = false;
-    }
-    return offlineDetected;
-  }
-
-  function openNamedDb(dbName, storeName) {
-    return new Promise((resolve) => {
-      if (typeof indexedDB === "undefined") return resolve(null);
-      try {
-        const req = indexedDB.open(dbName, 1);
-        req.onupgradeneeded = () => {
-          const db = req.result;
-          if (!db.objectStoreNames.contains(storeName)) db.createObjectStore(storeName);
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  }
-
-  async function idbGetFrom(dbName, storeName, key) {
-    const db = await openNamedDb(dbName, storeName);
-    if (!db) return null;
-    return new Promise((resolve) => {
-      try {
-        if (!db.objectStoreNames.contains(storeName)) return resolve(null);
-        const req = db.transaction(storeName, "readonly").objectStore(storeName).get(key);
-        req.onsuccess = () => resolve(req.result ?? null);
-        req.onerror = () => resolve(null);
-      } catch {
-        resolve(null);
-      }
-    });
-  }
-
-  async function idbSetIn(dbName, storeName, key, val) {
-    const db = await openNamedDb(dbName, storeName);
-    if (!db) return;
-    await new Promise((resolve) => {
-      try {
-        if (!db.objectStoreNames.contains(storeName)) return resolve();
-        const tx = db.transaction(storeName, "readwrite");
-        tx.objectStore(storeName).put(val, key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  }
-
-  async function idbDelIn(dbName, storeName, key) {
-    const db = await openNamedDb(dbName, storeName);
-    if (!db) return;
-    await new Promise((resolve) => {
-      try {
-        if (!db.objectStoreNames.contains(storeName)) return resolve();
-        const tx = db.transaction(storeName, "readwrite");
-        tx.objectStore(storeName).delete(key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  }
-
-  async function idbEntriesFrom(dbName, storeName, prefix) {
-    const db = await openNamedDb(dbName, storeName);
-    if (!db) return [];
-    return new Promise((resolve) => {
-      try {
-        if (!db.objectStoreNames.contains(storeName)) return resolve([]);
-        const out = [];
-        const tx = db.transaction(storeName, "readonly");
-        const store = tx.objectStore(storeName);
-        const req = store.openCursor();
-        req.onsuccess = (ev) => {
-          const cur = ev.target.result;
-          if (!cur) return resolve(out);
-          const k = String(cur.key || "");
-          if (!prefix || k.toLowerCase().startsWith(prefix.toLowerCase())) {
-            out.push({ key: k, value: cur.value });
-          }
-          cur.continue();
-        };
-        req.onerror = () => resolve(out);
-      } catch {
-        resolve([]);
-      }
-    });
-  }
-
-  async function opfsRead(file) {
-    try {
-      if (!navigator?.storage?.getDirectory) return null;
-      const dir = await navigator.storage.getDirectory();
-      const fh = await dir.getFileHandle(file);
-      return await (await fh.getFile()).text();
-    } catch {
-      return null;
-    }
-  }
-
-  async function opfsWrite(file, text) {
-    try {
-      if (!navigator?.storage?.getDirectory) return;
-      if (navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      const dir = await navigator.storage.getDirectory();
-      const fh = await dir.getFileHandle(file, { create: true });
-      const w = await fh.createWritable();
-      await w.write(text);
-      await w.close();
-    } catch { /* non-fatal */ }
-  }
-
-  async function opfsRemove(file) {
-    try {
-      if (!navigator?.storage?.getDirectory) return;
-      const dir = await navigator.storage.getDirectory();
-      await dir.removeEntry(file);
-    } catch { /* ignore */ }
-  }
-
-  async function opfsListProjectFiles() {
-    const out = [];
-    try {
-      if (!navigator?.storage?.getDirectory) return out;
-      const dir = await navigator.storage.getDirectory();
-      if (typeof dir.entries === "function") {
-        for await (const [name, handle] of dir.entries()) {
-          if (handle.kind === "file" && /^project-.+\.json$/i.test(name)) {
-            try {
-              const text = await (await handle.getFile()).text();
-              out.push({ fileName: name, text });
-            } catch { /* ignore */ }
-          }
-        }
-      }
-    } catch { /* ignore */ }
-    return out;
-  }
-
-  /* ---- Global Master Read / Write (Reconciles ALL v3 + legacy v1.8-v2.6 layers by newest timestamp) ---- */
-  function pickNewestMaster(candidates) {
-    let best = null;
-    for (const c of candidates) {
-      if (!c || !Array.isArray(c.materials) || !c.materials.length) continue;
-      if (!best) { best = c; continue; }
-      const tsA = String(c.updated || "");
-      const tsB = String(best.updated || "");
-      if (tsA && tsB) {
-        if (tsA > tsB) best = c;
-      } else if (tsA && !tsB) {
-        best = c;
-      } else if (!tsA && !tsB && c.materials.length > best.materials.length) {
-        best = c;
-      }
-    }
-    return best || { type: "master", updated: "", lastChange: null, materials: [] };
-  }
-
-  async function readGlobalMaster() {
-    const candidates = [];
-    const tryParse = (txt) => {
-      if (!txt || typeof txt !== "string") return;
-      try {
-        const parsed = parseJsonText(txt);
-        if (parsed.type !== "project" && parsed.materials.length) candidates.push(parsed);
-      } catch { /* ignore corrupt layer */ }
-    };
-
-    if (await detectOfflineApi()) {
-      try {
-        const res = await fetch("/api/master", { cache: "no-store" });
-        if (res.ok) tryParse(await res.text());
-      } catch { /* fall through */ }
-    }
-
-    // Read ALL v3 + legacy v1.8-v2.6 layers in parallel so previously saved materials are ALWAYS discovered!
-    const [opfsV3, idbV3, opfsLegacy, idbLegacy] = await Promise.all([
-      opfsRead(OPFS_GLOBAL),
-      idbGetFrom(DB_NAME, DB_STORE, LS_GLOBAL),
-      opfsRead(LEGACY_OPFS_GLOBAL),
-      idbGetFrom(LEGACY_DB_NAME, LEGACY_DB_STORE, LEGACY_IDB_GLOBAL)
-    ]);
-
-    tryParse(opfsV3);
-    tryParse(idbV3);
-    tryParse(opfsLegacy);
-    tryParse(idbLegacy);
-    try {
-      tryParse(localStorage.getItem(LS_GLOBAL));
-      tryParse(localStorage.getItem(LEGACY_LS_GLOBAL));
-    } catch { /* ignore */ }
-
-    const best = pickNewestMaster(candidates);
-
-    // Silently sync v3 layers if we migrated newer data from a legacy v1.8-v2.6 store
-    if (best.materials.length && (!opfsV3 || !idbV3)) {
-      const json = serializeMaster(best.materials, best.lastChange || null, best.updated || new Date().toISOString());
-      try { localStorage.setItem(LS_GLOBAL, json); } catch { /* ignore */ }
-      Promise.all([
-        idbSetIn(DB_NAME, DB_STORE, LS_GLOBAL, json),
-        opfsWrite(OPFS_GLOBAL, json)
-      ]).catch(() => {});
-    }
-    return best;
-  }
-
-  async function writeGlobalMaster(list, lastChange) {
-    const normalized = list.map(normalizeMaterial).filter((m) => m.material);
-    const nowIso = new Date().toISOString();
-    const json = serializeMaster(normalized, lastChange || null, nowIso);
-    try {
-      localStorage.setItem(LS_GLOBAL, json);
-      localStorage.setItem(LEGACY_LS_GLOBAL, json);
-    } catch { /* ignore */ }
-    await Promise.all([
-      idbSetIn(DB_NAME, DB_STORE, LS_GLOBAL, json),
-      opfsWrite(OPFS_GLOBAL, json),
-      idbSetIn(LEGACY_DB_NAME, LEGACY_DB_STORE, LEGACY_IDB_GLOBAL, json),
-      opfsWrite(LEGACY_OPFS_GLOBAL, json)
-    ]);
-    if (await detectOfflineApi()) {
-      try {
-        await fetch("/api/master", { method: "POST", headers: { "Content-Type": "application/json" }, body: json });
-      } catch { /* non-fatal */ }
-    }
-    return { count: normalized.length, updated: nowIso, json };
-  }
-
-  /* ---- Saved Project-Only Material Lists (Full v1.9-v3.0 Migration & Per-Project Auto-Save) ---- */
-  async function readProjectMap() {
-    const bySlug = new Map(); // slugify(projectName) -> entry
-
-    const absorbEntry = (entry) => {
-      if (!entry || !entry.projectName) return;
-      const pName = String(entry.projectName).trim();
-      if (!pName) return;
-      const key = slugify(pName);
-      const mats = Array.isArray(entry.materials)
-        ? entry.materials.map(normalizeMaterial).filter((m) => m.material)
-        : [];
-      const cand = {
-        id: String(entry.id || key).trim() || key,
-        projectName: pName,
-        updated: String(entry.updated || ""),
-        lastChange: entry.lastChange || null,
-        materials: mats
+  // ---------- IndexedDB ----------
+  var _db = null;
+  function idbOpen() {
+    return promise(function (resolve, reject) {
+      if (_db) return resolve(_db);
+      if (!root.indexedDB) return reject(new Error('no-idb'));
+      var req = root.indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = function () {
+        var db = req.result;
+        if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
       };
-      const prev = bySlug.get(key);
-      if (!prev) {
-        bySlug.set(key, cand);
-        return;
-      }
-      // Prefer newest updated timestamp (or richer list when timestamps tie/absent)
-      if (cand.updated && prev.updated) {
-        if (cand.updated > prev.updated) bySlug.set(key, cand);
-      } else if (cand.updated && !prev.updated) {
-        bySlug.set(key, cand);
-      } else if (!cand.updated && !prev.updated && cand.materials.length > prev.materials.length) {
-        bySlug.set(key, cand);
-      }
-    };
+      req.onsuccess = function () { _db = req.result; resolve(_db); };
+      req.onerror = function () { reject(req.error); };
+    });
+  }
+  function idbGet(key) {
+    return idbOpen().then(function (db) {
+      return promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, 'readonly');
+        var req = tx.objectStore(DB_STORE).get(key);
+        req.onsuccess = function () { resolve(req.result); };
+        req.onerror = function () { reject(req.error); };
+      });
+    });
+  }
+  function idbSet(key, val) {
+    return idbOpen().then(function (db) {
+      return promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).put(val, key);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    });
+  }
+  function idbKeys(prefix) {
+    return idbOpen().then(function (db) {
+      return promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, 'readonly');
+        var store = tx.objectStore(DB_STORE);
+        var out = [];
+        var cur = store.openKeyCursor ? store.openKeyCursor() : store.openCursor();
+        cur.onsuccess = function () {
+          var c = cur.result;
+          if (!c) return resolve(out);
+          var k = c.key;
+          if (typeof k === 'string' && (!prefix || k.indexOf(prefix) === 0)) out.push(k);
+          c.continue();
+        };
+        cur.onerror = function () { reject(cur.error); };
+      });
+    });
+  }
 
-    const absorbMapJson = (txt) => {
-      if (!txt || typeof txt !== "string") return;
-      try {
-        const obj = JSON.parse(txt);
-        if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-          Object.values(obj).forEach(absorbEntry);
-        }
-      } catch { /* ignore */ }
-    };
+  // ---------- OPFS ----------
+  function opfsRoot() {
+    if (!root.navigator || !navigator.storage || !navigator.storage.getDirectory) return Promise.resolve(null);
+    return navigator.storage.getDirectory().then(function (d) { return d; }, function () { return null; });
+  }
+  function opfsRead(name) {
+    return opfsRoot().then(function (root) {
+      if (!root) return null;
+      return root.getFileHandle(name, { create: false }).then(function (fh) {
+        return fh.getFile().then(function (f) { return f.text(); });
+      }, function () { return null; });
+    });
+  }
+  function opfsWrite(name, text) {
+    return opfsRoot().then(function (root) {
+      if (!root) return false;
+      return root.getFileHandle(name, { create: true }).then(function (fh) {
+        return fh.createWritable().then(function (w) {
+          return w.write(text).then(function () { return w.close(); });
+        }).then(function () { return true; });
+      }, function () { return false; });
+    });
+  }
 
-    const absorbSingleProjectJson = (txt, fallbackName) => {
-      if (!txt || typeof txt !== "string") return;
-      try {
-        const p = parseJsonText(txt);
-        const name = p.projectName || String(fallbackName || "").replace(/[-_]+/g, " ").trim();
-        if (!name) return;
-        absorbEntry({
-          id: p.id || slugify(name),
-          projectName: name,
-          updated: p.updated,
-          lastChange: p.lastChange,
-          materials: p.materials
-        });
-      } catch { /* ignore */ }
-    };
-
-    // 1. v3 & legacy localStorage keys (bomTools_projectLists_v3 + bomProjectJson:<slug> + bomProject:<slug>)
+  // ---------- localStorage ----------
+  function lsGet(key) {
+    try { var v = root.localStorage.getItem(LS_PREFIX + key); return v ? JSON.parse(v) : null; }
+    catch (e) { return null; }
+  }
+  function lsSet(key, val) {
+    try { root.localStorage.setItem(LS_PREFIX + key, JSON.stringify(val)); return true; }
+    catch (e) { logErr('localStorage.set', e); return false; }
+  }
+  function lsKeys(prefix) {
+    var out = [];
     try {
-      absorbMapJson(localStorage.getItem(LS_PROJECTS));
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i);
-        if (!k) continue;
-        if (/^bomProjectJson:/i.test(k)) {
-          absorbSingleProjectJson(localStorage.getItem(k), k.replace(/^bomProjectJson:/i, ""));
-        } else if (/^bomProject[:_]/i.test(k) && !/^bomProjectMeta:/i.test(k)) {
-          absorbSingleProjectJson(localStorage.getItem(k), k.replace(/^bomProject[:_]/i, ""));
+      for (var i = 0; i < root.localStorage.length; i++) {
+        var full = root.localStorage.key(i);
+        if (full && full.indexOf(LS_PREFIX) === 0) {
+          var k = full.slice(LS_PREFIX.length);
+          if (!prefix || k.indexOf(prefix) === 0) out.push(k);
         }
       }
-    } catch { /* ignore */ }
-
-    // 2. v3 IndexedDB + v3 OPFS + legacy BomToolsLocalDB (projectJson:*) + legacy OPFS (project-*.json)
-    const [idbV3, opfsV3, legacyIdbEntries, legacyOpfsFiles] = await Promise.all([
-      idbGetFrom(DB_NAME, DB_STORE, LS_PROJECTS),
-      opfsRead(OPFS_PROJECTS),
-      idbEntriesFrom(LEGACY_DB_NAME, LEGACY_DB_STORE, "projectJson:"),
-      opfsListProjectFiles()
-    ]);
-
-    absorbMapJson(idbV3);
-    absorbMapJson(opfsV3);
-
-    for (const row of legacyIdbEntries) {
-      if (typeof row.value === "string") {
-        absorbSingleProjectJson(row.value, row.key.replace(/^projectJson:/i, ""));
-      }
-    }
-    for (const file of legacyOpfsFiles) {
-      const slugName = file.fileName.replace(/^project-/i, "").replace(/\.json$/i, "");
-      absorbSingleProjectJson(file.text, slugName);
-    }
-
-    // 3. Offline LTS server API (/api/projects)
-    if (await detectOfflineApi()) {
-      try {
-        const r = await fetch("/api/projects", { cache: "no-store" });
-        if (r.ok) {
-          const data = await r.json();
-          if (Array.isArray(data)) data.forEach(absorbEntry);
-        }
-      } catch { /* ignore */ }
-    }
-
-    const out = {};
-    for (const entry of bySlug.values()) out[entry.id] = entry;
+    } catch (e) {}
     return out;
   }
 
-  async function persistProjectMap(map) {
-    const json = JSON.stringify(map);
-    try { localStorage.setItem(LS_PROJECTS, json); } catch { /* ignore */ }
-    await Promise.all([
-      idbSetIn(DB_NAME, DB_STORE, LS_PROJECTS, json),
-      opfsWrite(OPFS_PROJECTS, json)
-    ]);
+  // ---------- unified get/set (parallel write, first-wins read) ----------
+  function persist(key, val) {
+    // localStorage is sync — write first so it is always current even if IDB/OPFS lag.
+    lsSet(key, val);
+    var p1 = idbSet(key, val).catch(function (e) { logErr('idb.set', e); });
+    var p2 = opfsWrite(opfsName(key), JSON.stringify(val)).catch(function (e) { logErr('opfs.set', e); });
+    return Promise.all([p1, p2]).then(function () { return true; });
+  }
+  function load(key) {
+    return idbGet(key).then(function (idbVal) {
+      if (idbVal !== undefined && idbVal !== null) return idbVal;
+      return opfsRead(opfsName(key)).then(function (txt) {
+        if (txt) { try { return JSON.parse(txt); } catch (e) {} }
+        return lsGet(key);
+      });
+    });
+  }
+  function opfsName(key) { return key.replace(/[^a-z0-9_-]/gi, '_') + '.json'; }
+
+  // ---------- keys ----------
+  function projectKey(name) { return KEY_PROJECT_PREFIX + name; }
+  function globalKey() { return KEY_GLOBAL; }
+
+  // ---------- ACTIVE SCOPE ----------
+  function getActiveProject() {
+    return lsGet(KEY_ACTIVE_PROJECT) || null;
+  }
+  function setActiveProject(name) {
+    if (name) lsSet(KEY_ACTIVE_PROJECT, name);
+    else try { root.localStorage.removeItem(LS_PREFIX + KEY_ACTIVE_PROJECT); } catch (e) {}
+    emit('scope', { project: name || null });
+  }
+  function activeScopeLabel() {
+    var p = getActiveProject();
+    return p ? ('Project: ' + p) : 'Global Master';
   }
 
-  async function listSavedProjects() {
-    const map = await readProjectMap();
-    return Object.values(map).sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
+  // ---------- MATERIALS GET / SAVE ----------
+  function getMaster(projectName) {
+    var p = projectName !== undefined ? projectName : getActiveProject();
+    var key = p ? projectKey(p) : globalKey();
+    return load(key).then(function (rec) {
+      if (rec && rec.materials) return rec.materials;
+      return null;
+    });
   }
-
-  async function getSavedProject(idOrName) {
-    const map = await readProjectMap();
-    if (map[idOrName]) return map[idOrName];
-    const target = lc(idOrName);
-    const targetSlug = slugify(idOrName);
-    return Object.values(map).find(
-      (p) => lc(p.projectName) === target || slugify(p.projectName) === targetSlug || lc(p.id) === target
-    ) || null;
-  }
-
-  async function saveProjectList(meta, materials, lastChange) {
-    const map = await readProjectMap();
-    const projectName = String(meta?.projectName || meta?.name || "Project").trim();
-    const s = slugify(projectName);
-
-    // Reuse existing entry ID if same project slug already exists (prevents duplicates!)
-    let existingId = meta?.id || "";
-    if (!existingId || !map[existingId]) {
-      const byName = Object.values(map).find((p) => slugify(p.projectName) === s);
-      if (byName) existingId = byName.id;
-    }
-    const id = existingId || s;
-    const nowIso = new Date().toISOString();
-    const cleanMats = materials.map(normalizeMaterial).filter((m) => m.material);
-
-    const entry = {
-      id,
-      projectName,
-      updated: nowIso,
-      lastChange: lastChange || null,
-      materials: cleanMats
+  function saveMaster(materials, projectName, opts) {
+    opts = opts || {};
+    var p = projectName !== undefined ? projectName : getActiveProject();
+    var key = p ? projectKey(p) : globalKey();
+    var rec = {
+      type: p ? 'project' : 'master',
+      version: 1,
+      name: p || null,
+      materials: materials,
+      savedAt: nowISO()
     };
-    map[id] = entry;
-    await persistProjectMap(map);
+    return persist(key, rec).then(function () {
+      emit('saved', { project: p, materials: materials });
+      if (!opts.silent) emit('change', { scope: p ? 'project' : 'global', project: p, materials: materials });
+      return true;
+    });
+  }
 
-    // Mirror to legacy v1.9-v2.6 per-project slots so project auto-save is rock-solid across versions
-    const singleJson = serializeProject(projectName, cleanMats, entry.lastChange, id, nowIso);
-    try {
-      localStorage.setItem(`bomProjectJson:${s}`, singleJson);
-    } catch { /* ignore */ }
-    await Promise.all([
-      idbSetIn(LEGACY_DB_NAME, LEGACY_DB_STORE, `projectJson:${s}`, singleJson),
-      opfsWrite(`project-${s}.json`, singleJson)
-    ]);
-
-    if (await detectOfflineApi()) {
-      try {
-        await fetch(`/api/projects/${encodeURIComponent(id)}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: singleJson
+  // ---------- PROJECTS ----------
+  function listProjects() {
+    var fromIdb = idbKeys(KEY_PROJECT_PREFIX).then(function (ks) {
+      return ks.map(function (k) { return k.slice(KEY_PROJECT_PREFIX.length); });
+    }, function () { return []; });
+    var fromLs = lsKeys(KEY_PROJECT_PREFIX).map(function (k) { return k.slice(KEY_PROJECT_PREFIX.length); });
+    var seen = {}; var out = [];
+    fromLs.forEach(function (n) { if (!seen[n]) { seen[n] = 1; out.push(n); } });
+    return fromIdb.then(function (names) {
+      names.forEach(function (n) { if (!seen[n]) { seen[n] = 1; out.push(n); } });
+      return out.slice().sort();
+    });
+  }
+  function listSavedProjects() {
+    return listProjects().then(function (names) {
+      return Promise.all(names.map(function (n) {
+        return load(projectKey(n)).then(function (rec) {
+          return {
+            name: n,
+            materialsCount: (rec && rec.materials) ? rec.materials.length : 0,
+            savedAt: rec && rec.savedAt,
+            bomProjectList: rec && rec.bomProjectList
+          };
         });
-      } catch { /* non-fatal */ }
+      }));
+    });
+  }
+  function deleteProject(name) {
+    var key = projectKey(name);
+    try { root.localStorage.removeItem(LS_PREFIX + key); } catch (e) {}
+    return idbOpen().then(function (db) {
+      return promise(function (resolve, reject) {
+        var tx = db.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).delete(key);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { reject(tx.error); };
+      });
+    }).then(function () {
+      opfsRoot().then(function (root) {
+        if (!root) return;
+        root.removeEntry(opfsName(key), { recursive: false }).catch(function () {});
+      });
+      if (getActiveProject() === name) setActiveProject(null);
+      emit('change', { scope: 'project', deleted: name });
+      return true;
+    });
+  }
+
+  function newProject(name, source, opts) {
+    opts = opts || {};
+    if (!name) return Promise.reject(new Error('Project name required'));
+    if (/[\\/?*[\]:]/.test(name) || name.length > 64) return Promise.reject(new Error('Invalid project name'));
+    return collectProjectMaterials(name, source, opts).then(function (materials) {
+      var rec = {
+        type: 'project', version: 1, name: name,
+        materials: materials, savedAt: nowISO(),
+        bomProjectList: opts.bomProjectList || name
+      };
+      return persist(projectKey(name), rec).then(function () {
+        emit('change', { scope: 'project', created: name });
+        return rec;
+      });
+    });
+  }
+
+  // Source options for new project:
+  //   'copy-global'    -> clone of Global Master
+  //   'unified-pool'   -> opts.pick list of material names (from getUnifiedPool)
+  //   'workbook-only'  -> opts.workbookMaterials (array)
+  //   'blank'          -> []
+  function collectProjectMaterials(name, source, opts) {
+    opts = opts || {};
+    if (source === 'blank') return Promise.resolve([]);
+    if (source === 'copy-global') return getMaster(null).then(function (m) { return m || []; });
+    if (source === 'workbook-only') return Promise.resolve(opts.workbookMaterials || []);
+    if (source === 'unified-pool') {
+      return getUnifiedPool().then(function (pool) {
+        var pick = opts.pick || [];
+        var byName = {}; pool.forEach(function (m) { byName[m.name] = m; });
+        return pick.map(function (n) { return byName[n]; }).filter(Boolean);
+      });
     }
+    return Promise.resolve([]);
+  }
+
+  // Unified pool: Global Master + current workbook + all saved projects, de-duped by name.
+  // `workbookMaterials` is optional; if omitted, only Global + projects are pooled.
+  function getUnifiedPool(workbookMaterials) {
+    var globalP = getMaster(null).then(function (m) { return m || []; });
+    var projectsP = listProjects().then(function (names) {
+      return Promise.all(names.map(function (n) {
+        return load(projectKey(n)).then(function (rec) { return (rec && rec.materials) || []; });
+      })).then(function (arrs) {
+        var flat = []; arrs.forEach(function (a) { a.forEach(function (m) { flat.push(m); }); });
+        return flat;
+      });
+    });
+    return Promise.all([globalP, projectsP]).then(function (r) {
+      var pool = []; var seen = {};
+      function add(arr) {
+        (arr || []).forEach(function (m) {
+          if (m && m.name && !seen[m.name]) { seen[m.name] = 1; pool.push(clone(m)); }
+        });
+      }
+      add(r[0]); add(r[1]); add(workbookMaterials);
+      pool.sort(function (a, b) { return a.name.localeCompare(b.name); });
+      return pool;
+    });
+  }
+
+  // ---------- EXPORT / IMPORT ----------
+  function exportMaster(projectName) {
+    var p = projectName !== undefined ? projectName : getActiveProject();
+    return getMaster(p).then(function (materials) {
+      return {
+        type: p ? 'project' : 'master',
+        version: 1,
+        name: p || undefined,
+        exportedAt: nowISO(),
+        materials: materials || []
+      };
+    });
+  }
+  function importMaster(jsonOrStr, opts) {
+    opts = opts || {};
+    var obj = (typeof jsonOrStr === 'string') ? JSON.parse(jsonOrStr) : jsonOrStr;
+    if (!obj || obj.type === 'project') {
+      throw new Error('Refused: this file is a Project export. Use Import Project .json instead.');
+    }
+    if (!Array.isArray(obj.materials)) throw new Error('Invalid master file: no materials[]');
+    var projectName = opts.projectName !== undefined ? opts.projectName : getActiveProject();
+    return saveMaster(obj.materials, projectName);
+  }
+
+  function exportProject(name) {
+    var n = name || getActiveProject();
+    if (!n) return Promise.reject(new Error('No active project to export'));
+    return load(projectKey(n)).then(function (rec) {
+      if (!rec) throw new Error('Project not found: ' + n);
+      var out = clone(rec);
+      out.type = 'project'; out.exportedAt = nowISO();
+      return out;
+    });
+  }
+  function importProject(jsonOrStr, opts) {
+    opts = opts || {};
+    var obj = (typeof jsonOrStr === 'string') ? JSON.parse(jsonOrStr) : jsonOrStr;
+    if (!obj || obj.type !== 'project') throw new Error('Not a project file (type:"project" required)');
+    if (!obj.name) throw new Error('Project file missing name');
+    var name = opts.rename || obj.name;
+    var rec = {
+      type: 'project', version: 1, name: name,
+      materials: obj.materials || [],
+      sheets: obj.sheets || [],
+      bomProjectList: obj.bomProjectList || name,
+      savedAt: nowISO(), importedAt: nowISO()
+    };
+    return persist(projectKey(name), rec).then(function () {
+      emit('change', { scope: 'project', imported: name });
+      return rec;
+    });
+  }
+
+  // ---------- OFFLINE LOCAL API (auto-detect) ----------
+  var _offline = null;
+  function detectOfflineApi() {
+    if (_offline !== null) return Promise.resolve(_offline);
+    var host = root.location && root.location.hostname;
+    if (!host || (host !== 'localhost' && host !== '127.0.0.1')) {
+      _offline = { available: false };
+      return Promise.resolve(_offline);
+    }
+    return fetch('/api/health', { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) { _offline = { available: false }; return _offline; }
+      return r.json().then(function (j) {
+        _offline = { available: true, endpoints: j && j.endpoints, version: j && j.version };
+        emit('offline', _offline);
+        return _offline;
+      }, function () { _offline = { available: true }; return _offline; });
+    }, function () { _offline = { available: false }; return _offline; });
+  }
+
+  function offlineGetMaster() {
+    if (!_offline || !_offline.available) return Promise.resolve(null);
+    return fetch('/api/master').then(function (r) { return r.ok ? r.json() : null; }, function () { return null; });
+  }
+  function offlinePutMaster(rec) {
+    if (!_offline || !_offline.available) return Promise.resolve(false);
+    return fetch('/api/master', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) })
+      .then(function (r) { return r.ok; }, function () { return false; });
+  }
+  function offlineGetProjects() {
+    if (!_offline || !_offline.available) return Promise.resolve([]);
+    return fetch('/api/projects').then(function (r) { return r.ok ? r.json() : []; }, function () { return []; });
+  }
+
+  // ---------- GITHUB (optional, via GitHub Pages raw + REST API) ----------
+  // opts: { token, owner, repo, branch, pathMaster, pathProject }
+  function githubPull(opts) {
+    opts = opts || {};
+    var base = opts.rawBase || ('https://raw.githubusercontent.com/' + opts.owner + '/' + opts.repo + '/' + (opts.branch || 'main') + '/');
+    var path = opts.path || 'bom/master.json';
+    var url = base + path + '?t=' + Date.now();
+    return fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('GitHub GET failed: ' + r.status);
+      return r.json();
+    });
+  }
+  function githubPush(opts, rec) {
+    opts = opts || {};
+    if (!opts.token || !opts.owner || !opts.repo) return Promise.reject(new Error('githubPush needs token, owner, repo'));
+    var path = opts.path || 'bom/master.json';
+    var url = 'https://api.github.com/repos/' + opts.owner + '/' + opts.repo + '/contents/' + path;
+    // 1. GET current sha (if file exists)
+    return fetch(url, { headers: { Authorization: 'Bearer ' + opts.token, Accept: 'application/vnd.github+json' } })
+      .then(function (r) { return r.ok ? r.json() : null; }, function () { return null; })
+      .then(function (meta) {
+        var body = {
+          message: 'BOM Tools: push ' + (rec.type || 'master') + ' ' + nowISO(),
+          content: b64unicode(JSON.stringify(rec, null, 2)),
+          branch: opts.branch || 'main'
+        };
+        if (meta && meta.sha) body.sha = meta.sha;
+        return fetch(url, {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer ' + opts.token, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+      })
+      .then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error('GitHub PUT failed: ' + r.status + ' ' + t); });
+        return r.json();
+      });
+  }
+  function b64unicode(str) {
+    // UTF-8 safe base64 for browsers
+    var bytes = new TextEncoder().encode(str);
+    var bin = ''; for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return root.btoa(bin);
+  }
+
+  // ---------- AUDIT LOG (session changes) ----------
+  function getAuditLog() { return lsGet(KEY_AUDIT) || []; }
+  function recordAudit(entry) {
+    var log = getAuditLog();
+    entry.at = nowISO();
+    log.unshift(entry);
+    if (log.length > 200) log.length = 200;
+    lsSet(KEY_AUDIT, log);
+    emit('audit', entry);
     return entry;
   }
+  function clearAuditLog() { lsSet(KEY_AUDIT, []); emit('audit-cleared', {}); }
 
-  async function deleteSavedProject(id) {
-    const map = await readProjectMap();
-    const target = map[id];
-    if (!target) return false;
-    const s = slugify(target.projectName);
-    delete map[id];
-    await persistProjectMap(map);
+  // ---------- BOM PROJECT LIST (workbook custom property) ----------
+  // Stored locally so the add-in can recall it between sessions; the live
+  // workbook property is written/read by BomSheets via Office.js.
+  function rememberBomProjectList(name) { lsSet('bom_project_list', name || null); }
+  function recallBomProjectList() { return lsGet('bom_project_list') || null; }
 
-    // Also remove matching legacy per-project keys so it never reappears
-    try {
-      localStorage.removeItem(`bomProjectJson:${s}`);
-      localStorage.removeItem(`bomProjectMeta:${s}`);
-      localStorage.removeItem(`bomProject:${s}`);
-    } catch { /* ignore */ }
-    await Promise.all([
-      idbDelIn(LEGACY_DB_NAME, LEGACY_DB_STORE, `projectJson:${s}`),
-      opfsRemove(`project-${s}.json`)
-    ]);
-
-    if (await detectOfflineApi()) {
-      try { await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" }); } catch { /* ignore */ }
-    }
-    return true;
-  }
-
-  /* ---- Unified Pool of ALL Previously Created Materials (Global Master + Workbook + All Saved Projects) ---- */
-  async function getAvailableMaterialPool(workbookRows = []) {
-    const [globalData, projects] = await Promise.all([readGlobalMaster(), listSavedProjects()]);
-    const pool = new Map(); // lc(name) -> { ...material, sources: [], inGlobal: boolean }
-
-    const add = (raw, sourceLabel, isGlobal = false) => {
-      const m = normalizeMaterial(raw);
-      if (!m.material) return;
-      const k = lc(m.material);
-      const prev = pool.get(k);
-      if (!prev) {
-        pool.set(k, { ...m, sources: [sourceLabel], inGlobal: isGlobal });
-      } else {
-        if (!prev.sources.includes(sourceLabel)) prev.sources.push(sourceLabel);
-        if (isGlobal) prev.inGlobal = true;
-      }
-    };
-
-    // Priority order: Global Master first, then current workbook rows, then saved Project-Only lists (newest first)
-    for (const m of globalData.materials) add(m, "Global Master", true);
-    for (const m of workbookRows || []) add(m, "This Workbook", false);
-    for (const p of projects) {
-      for (const m of p.materials || []) add(m, `Project: ${p.projectName}`, false);
-    }
-
-    return [...pool.values()].sort((a, b) =>
-      a.material.localeCompare(b.material, undefined, { sensitivity: "base" })
-    );
-  }
-
-  /* ---------------- Portable JSON file save/download helper ---------------- */
-  async function saveJsonFile(suggestedName, jsonText) {
-    if (typeof window !== "undefined" && typeof window.showSaveFilePicker === "function") {
-      try {
-        const fh = await window.showSaveFilePicker({
-          suggestedName,
-          types: [{ description: "BOM Materials JSON", accept: { "application/json": [".json"] } }]
-        });
-        const w = await fh.createWritable();
-        await w.write(jsonText);
-        await w.close();
-        return { fileName: fh.name, cancelled: false };
-      } catch (err) {
-        if (err && err.name === "AbortError") return { fileName: "", cancelled: true };
-      }
-    }
-    const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = suggestedName;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    return { fileName: suggestedName, cancelled: false };
-  }
-
-  /* ---------------- Optional GitHub Sync (Global Master only — never Project-Only!) ---------------- */
-  function getToken() {
-    try { return localStorage.getItem(LS_TOKEN) || localStorage.getItem(LEGACY_LS_TOKEN) || ""; }
-    catch { return ""; }
-  }
-  function setToken(t) {
-    try {
-      if (t && t.trim()) localStorage.setItem(LS_TOKEN, t.trim());
-      else {
-        localStorage.removeItem(LS_TOKEN);
-        localStorage.removeItem(LEGACY_LS_TOKEN);
-      }
-      return true;
-    } catch { return false; }
-  }
-  function detectRepo() {
-    try {
-      if (/\.github\.io$/i.test(location.hostname)) {
-        const owner = location.hostname.split(".")[0];
-        const seg = location.pathname.split("/").filter(Boolean)[0];
-        const repo = seg && !seg.includes(".") ? seg : `${owner}.github.io`;
-        return { owner, repo, branch: "main" };
-      }
-    } catch { /* ignore */ }
-    return { owner: "", repo: "", branch: "main" };
-  }
-
-  async function fetchGitHubPages() {
-    const url = new URL("materials.json", location.href).href + "?t=" + Date.now();
-    const res = await fetch(url, { cache: "no-store" });
-    if (res.status === 404) return { missing: true, materials: [] };
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return { missing: false, materials: parseJsonText(await res.text()).materials };
-  }
-
-  async function pushGitHub(materials, message) {
-    const tok = getToken();
-    if (!tok) throw new Error("No GitHub token saved.");
-    const { owner, repo, branch } = detectRepo();
-    if (!owner || !repo) throw new Error("GitHub repository could not be detected from host URL.");
-    const api = `https://api.github.com/repos/${owner}/${repo}/contents/materials.json`;
-    const headers = { Accept: "application/vnd.github+json", Authorization: `Bearer ${tok}` };
-    let sha = null;
-    const getRes = await fetch(`${api}?ref=${encodeURIComponent(branch)}&t=${Date.now()}`, { headers, cache: "no-store" });
-    if (getRes.ok) sha = (await getRes.json()).sha;
-    const json = serializeMaster(materials, null);
-    const bytes = new TextEncoder().encode(json);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    const putRes = await fetch(api, {
-      method: "PUT",
-      headers: { ...headers, "Content-Type": "application/json" },
-      body: JSON.stringify({ message: message || "Update materials.json", content: btoa(bin), branch, ...(sha ? { sha } : {}) })
+  // ---------- STATUS (for UI) ----------
+  function status() {
+    return Promise.all([
+      idbOpen().then(function () { return 'ok'; }, function () { return 'off'; }),
+      opfsRoot().then(function (d) { return d ? 'ok' : 'off'; }),
+      Promise.resolve(lsKeys('').length > 0 ? 'ok' : 'off'),
+      detectOfflineApi().then(function (o) { return o.available ? 'ok' : 'off'; })
+    ]).then(function (r) {
+      return { indexedDB: r[0], opfs: r[1], localStorage: r[2], offlineApi: r[3],
+               activeProject: getActiveProject(), scope: activeScopeLabel() };
     });
-    if (!putRes.ok) throw new Error(`GitHub rejected publish (${putRes.status}).`);
-    return true;
   }
 
-  window.BomStore = {
-    VERSION,
-    UNITS,
-    slugify,
-    normalizeMaterial,
-    changedFields,
-    diffLists,
-    buildLastChange,
-    serializeMaster,
-    serializeProject,
-    parseJsonText,
-    detectOfflineApi,
-    readGlobalMaster,
-    writeGlobalMaster,
-    listSavedProjects,
-    getSavedProject,
-    saveProjectList,
-    deleteSavedProject,
-    getAvailableMaterialPool,
-    saveJsonFile,
-    getToken,
-    setToken,
-    hasToken: () => Boolean(getToken()),
-    fetchGitHubPages,
-    pushGitHub
+  // ---------- PUBLIC API ----------
+  root.BomStore = {
+    // events
+    on: on, off: off, emit: emit,
+    // scope
+    getActiveProject: getActiveProject,
+    setActiveProject: setActiveProject,
+    activeScopeLabel: activeScopeLabel,
+    // materials
+    getMaster: getMaster,
+    saveMaster: saveMaster,
+    // projects
+    listProjects: listProjects,
+    listSavedProjects: listSavedProjects,
+    deleteProject: deleteProject,
+    newProject: newProject,
+    getUnifiedPool: getUnifiedPool,
+    // export / import
+    exportMaster: exportMaster,
+    importMaster: importMaster,
+    exportProject: exportProject,
+    importProject: importProject,
+    // offline + github
+    detectOfflineApi: detectOfflineApi,
+    offlineGetMaster: offlineGetMaster,
+    offlinePutMaster: offlinePutMaster,
+    offlineGetProjects: offlineGetProjects,
+    githubPull: githubPull,
+    githubPush: githubPush,
+    // audit + workbook project list
+    getAuditLog: getAuditLog,
+    recordAudit: recordAudit,
+    clearAuditLog: clearAuditLog,
+    rememberBomProjectList: rememberBomProjectList,
+    recallBomProjectList: recallBomProjectList,
+    // status
+    status: status,
+    // constants
+    KEY_GLOBAL: KEY_GLOBAL,
+    KEY_PROJECT_PREFIX: KEY_PROJECT_PREFIX,
+    DEFAULT_MATERIALS: DEFAULT_MATERIALS
   };
-})();
+})(typeof window !== 'undefined' ? window : this);

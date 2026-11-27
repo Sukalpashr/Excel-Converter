@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- manifest.xml — BOM Tools Excel 365 Task Pane Add-in
+     OfficeApp TaskPaneApp · ExcelApi 1.9+ · Home tab ribbon button "BOM Tools"
+     Replace https://YOUR-HOST with the static host that serves the add-in files.
+-->
+<OfficeApp
+    xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+    xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+    xsi:type="TaskPaneApp">
+  <Id>8f4b2c1a-3d7e-4a6b-9c5d-2e1f0a8b3c4d</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>BOM Tools</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="BOM Tools" />
+  <Description DefaultValue="Bill-of-Materials automation for Excel 365: template-driven BOM + Purchase List sheets, a shared Materials Master, two-way Flatten/Restore, and built-in offline storage with optional GitHub sync." />
+  <IconUrl DefaultValue="https://YOUR-HOST/assets/icon-32.png" />
+  <HighResolutionIconUrl DefaultValue="https://YOUR-HOST/assets/icon-80.png" />
+  <SupportUrl DefaultValue="https://YOUR-HOST/support.html" />
+  <AppDomains>
+    <AppDomain>https://YOUR-HOST</AppDomain>
+    <AppDomain>https://api.github.com</AppDomain>
+    <AppDomain>https://raw.githubusercontent.com</AppDomain>
+  </AppDomains>
+
+  <Hosts>
+    <Host Name="Workbook" />
+  </Hosts>
+
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://YOUR-HOST/taskpane.html" />
+  </DefaultSettings>
+
+  <Permissions>ReadWriteDocument</Permissions>
+
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Description resid="BomTools.Desc" />
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="BomTools.GetStarted.Title" />
+            <Description resid="BomTools.GetStarted.Desc" />
+            <LearnMoreUrl resid="BomTools.LearnMoreUrl" />
+          </GetStarted>
+
+          <!-- Home tab ribbon button -->
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="BomTools.Group">
+                <Label resid="BomTools.GroupLabel" />
+                <Icon>
+                  <bt:Image size="16" resid="BomTools.Icon16" />
+                  <bt:Image size="32" resid="BomTools.Icon32" />
+                  <bt:Image size="80" resid="BomTools.Icon80" />
+                </Icon>
+                <Control xsi:type="Button" id="BomTools.Button">
+                  <Label resid="BomTools.ButtonLabel" />
+                  <Supertip>
+                    <Title resid="BomTools.ButtonLabel" />
+                    <Description resid="BomTools.ButtonSupertip" />
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="BomTools.Icon16" />
+                    <bt:Image size="32" resid="BomTools.Icon32" />
+                    <bt:Image size="80" resid="BomTools.Icon80" />
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>BomTools.Taskpane</TaskpaneId>
+                    <SourceLocation resid="BomTools.TaskpaneUrl" />
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="BomTools.Icon16" DefaultValue="https://YOUR-HOST/assets/icon-16.png" />
+        <bt:Image id="BomTools.Icon32" DefaultValue="https://YOUR-HOST/assets/icon-32.png" />
+        <bt:Image id="BomTools.Icon80" DefaultValue="https://YOUR-HOST/assets/icon-80.png" />
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="BomTools.TaskpaneUrl" DefaultValue="https://YOUR-HOST/taskpane.html" />
+        <bt:Url id="BomTools.LearnMoreUrl" DefaultValue="https://YOUR-HOST/support.html" />
+        <bt:Url id="BomTools.GetStarted.LearnMoreUrl" DefaultValue="https://YOUR-HOST/support.html" />
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="BomTools.GroupLabel" DefaultValue="BOM Tools" />
+        <bt:String id="BomTools.ButtonLabel" DefaultValue="BOM Tools" />
+        <bt:String id="BomTools.GetStarted.Title" DefaultValue="BOM Tools" />
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="BomTools.Desc" DefaultValue="Bill-of-Materials automation for Excel 365." />
+        <bt:String id="BomTools.GetStarted.Desc" DefaultValue="Open the BOM Tools task pane to import the template, manage your Materials Master, and Flatten or Restore BOM sheets for sharing." />
+        <bt:String id="BomTools.ButtonSupertip" DefaultValue="Open the BOM Tools task pane (Home, Add Sheet, Materials, Convert)." />
+      </bt:LongStrings>
+    </Resources>
+
+    <!-- Require Excel 365 dynamic-array support (LET / XLOOKUP / XMATCH / FILTER / SORT / UNIQUE) -->
+    <Requirements>
+      <Sets>
+        <Set Name="ExcelApi" MinVersion="1.9" />
+      </Sets>
+    </Requirements>
+  </VersionOverrides>
+</OfficeApp>
