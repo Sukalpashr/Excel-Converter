@@ -4,11 +4,11 @@
            xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
            xsi:type="TaskPaneApp">
   <Id>edc7b986-b6ff-4f0f-8f36-09b111577d00</Id>
-  <Version>1.1.0.0</Version>
+  <Version>3.0.0.0</Version>
   <ProviderName>BOM Tools</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
   <DisplayName DefaultValue="BOM Tools"/>
-  <Description DefaultValue="Creates automated BOM take-off sheets, manages the Master Unique Materials list, and converts BOM workbooks into plain-formula files."/>
+  <Description DefaultValue="Lightweight structural steel BOM take-off sheets, Master &amp; Project-Only materials management, and two-way Excel conversion."/>
   <IconUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-64.png"/>
   <SupportUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/"/>
@@ -76,7 +76,7 @@
         <bt:String id="Button.Label" DefaultValue="BOM Tools"/>
       </bt:ShortStrings>
       <bt:LongStrings>
-        <bt:String id="Button.Tip" DefaultValue="Open the BOM Tools panel to add take-off sheets, manage materials, or convert the workbook."/>
+        <bt:String id="Button.Tip" DefaultValue="Open BOM Tools v3.0 to add lightweight BOM sheets, manage Global or Project-Only materials, and convert workbooks."/>
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>
