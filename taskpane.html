@@ -6,140 +6,1630 @@
 <title>BOM Tools</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>
-  :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; }
+  :root {
+    --brand: #1D6F42;
+    --brand-hover: #155734;
+    --brand-soft: #ECF6F0;
+    --brand-border: #B7DEC6;
+    --bg: #F4F6F5;
+    --card: #FFFFFF;
+    --border: #E1E6E3;
+    --border-strong: #CBD3CE;
+    --text: #18201B;
+    --muted: #5C6861;
+    --ok: #157347;
+    --ok-bg: #E8F5EE;
+    --warn: #9A5B00;
+    --warn-bg: #FFF6E0;
+    --danger: #B42318;
+    --danger-bg: #FEF3F2;
+    --danger-border: #FECDCA;
+    --radius: 10px;
+    --radius-sm: 7px;
+  }
   * { box-sizing: border-box; }
-  [hidden] { display:none !important; }
-  body { margin:0; padding:14px; font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:#201f1e; background:#fff; }
-  h1 { font-size:16px; margin:0 0 10px; }
-  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--bd); margin-bottom:12px; }
-  .tabs button { flex:1; border:0; border-bottom:3px solid transparent; border-radius:0; background:none; padding:8px 4px; color:var(--mut); font-weight:600; }
-  .tabs button[aria-selected="true"] { color:var(--g); border-bottom-color:var(--g); }
-  .sub { color:var(--mut); margin:0 0 12px; }
-  .card { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; background:var(--bg); }
-  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 6px; }
-  .status { font-size:12px; }
-  .ok { color:#107c10; } .warn { color:#a4262c; }
-  button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 12px; border:1px solid var(--bd); background:#fff; }
-  button.primary { background:var(--g); border-color:var(--g); color:#fff; font-weight:600; width:100%; padding:9px; }
-  button.primary:hover:not(:disabled) { background:var(--g2); }
-  button:disabled { opacity:.5; cursor:default; }
-  label.opt { display:block; border:1px solid var(--bd); border-radius:6px; padding:8px 10px; margin-bottom:8px; background:#fff; cursor:pointer; }
-  label.opt:has(input:checked) { border-color:var(--g); box-shadow:0 0 0 1px var(--g); }
-  label.opt b { display:block; }
-  label.opt span { color:var(--mut); font-size:12px; }
-  .chk { display:flex; gap:8px; align-items:flex-start; margin:8px 0 10px; font-size:12px; }
-  .log { white-space:pre-wrap; font:11.5px/1.5 Consolas, monospace; color:#323130; max-height:160px; overflow:auto; margin-top:10px; }
-  .log:empty { display:none; }
-  .note { font-size:11.5px; color:var(--mut); }
-  .field { display:block; margin-bottom:8px; }
-  .field > span { display:block; font-size:12px; color:var(--mut); margin-bottom:2px; }
-  input[type=text], input[type=search], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
-  input[readonly] { background:#f3f2f1; color:var(--mut); }
-  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:170px; overflow:auto; margin-top:6px; }
-  #mat-list div { padding:5px 8px; border-bottom:1px solid #edebe9; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
-  #mat-list div:hover { background:#f3f2f1; }
-  #mat-list div.sel { background:#dff6dd; }
-  #mat-list small { color:var(--mut); white-space:nowrap; }
-  .btnrow { display:flex; gap:8px; }
-  .btnrow .primary { flex:1; width:auto; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    padding: 0;
+    font: 13px/1.45 "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---- Sticky Header & Nav ---- */
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+  }
+  .brand-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 11px 14px 6px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand-mark {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--brand);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .brand h1 {
+    font-size: 14.5px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0;
+    color: var(--text);
+  }
+  .brand-ver {
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--muted);
+    background: #EFF3F1;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    line-height: 1.45;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+  }
+  .tabs {
+    display: flex;
+    padding: 0 10px;
+    gap: 2px;
+  }
+  .tabs button {
+    flex: 1;
+    border: 0;
+    border-bottom: 2.5px solid transparent;
+    border-radius: 0;
+    background: none;
+    padding: 8px 4px 9px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .tabs button:hover { color: var(--text); background: none; }
+  .tabs button[aria-selected="true"] {
+    color: var(--brand);
+    border-bottom-color: var(--brand);
+  }
+
+  /* ---- Main Container ---- */
+  main { padding: 12px 14px 20px; }
+  section > .sub {
+    color: var(--muted);
+    font-size: 12px;
+    margin: 0 0 10px;
+    line-height: 1.45;
+  }
+
+  /* ---- Cards ---- */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 13px;
+    margin-bottom: 10px;
+    box-shadow: 0 1px 2px rgba(16, 24, 20, 0.03);
+  }
+  .card-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  /* ---- Status Banners ---- */
+  .status-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-top: 5px;
+    flex-shrink: 0;
+    background: #94A39B;
+  }
+  .dot.ok { background: var(--ok); }
+  .dot.warn { background: #D97706; }
+  .dot.info { background: #2563EB; }
+  .status { font-size: 12px; }
+  .status.ok { color: var(--ok); }
+  .status.warn { color: var(--warn); }
+  .note { font-size: 11.5px; color: var(--muted); line-height: 1.45; margin: 6px 0 0; }
+
+  /* ---- Home Quick Options ---- */
+  .quick-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .qcard {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    width: 100%;
+    text-align: left;
+    padding: 11px 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: 0 1px 2px rgba(16, 24, 20, 0.03);
+    transition: border-color 0.15s, background 0.15s, transform 0.1s;
+    cursor: pointer;
+  }
+  .qcard:hover {
+    border-color: var(--brand);
+    background: #FCFDFC;
+  }
+  .qcard:active { transform: translateY(0.5px); }
+  .qcard.highlight {
+    border-color: var(--brand-border);
+    background: var(--brand-soft);
+  }
+  .qicon {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    background: var(--brand-soft);
+    color: var(--brand);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .qcard.highlight .qicon {
+    background: var(--brand);
+    color: #fff;
+  }
+  .qbody { flex: 1; min-width: 0; }
+  .qtitle {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 1px;
+  }
+  .qdesc {
+    display: block;
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .qchev {
+    color: #9AA69F;
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  /* ---- Collapsible Drawers (<details>) ---- */
+  details.drawer {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 10px;
+    overflow: hidden;
+  }
+  details.drawer.subtle {
+    background: #F9FBFA;
+  }
+  details.drawer > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 10px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    user-select: none;
+  }
+  details.drawer > summary::-webkit-details-marker { display: none; }
+  details.drawer > summary:hover { background: rgba(29, 111, 66, 0.04); }
+  .sum-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  .sum-meta {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 120px;
+  }
+  .sum-meta.ok { color: var(--ok); }
+  .sum-meta.warn { color: var(--warn); }
+  .sum-caret {
+    color: var(--muted);
+    font-size: 11px;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  details.drawer[open] > summary .sum-caret { transform: rotate(90deg); }
+  .drawer-body {
+    padding: 2px 12px 12px;
+    border-top: 1px solid #EEF2EF;
+  }
+
+  /* ---- Buttons & Form Controls ---- */
+  button {
+    font: inherit;
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+    padding: 7px 11px;
+    border: 1px solid var(--border-strong);
+    background: #fff;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  button:hover:not(:disabled) { background: #F3F6F4; border-color: #B4C0B9; }
+  button.primary {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+    font-weight: 600;
+    font-size: 12.5px;
+    width: 100%;
+    padding: 9px 12px;
+  }
+  button.primary:hover:not(:disabled) { background: var(--brand-hover); border-color: var(--brand-hover); }
+  button.danger {
+    color: var(--danger);
+    border-color: var(--danger-border);
+    background: #fff;
+  }
+  button.danger:hover:not(:disabled) { background: var(--danger-bg); }
+  button.link-btn {
+    border: 0;
+    background: none;
+    padding: 2px 4px;
+    color: var(--brand);
+    font-weight: 600;
+    font-size: 11.5px;
+  }
+  button.link-btn:hover:not(:disabled) { background: var(--brand-soft); }
+  button:disabled { opacity: 0.48; cursor: default; }
+
+  .btnrow { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btnrow .primary { flex: 1; width: auto; }
+
+  .field { display: block; margin-bottom: 9px; }
+  .field > span {
+    display: block;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--muted);
+    margin-bottom: 3px;
+  }
+  input[type=text], input[type=search], input[type=password], select {
+    width: 100%;
+    font: inherit;
+    font-size: 12.5px;
+    padding: 7px 9px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    color: var(--text);
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  input:focus, select:focus {
+    outline: none;
+    border-color: var(--brand);
+    box-shadow: 0 0 0 2.5px rgba(29, 111, 66, 0.14);
+  }
+  input[readonly] { background: #F4F6F5; color: var(--muted); }
+  input.field-issue, select.field-issue {
+    border-color: #E3B35C;
+    background: #FFFDF7;
+  }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  /* ---- Calm, Non-Annoying Primary Requirement Hint ---- */
+  .req-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    padding: 7px 9px;
+    margin: 2px 0 8px;
+    border-radius: 8px;
+    background: #F6F8F7;
+    border: 1px solid #E2E8E4;
+    color: #4D5E55;
+    font-size: 11.5px;
+    line-height: 1.4;
+    transition: background 0.16s ease, border-color 0.16s ease, color 0.16s ease;
+  }
+  .req-hint.issue {
+    background: #FFFBF0;
+    border-color: #F2DB9D;
+    color: #8A5300;
+  }
+  .req-hint-icon {
+    width: 14px;
+    height: 14px;
+    margin-top: 1px;
+    flex-shrink: 0;
+    opacity: 0.85;
+  }
+  .req-hint-text {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chk {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    margin: 8px 0;
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .chk input { margin-top: 2px; accent-color: var(--brand); }
+
+  label.opt {
+    display: block;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 9px 10px;
+    margin-bottom: 8px;
+    background: #fff;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  label.opt:has(input:checked) {
+    border-color: var(--brand);
+    background: var(--brand-soft);
+  }
+  label.opt input { accent-color: var(--brand); margin-right: 6px; }
+  label.opt b { font-size: 12.5px; color: var(--text); }
+  label.opt span { display: block; color: var(--muted); font-size: 11.5px; margin-top: 3px; line-height: 1.4; }
+
+  /* ---- Segmented Mode Switcher (Convert Tab) ---- */
+  .seg {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    background: #E8EDE9;
+    border-radius: 9px;
+    margin-bottom: 10px;
+  }
+  .seg button {
+    border: 0;
+    background: transparent;
+    padding: 7px 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--muted);
+    border-radius: 6px;
+  }
+  .seg button[aria-pressed="true"] {
+    background: #fff;
+    color: var(--brand);
+    box-shadow: 0 1px 2px rgba(16, 24, 20, 0.08);
+  }
+
+  /* ---- Materials List ---- */
+  #mat-list {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    max-height: 175px;
+    overflow: auto;
+    margin-top: 7px;
+  }
+  #mat-list .mrow {
+    padding: 6px 9px;
+    border-bottom: 1px solid #F0F3F1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 12px;
+  }
+  #mat-list .mrow:last-child { border-bottom: 0; }
+  #mat-list .mrow:hover { background: #F7FAF8; }
+  #mat-list .mrow.sel { background: var(--brand-soft); font-weight: 600; }
+  #mat-list .mleft { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  #mat-list .mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #mat-list .vicon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  #mat-list .vicon.ok { background: var(--ok-bg); color: var(--ok); }
+  #mat-list .vicon.inc { background: var(--warn-bg); color: var(--warn); }
+  #mat-list small { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+  /* ---- Layman Steps List ---- */
+  .steps {
+    margin: 8px 0 10px;
+    padding-left: 18px;
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .steps li { margin-bottom: 4px; }
+  .steps b { color: var(--text); }
+
+  /* ---- Sheet Checklist (Repair & Restore) ---- */
+  .sheet-pick {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: #fff;
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .sheet-pick-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 9px;
+    background: #F6F8F7;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  .sheet-pick-list {
+    max-height: 120px;
+    overflow: auto;
+  }
+  .sheet-pick-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    border-bottom: 1px solid #F0F3F1;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .sheet-pick-item:last-child { border-bottom: 0; }
+  .sheet-pick-item:hover { background: #F7FAF8; }
+  .sheet-pick-item input { accent-color: var(--brand); margin: 0; }
+  .sheet-pick-item small { color: var(--muted); font-size: 11px; margin-left: auto; }
+
+  /* ---- Nested More Options Drawer (Materials Form) ---- */
+  details.inner-drawer {
+    background: #F9FBFA;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    margin: 9px 0 10px;
+    box-shadow: none;
+  }
+  details.inner-drawer > summary {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  details.inner-drawer .drawer-body {
+    padding: 4px 10px 9px;
+  }
+
+  /* ---- Aesthetic Auto-Collapsing Change Notification & Session History ---- */
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes toastShrink {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
+  @keyframes btnPop {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .change-toast {
+    position: relative;
+    overflow: hidden;
+    background: #FFFFFF;
+    border: 1px solid #CFE3D7;
+    border-radius: 12px;
+    padding: 11px 12px 13px;
+    margin-bottom: 10px;
+    box-shadow: 0 6px 18px rgba(20, 42, 30, 0.09), 0 1px 2px rgba(20, 42, 30, 0.04);
+    animation: toastIn 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .change-toast.closing {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.985);
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+  .change-toast.kind-added { border-color: #B7DEC6; }
+  .change-toast.kind-modified { border-color: #BFDBFE; }
+  .change-toast.kind-removed { border-color: #FECACA; }
+
+  .toast-top {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin-bottom: 8px;
+  }
+  .toast-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: #E8F5EE;
+    color: var(--ok);
+  }
+  .change-toast.kind-modified .toast-icon { background: #EFF6FF; color: #1D4ED8; }
+  .change-toast.kind-removed .toast-icon { background: #FEF2F2; color: var(--danger); }
+
+  .toast-head {
+    flex: 1;
+    min-width: 0;
+  }
+  .toast-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  .toast-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .toast-close {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .toast-close:hover { background: #F1F5F3; color: var(--text); }
+
+  .toast-items {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .toast-item {
+    background: #F8FAF9;
+    border: 1px solid #E5ECE8;
+    border-radius: 8px;
+    padding: 7px 9px;
+    transition: border-color 0.14s, background 0.14s;
+  }
+  .toast-item.clickable { cursor: pointer; }
+  .toast-item.clickable:hover { border-color: var(--brand); background: #F3FAF6; }
+  .toast-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .toast-name {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .toast-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1.5px 6px;
+    border-radius: 5px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .toast-badge.added { background: #E8F5EE; color: #157347; }
+  .toast-badge.modified { background: #EFF6FF; color: #1D4ED8; }
+  .toast-badge.removed { background: #FEF2F2; color: #B42318; }
+  .toast-info {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+    line-height: 1.38;
+  }
+  .toast-diff {
+    font-size: 11px;
+    color: #26332C;
+    margin-top: 2px;
+  }
+  .toast-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 7px;
+    font-size: 10.5px;
+    color: var(--muted);
+  }
+  .toast-bar-track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: #EEF2EF;
+  }
+  .toast-bar {
+    height: 100%;
+    width: 100%;
+    transform-origin: left center;
+    background: linear-gradient(90deg, #1D6F42, #34A86B);
+    animation: toastShrink 5.5s linear forwards;
+  }
+  .change-toast.kind-modified .toast-bar { background: linear-gradient(90deg, #1D4ED8, #60A5FA); }
+  .change-toast.kind-removed .toast-bar { background: linear-gradient(90deg, #B42318, #F87171); }
+  .change-toast:hover .toast-bar { animation-play-state: paused; }
+
+  /* Compact Session Changes Button & Expandable History Panel */
+  .session-wrap {
+    margin-bottom: 10px;
+    animation: btnPop 0.2s ease;
+  }
+  .session-btn {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    background: #FFFFFF;
+    border: 1px solid #D3E3D9;
+    border-radius: 9px;
+    text-align: left;
+    box-shadow: 0 1px 2px rgba(16, 24, 20, 0.03);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .session-btn:hover {
+    border-color: var(--brand);
+    background: #F9FCFA;
+  }
+  .session-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .session-dot.modified { background: #2563EB; }
+  .session-dot.removed { background: var(--danger); }
+  .session-btn-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .session-count {
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--brand);
+    background: var(--brand-soft);
+    border: 1px solid var(--brand-border);
+    border-radius: 5px;
+    padding: 0 5px;
+    line-height: 1.5;
+    flex-shrink: 0;
+  }
+  .session-preview {
+    flex: 1;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .session-caret {
+    color: var(--muted);
+    font-size: 11px;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+  .session-btn[aria-expanded="true"] .session-caret { transform: rotate(90deg); }
+
+  .session-panel {
+    margin-top: 6px;
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(16, 24, 20, 0.06);
+  }
+  .session-panel-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 10px;
+    background: #F7FAF8;
+    border-bottom: 1px solid #EAEFED;
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .session-panel-list {
+    max-height: 210px;
+    overflow: auto;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .session-row {
+    background: #FAFDFB;
+    border: 1px solid #E8EFEA;
+    border-radius: 7px;
+    padding: 6px 8px;
+    transition: border-color 0.13s;
+  }
+  .session-row.clickable { cursor: pointer; }
+  .session-row.clickable:hover { border-color: var(--brand); background: #F3FAF6; }
+  .session-row-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .session-row-time {
+    font-size: 10px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    margin-top: 2px;
+  }
+
+  #mat-list .mrow.recent {
+    background: #F4FBF7;
+  }
+  #mat-list .mtag {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--ok);
+    margin-left: 4px;
+    flex-shrink: 0;
+  }
+  #mat-list .mtag.modified { color: #1D4ED8; }
+
+  /* ---- Project-Only / One-Time Material Mode ---- */
+  .scope-card {
+    background: #FFFFFF;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 9px 11px;
+    margin-bottom: 10px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .scope-card.is-project {
+    background: #F4F5FF;
+    border-color: #C7D2FE;
+  }
+  .scope-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .scope-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+  }
+  .scope-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .scope-card.is-project .scope-dot {
+    background: #4F46E5;
+  }
+  .scope-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .scope-card.is-project .scope-title {
+    color: #312E81;
+  }
+  .scope-sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+    line-height: 1.4;
+  }
+  .scope-card.is-project .scope-sub {
+    color: #4338CA;
+  }
+  .scope-setup {
+    margin-top: 9px;
+    padding-top: 9px;
+    border-top: 1px solid #E7ECE9;
+  }
+  .scope-card.is-project .scope-setup {
+    border-top-color: #D9E0FE;
+  }
+  button.indigo {
+    background: #4338CA;
+    border-color: #4338CA;
+    color: #fff;
+    font-weight: 600;
+  }
+  button.indigo:hover:not(:disabled) {
+    background: #3730A3;
+    border-color: #3730A3;
+  }
+  .proj-callout {
+    background: #F4F5FF;
+    border: 1px solid #C7D2FE;
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  .proj-callout-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #312E81;
+    margin-bottom: 3px;
+  }
+  .proj-callout-desc {
+    font-size: 11.5px;
+    color: #4338CA;
+    line-height: 1.4;
+    margin: 0 0 8px;
+  }
+  .proj-pick-wrap {
+    margin: 2px 0 9px;
+  }
+  .proj-pick-search {
+    margin-bottom: 6px;
+  }
+  .proj-pick-box {
+    border: 1px solid #D9E0FE;
+    border-radius: var(--radius-sm);
+    background: #FFFFFF;
+    overflow: hidden;
+  }
+  .proj-pick-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 9px;
+    background: #F6F7FF;
+    border-bottom: 1px solid #E3E7FE;
+    font-size: 11px;
+    font-weight: 600;
+    color: #3730A3;
+  }
+  .proj-pick-list {
+    max-height: 145px;
+    overflow: auto;
+  }
+  .proj-pick-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    border-bottom: 1px solid #F1F3FA;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .proj-pick-item:last-child { border-bottom: 0; }
+  .proj-pick-item:hover { background: #F8F9FF; }
+  .proj-pick-item input { accent-color: #4338CA; margin: 0; flex-shrink: 0; }
+  .proj-pick-item .pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .proj-pick-item small { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+
+  /* ---- Saved Project Lists Drawer & Restore Source Picker ---- */
+  details.saved-proj-drawer {
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px solid #E7ECE9;
+  }
+  .scope-card.is-project details.saved-proj-drawer {
+    border-top-color: #D9E0FE;
+  }
+  details.saved-proj-drawer > summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: #3730A3;
+    user-select: none;
+    padding: 2px 0;
+  }
+  details.saved-proj-drawer > summary::-webkit-details-marker { display: none; }
+  details.saved-proj-drawer[open] > summary .sum-caret { transform: rotate(90deg); }
+  .saved-proj-body {
+    margin-top: 7px;
+  }
+  .rest-mat-group {
+    margin: 10px 0 8px;
+  }
+  .rest-mat-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+    margin: 0 0 6px;
+  }
+  label.opt.opt-compact {
+    padding: 7px 9px;
+    margin-bottom: 6px;
+  }
+  label.opt.opt-compact b { font-size: 12px; }
+  label.opt.opt-compact span { font-size: 11px; margin-top: 2px; }
+  .rest-subbox {
+    margin: -2px 0 8px 18px;
+    padding: 7px 9px;
+    background: #F6F7FF;
+    border: 1px solid #D9E0FE;
+    border-radius: var(--radius-sm);
+  }
+
+  /* ---- Log Output ---- */
+  .log {
+    white-space: pre-wrap;
+    font: 11px/1.5 Consolas, "SF Mono", monospace;
+    color: #2B3630;
+    background: #F6F8F7;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 8px 9px;
+    max-height: 140px;
+    overflow: auto;
+    margin-top: 9px;
+  }
+  .log:empty { display: none; }
 </style>
-</head>
+<script src="/_aistudio-iframe.js?v=29045eb3"></script></head>
 <body>
-  <h1>BOM Tools</h1>
-  <div class="tabs" role="tablist">
-    <button id="tab-sheet" role="tab" aria-selected="false">Add sheet</button>
-    <button id="tab-mat" role="tab" aria-selected="false">Materials</button>
-    <button id="tab-convert" role="tab" aria-selected="true">Convert</button>
-  </div>
-
-  <!-- ===================== ADD SHEET ===================== -->
-  <section id="page-sheet" hidden>
-    <p class="sub">Add a new take-off (BOM) sheet with its purchase list, formulas and dropdowns already in place.</p>
-    <div class="card">
-      <h2>Workbook</h2>
-      <div id="sh-status" class="status">Checking...</div>
-    </div>
-    <div class="card">
-      <h2>New sheet</h2>
-      <label class="field"><span>Sheet name (e.g. D3-a)</span><input type="text" id="sh-name" maxlength="31" autocomplete="off"></label>
-      <label class="field"><span>Project name (shown in the title)</span><input type="text" id="sh-project" autocomplete="off"></label>
-      <label class="field"><span>Copy from</span><select id="sh-source"></select></label>
-      <label class="chk"><input type="checkbox" id="sh-clear"> <span>Clear entered data (tick this when copying a sheet that already has items)</span></label>
-      <button id="sh-add" class="primary" disabled>Add sheet</button>
-      <div id="sh-log" class="log"></div>
-    </div>
-    <p class="note">Tip: keep one empty sheet named <b>BOM Blank</b> (hidden is fine) in the template and always copy from it.</p>
-  </section>
-
-  <!-- ===================== MATERIALS ===================== -->
-  <section id="page-mat" hidden>
-    <p class="sub">Add a material to the master list or change an existing one. Every take-off sheet in this workbook updates straight away.</p>
-    <div class="card">
-      <h2>Master list</h2>
-      <div id="mat-status" class="status">Checking...</div>
-      <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
-      <div id="mat-list"></div>
-    </div>
-    <div class="card">
-      <h2 id="mat-mode">New material</h2>
-      <label class="field"><span id="mat-name-label">Material name</span><input type="text" id="m-name" autocomplete="off"></label>
-      <label class="field"><span>Category</span><input type="text" id="m-cat" list="m-cats" autocomplete="off"><datalist id="m-cats"></datalist></label>
-      <label class="field"><span>Primary unit</span>
-        <select id="m-unit"><option value="">Choose...</option><option>kg/m</option><option>kg/m²</option><option>kg/each</option></select></label>
-      <label class="field f-lin" hidden><span>Linear weight (kg/m)</span><input type="text" id="m-lin" inputmode="decimal" autocomplete="off"></label>
-      <label class="field f-area" hidden><span>Area weight (kg/m²)</span><input type="text" id="m-area" inputmode="decimal" autocomplete="off"></label>
-      <div class="row2 f-area" hidden>
-        <label class="field"><span>Sheet length (mm)</span><input type="text" id="m-sl" inputmode="decimal" autocomplete="off"></label>
-        <label class="field"><span>Sheet width (mm)</span><input type="text" id="m-sw" inputmode="decimal" autocomplete="off"></label>
+  <header class="topbar">
+    <div class="brand-row">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
+        </span>
+        <h1>BOM Tools</h1>
+        <span id="hdr-version" class="brand-ver" title="BOM Tools Add-in Version">v2.6</span>
       </div>
-      <label class="field f-piece" hidden><span>Piece weight (kg/each)</span><input type="text" id="m-piece" inputmode="decimal" autocomplete="off"></label>
-      <label class="field"><span>Remarks</span><input type="text" id="m-rem" autocomplete="off"></label>
-      <div class="btnrow">
-        <button id="m-save" class="primary">Add material</button>
-        <button id="m-new">New</button>
+      <button id="hdr-refresh" class="link-btn" title="Re-check this workbook">Refresh</button>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button id="tab-home" role="tab" aria-selected="true">Home</button>
+      <button id="tab-sheet" role="tab" aria-selected="false">Add Sheet</button>
+      <button id="tab-mat" role="tab" aria-selected="false">Materials</button>
+      <button id="tab-convert" role="tab" aria-selected="false">Convert</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ===================== HOME ===================== -->
+    <section id="page-home">
+      <div class="card">
+        <div class="card-title">
+          <span>This Workbook</span>
+        </div>
+        <div class="status-line">
+          <span id="home-dot" class="dot"></span>
+          <div style="flex:1">
+            <div id="home-wb-status" class="status">Checking workbook...</div>
+            <div id="home-local-status" class="note" style="margin-top:3px"></div>
+          </div>
+        </div>
       </div>
-      <div id="mat-log" class="log"></div>
-    </div>
-    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
-  </section>
 
-  <!-- ===================== CONVERT ===================== -->
-  <section id="page-convert">
-    <p class="sub">Turn the automated BOM workbook into a plain, easy-to-edit one.</p>
+      <div class="quick-grid">
+        <button type="button" id="qa-add" class="qcard">
+          <span class="qicon" aria-hidden="true">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+          </span>
+          <span class="qbody">
+            <span class="qtitle">Add a BOM Sheet</span>
+            <span class="qdesc">Create a ready-to-use take-off sheet with dropdowns &amp; formulas.</span>
+          </span>
+          <span class="qchev" aria-hidden="true">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Workbook</h2>
-      <div id="status" class="status">Checking...</div>
-      <button id="refresh" style="margin-top:6px">Re-check</button>
-    </div>
+        <button type="button" id="qa-mat" class="qcard">
+          <span class="qicon" aria-hidden="true">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          </span>
+          <span class="qbody">
+            <span class="qtitle">Manage Materials</span>
+            <span class="qdesc">Add, edit, or remove materials in your Master list.</span>
+          </span>
+          <span class="qchev" aria-hidden="true">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Step 1 &middot; Work on a copy</h2>
-      <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
-      <button id="copy" class="primary">Open a copy of this workbook</button>
-      <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Tools there and continue with step 2.</p>
-    </div>
+        <button type="button" id="qa-flatten" class="qcard">
+          <span class="qicon" aria-hidden="true">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </span>
+          <span class="qbody">
+            <span class="qtitle">Convert to Plain Excel</span>
+            <span class="qdesc">Flatten automated BOMs for easy sharing, editing, or printing.</span>
+          </span>
+          <span class="qchev" aria-hidden="true">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Step 2 &middot; Convert</h2>
-      <label class="opt"><input type="radio" name="mode" value="growing" checked>
-        <b>Auto-growing purchase list</b>
-        <span>Purchase list is formula-driven: it fills, grows and shrinks by itself when the BOM changes.</span></label>
-      <label class="opt"><input type="radio" name="mode" value="fixed">
-        <b>Fixed purchase list</b>
-        <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
-      <label class="opt"><input type="checkbox" id="compiled">
-        <b>Extra: compiled purchase list sheet</b>
-        <span>Adds a "Compiled Purchase List" sheet: all sheets combined on the left, each sheet's own list to the right with a gap, space on top for company details. With the auto-growing option it is formula-driven and grows with the BOM; with the fixed option it is values only.</span></label>
-      <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
-      <button id="convert" class="primary" disabled>Convert</button>
-      <div id="log" class="log"></div>
-    </div>
-  </section>
+        <button type="button" id="qa-restore" class="qcard">
+          <span class="qicon" aria-hidden="true">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+          </span>
+          <span class="qbody">
+            <span class="qtitle">Restore Automated BOM</span>
+            <span class="qdesc">Turn converted plain BOM sheets back into automated sheets.</span>
+          </span>
+          <span class="qchev" aria-hidden="true">&#8250;</span>
+        </button>
+      </div>
 
-  <script src="convert.js?v=4"></script>
-  <script src="tools.js?v=4"></script>
-  <script src="taskpane.js?v=4"></script>
+      <details class="drawer subtle" id="home-repair-drawer">
+        <summary>
+          <span class="sum-left">
+            <span>Troubleshooting &amp; Repair</span>
+          </span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <p class="note" style="margin-top:6px;margin-bottom:6px">
+            Pick which BOM sheets to check and repair (dropdowns, named ranges, formulas &amp; layout).
+          </p>
+          <div id="home-repair-sheets" class="sheet-pick" hidden></div>
+          <div id="home-repair-hint" class="req-hint" hidden></div>
+          <button id="home-repair-btn" style="width:100%" disabled>Repair selected sheets</button>
+          <div id="home-repair-log" class="log"></div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== ADD SHEET ===================== -->
+    <section id="page-sheet" hidden>
+      <p class="sub">Enter a name to add a new BOM sheet with its purchase list, dropdowns, and formulas ready.</p>
+
+      <div class="card">
+        <div class="status-line" style="margin-bottom:10px">
+          <span id="sh-dot" class="dot"></span>
+          <div id="sh-status" class="status">Checking workbook...</div>
+        </div>
+
+        <label class="field">
+          <span>Sheet name</span>
+          <input type="text" id="sh-name" maxlength="31" placeholder="e.g. D3-a or Main Frame" autocomplete="off">
+        </label>
+
+        <div id="sh-req-hint" class="req-hint" hidden></div>
+        <button id="sh-add" class="primary" disabled>Add BOM Sheet</button>
+        <div id="sh-log" class="log"></div>
+      </div>
+
+      <details class="drawer">
+        <summary>
+          <span class="sum-left"><span>More options</span></span>
+          <span class="sum-meta">Project, copy, sync</span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body" style="padding-top:8px">
+          <label class="field">
+            <span>Project name (shown in sheet title)</span>
+            <input type="text" id="sh-project" placeholder="Auto-filled from existing sheets" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Copy from sheet</span>
+            <select id="sh-source"></select>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="sh-clear">
+            <span>Clear entered items (when copying a filled sheet)</span>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="sh-sync" checked>
+            <span>Load latest saved materials from this computer first</span>
+          </label>
+          <div id="sh-local-status" class="note"></div>
+        </div>
+      </details>
+
+      <details class="drawer subtle" id="sh-repair-drawer">
+        <summary>
+          <span class="sum-left"><span>Troubleshooting &amp; Repair</span></span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <p class="note" style="margin-top:6px;margin-bottom:6px">
+            Choose which BOM sheets to repair (missing dropdowns, named ranges, helper columns, and print headers).
+          </p>
+          <div id="sh-repair-sheets" class="sheet-pick" hidden></div>
+          <div id="sh-repair-hint" class="req-hint" hidden></div>
+          <button id="sh-repair" style="width:100%" disabled>Repair selected sheets</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== MATERIALS ===================== -->
+    <section id="page-mat" hidden>
+      <!-- Aesthetic Auto-Collapsing Change Notification (displays fully for 5.5s, then collapses into compact Session Changes button) -->
+      <div id="mat-change-toast" class="change-toast" hidden>
+        <div class="toast-top">
+          <span id="mat-toast-icon" class="toast-icon" aria-hidden="true"></span>
+          <div class="toast-head">
+            <div id="mat-toast-title" class="toast-title">Change Saved</div>
+            <div id="mat-toast-sub" class="toast-sub"></div>
+          </div>
+          <button type="button" id="mat-toast-close" class="toast-close" title="Collapse to session log" aria-label="Collapse notification">&times;</button>
+        </div>
+        <div id="mat-toast-items" class="toast-items"></div>
+        <div class="toast-foot">
+          <span id="mat-toast-where"></span>
+          <span id="mat-toast-hint"></span>
+        </div>
+        <div class="toast-bar-track"><div id="mat-toast-bar" class="toast-bar"></div></div>
+      </div>
+
+      <!-- Compact Session Changes Button + Expandable History List -->
+      <div id="mat-session-wrap" class="session-wrap" hidden>
+        <button type="button" id="mat-changes-btn" class="session-btn" aria-expanded="false" aria-controls="mat-changes-panel">
+          <span id="mat-session-dot" class="session-dot"></span>
+          <span class="session-btn-label">Session changes</span>
+          <span id="mat-session-count" class="session-count">0</span>
+          <span id="mat-session-preview" class="session-preview"></span>
+          <span class="session-caret" aria-hidden="true">&#9656;</span>
+        </button>
+        <div id="mat-changes-panel" class="session-panel" hidden>
+          <div class="session-panel-hdr">
+            <span>Changes this session</span>
+            <button type="button" id="mat-session-clear" class="link-btn">Clear</button>
+          </div>
+          <div id="mat-changes-list" class="session-panel-list"></div>
+        </div>
+      </div>
+
+      <!-- Scope Card: Switch between Global Master List and Isolated One-Time Project List -->
+      <div id="proj-scope-card" class="scope-card">
+        <div class="scope-top">
+          <div class="scope-left">
+            <span class="scope-dot" aria-hidden="true"></span>
+            <span id="proj-scope-title" class="scope-title">Global Master List</span>
+          </div>
+          <button type="button" id="proj-open-setup" class="link-btn">One-Time Project List...</button>
+        </div>
+        <div id="proj-scope-sub" class="scope-sub">
+          Edits auto-save to this computer and apply to future BOMs.
+        </div>
+
+        <!-- Inline setup panel (visible when user clicks "One-Time Project List...") -->
+        <div id="proj-setup-panel" class="scope-setup" hidden>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Create an isolated material list just for this project. Changes auto-save separately on this PC and will <b>never</b> alter your Global Master list.
+          </p>
+          <label class="field">
+            <span>Project list name</span>
+            <input type="text" id="proj-name-input" placeholder="e.g. Warehouse B Custom Materials" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Start with</span>
+            <select id="proj-source-select">
+              <option value="clone">Copy from Global Master list (recommended)</option>
+              <option value="pick">Pick specific materials from Global Master</option>
+              <option value="usedOnly">Only materials used in this workbook&apos;s BOMs</option>
+              <option value="blank">Blank one-time list (add custom materials only)</option>
+            </select>
+          </label>
+          <div id="proj-pick-wrap" class="proj-pick-wrap" hidden>
+            <input type="search" id="proj-pick-search" class="proj-pick-search" placeholder="Filter materials to include..." autocomplete="off">
+            <div class="proj-pick-box">
+              <div class="proj-pick-hdr">
+                <span id="proj-pick-count">0 selected</span>
+                <button type="button" id="proj-pick-toggle" class="link-btn" style="color:#4338CA">None</button>
+              </div>
+              <div id="proj-pick-list" class="proj-pick-list"></div>
+            </div>
+          </div>
+          <div class="btnrow">
+            <button type="button" id="proj-create-btn" class="indigo" style="flex:1">Create Project List</button>
+            <button type="button" id="proj-load-setup-btn">Load .json...</button>
+            <button type="button" id="proj-cancel-setup-btn">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Preload action when workbook has no Master sheet yet (e.g. already converted) -->
+        <div id="proj-nomaster-actions" class="scope-setup" hidden>
+          <div class="btnrow">
+            <button type="button" id="proj-load-nomaster-btn" class="indigo" style="flex:1">Load Project List (.json) for Restore...</button>
+          </div>
+        </div>
+
+        <!-- Active Project-Only Actions (visible when workbook is in Project-Only mode) -->
+        <div id="proj-active-actions" class="scope-setup" hidden>
+          <div class="btnrow">
+            <button type="button" id="proj-export-btn" class="indigo" style="flex:1">Save Project List (.json)</button>
+            <button type="button" id="proj-load-btn">Load .json...</button>
+          </div>
+          <div class="btnrow" style="margin-top:6px">
+            <button type="button" id="proj-exit-btn" style="flex:1">Switch back to Global Master</button>
+          </div>
+        </div>
+
+        <!-- Saved Project-Only Material Lists stored on this PC (switch, restore, export, or delete) -->
+        <details id="proj-saved-drawer" class="saved-proj-drawer" hidden>
+          <summary>
+            <span class="sum-left"><span>Saved Project Lists on this PC</span></span>
+            <span style="display:inline-flex;align-items:center;gap:6px">
+              <span id="proj-saved-count" class="sum-meta">0 saved</span>
+              <span class="sum-caret" aria-hidden="true">&#9656;</span>
+            </span>
+          </summary>
+          <div class="saved-proj-body">
+            <select id="proj-saved-select" style="margin-bottom:7px"></select>
+            <div class="btnrow">
+              <button type="button" id="proj-saved-load-btn" class="indigo" style="flex:1">Load into workbook</button>
+              <button type="button" id="proj-saved-export-btn">Export .json</button>
+              <button type="button" id="proj-saved-delete-btn" class="danger">Delete</button>
+            </div>
+            <div id="proj-saved-note" class="note" style="margin-top:5px"></div>
+          </div>
+        </details>
+
+        <input type="file" id="proj-import-input" accept=".json,application/json" hidden>
+        <div id="proj-log" class="log"></div>
+      </div>
+
+      <!-- Main Panel 1: Search & Browse Materials List -->
+      <div class="card">
+        <div class="card-title">
+          <span id="mat-list-title">Master Materials</span>
+          <span id="mat-status" style="font-weight:500;text-transform:none;letter-spacing:0">Checking...</span>
+        </div>
+        <input type="search" id="mat-search" placeholder="Search materials or categories..." autocomplete="off">
+        <div id="mat-list"></div>
+      </div>
+
+      <!-- Main Panel 2: Add / Edit Material Form (Streamlined; optional fields under More options) -->
+      <div class="card">
+        <div class="card-title">
+          <span id="mat-mode">Add New Material</span>
+          <button id="m-new" class="link-btn" type="button" hidden>+ New</button>
+        </div>
+        <label class="field">
+          <span id="mat-name-label">Material name</span>
+          <input type="text" id="m-name" placeholder="e.g. ISMB 250" autocomplete="off">
+        </label>
+        <label class="field">
+          <span>Primary unit</span>
+          <select id="m-unit">
+            <option value="">Choose...</option>
+            <option>kg/m</option>
+            <option>kg/m²</option>
+            <option>kg/each</option>
+          </select>
+        </label>
+        <label class="field f-lin" hidden>
+          <span>Linear weight (kg/m)</span>
+          <input type="text" id="m-lin" inputmode="decimal" autocomplete="off">
+        </label>
+        <label class="field f-area" hidden>
+          <span>Area weight (kg/m²)</span>
+          <input type="text" id="m-area" inputmode="decimal" autocomplete="off">
+        </label>
+        <div class="row2 f-area" hidden>
+          <label class="field"><span>Sheet length (mm)</span><input type="text" id="m-sl" inputmode="decimal" autocomplete="off"></label>
+          <label class="field"><span>Sheet width (mm)</span><input type="text" id="m-sw" inputmode="decimal" autocomplete="off"></label>
+        </div>
+        <label class="field f-piece" hidden>
+          <span>Piece weight (kg/each)</span>
+          <input type="text" id="m-piece" inputmode="decimal" autocomplete="off">
+        </label>
+
+        <details class="drawer inner-drawer" id="m-more">
+          <summary>
+            <span class="sum-left"><span>More options</span></span>
+            <span id="m-more-meta" class="sum-meta">Category, remarks</span>
+            <span class="sum-caret" aria-hidden="true">&#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <label class="field">
+              <span>Category (optional)</span>
+              <input type="text" id="m-cat" list="m-cats" placeholder="e.g. Structural Beams" autocomplete="off">
+              <datalist id="m-cats"></datalist>
+            </label>
+            <label class="field">
+              <span>Remarks (optional)</span>
+              <input type="text" id="m-rem" placeholder="Optional note" autocomplete="off">
+            </label>
+          </div>
+        </details>
+
+        <div id="mat-req-hint" class="req-hint" hidden></div>
+        <div class="btnrow">
+          <button id="m-save" class="primary" disabled>Add Material</button>
+          <button id="m-delete" class="danger" hidden>Remove</button>
+        </div>
+        <div id="mat-log" class="log"></div>
+      </div>
+
+      <!-- Collapsible Drawer: Built-in Computer Storage + JSON Backup / Transfer -->
+      <details class="drawer subtle" id="local-drawer">
+        <summary>
+          <span class="sum-left"><span>Global Master Backup (JSON)</span></span>
+          <span id="local-summary-tag" class="sum-meta ok">Auto-saved</span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <p class="note" style="margin-top:8px;color:var(--text)">
+            <b>Always auto-connected on this computer — no reconnecting or GitHub needed.</b>
+          </p>
+          <p class="note" style="margin-top:4px;margin-bottom:8px">
+            Global Master edits save automatically in Excel&apos;s built-in storage and load into new BOMs. Export a <code style="font-family:Consolas,monospace">.json</code> file anytime to back up or transfer your Global Master to another computer (Project-Only files are blocked here so they never overwrite Global Master).
+          </p>
+
+          <div id="local-status" class="status ok" style="margin-bottom:8px">Auto-saving on this computer...</div>
+
+          <div class="btnrow">
+            <button id="local-export-btn" class="primary" style="flex:1">Export JSON backup</button>
+            <button id="local-import-btn">Import JSON...</button>
+            <input type="file" id="local-import-input" accept=".json,application/json" hidden>
+          </div>
+          <div class="btnrow" style="margin-top:6px">
+            <button id="local-pull" disabled>Reload workbook from saved</button>
+            <button id="local-save" disabled>Save workbook to PC</button>
+          </div>
+          <div id="local-log" class="log"></div>
+        </div>
+      </details>
+
+      <!-- Collapsible Drawer: Optional GitHub Sync -->
+      <details class="drawer subtle" id="github-drawer">
+        <summary>
+          <span class="sum-left"><span>Advanced: GitHub Sync</span></span>
+          <span class="sum-caret" aria-hidden="true">&#9656;</span>
+        </summary>
+        <div class="drawer-body" style="padding-top:8px">
+          <div id="sync-status" class="status">Not configured.</div>
+          <div id="sync-detail" class="note"></div>
+          <div class="btnrow" style="margin-top:8px">
+            <button id="sync-pull" disabled>Pull from GitHub</button>
+            <button id="sync-push" disabled hidden>Publish to GitHub</button>
+          </div>
+          <label class="field" style="margin-top:8px">
+            <span>GitHub token (optional)</span>
+            <input type="password" id="gh-token" autocomplete="off">
+          </label>
+          <div class="btnrow">
+            <button id="gh-save">Save token</button>
+            <button id="gh-clear">Remove token</button>
+          </div>
+          <div id="sync-log" class="log"></div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== CONVERT (TWO-WAY) ===================== -->
+    <section id="page-convert" hidden>
+      <div class="seg" role="group" aria-label="Conversion direction">
+        <button type="button" id="cmode-flatten" aria-pressed="true">Flatten for Sharing</button>
+        <button type="button" id="cmode-restore" aria-pressed="false">Restore Automated</button>
+      </div>
+
+      <!-- Direction A: Automated -> Plain Excel -->
+      <div id="panel-flatten">
+        <div class="card">
+          <div class="card-title"><span>Workbook Check</span></div>
+          <div class="status-line">
+            <span id="conv-dot" class="dot"></span>
+            <div id="status" class="status">Checking...</div>
+          </div>
+        </div>
+
+        <div id="conv-proj-callout" class="proj-callout" hidden>
+          <div id="conv-proj-title" class="proj-callout-title">Project-Only Materials Active</div>
+          <p id="conv-proj-desc" class="proj-callout-desc">
+            Flattening all sheets removes the materials sheet from this copy (a snapshot is also kept in this PC&apos;s project storage). Save a separate <code style="font-family:Consolas,monospace">.json</code> file so you can reuse or restore it on any computer.
+          </p>
+          <label class="chk" style="margin:4px 0 8px">
+            <input type="checkbox" id="conv-save-proj" checked>
+            <span>Save project materials (<code style="font-family:Consolas,monospace">.json</code>) file automatically before converting</span>
+          </label>
+          <button type="button" id="conv-proj-save-btn" class="indigo" style="width:100%">Save .json now</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Step 1 &middot; Work on a copy</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Flattening all sheets removes Master &amp; BOM Blank (uncheck any sheet in Step 2 to keep them). Always convert a copy first.
+          </p>
+          <button id="copy" style="width:100%">Open a copy in a new Excel window</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Step 2 &middot; Choose Sheets &amp; Output Style</span></div>
+          <div id="conv-sheets" class="sheet-pick" hidden></div>
+          <div id="conv-partial-note" class="note" style="margin:0 0 8px;color:#157347;font-weight:500" hidden></div>
+          <label class="opt">
+            <input type="radio" name="mode" value="growing" checked>
+            <b>Auto-growing purchase list (Excel 365)</b>
+            <span>Sorted dynamic list (SORT/UNIQUE/FILTER) — updates and grows automatically, even when you type custom materials not on Master.</span>
+          </label>
+          <label class="opt">
+            <input type="radio" name="mode" value="fixed">
+            <b>Fixed purchase list (No automation)</b>
+            <span>Static rows with classic SUMIF / ROUNDUP formulas — best for sharing with non-365 Excel or without automation.</span>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="compiled">
+            <span>Also add a "Compiled Purchase List" sheet combining selected BOMs</span>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="iscopy">
+            <span><b>This workbook is a copy</b>, not my original automated file.</span>
+          </label>
+          <div id="conv-req-hint" class="req-hint" hidden></div>
+          <button id="convert" class="primary" disabled>Convert to Plain Excel</button>
+          <div id="log" class="log"></div>
+        </div>
+      </div>
+
+      <!-- Direction B: Converted Plain BOM -> Automated BOM -->
+      <div id="panel-restore" hidden>
+        <div class="card">
+          <div class="card-title"><span>Converted Sheets Detected</span></div>
+          <div class="status-line">
+            <span id="rest-dot" class="dot"></span>
+            <div id="rest-status" class="status">Checking...</div>
+          </div>
+        </div>
+
+        <div id="rest-proj-detected" class="proj-callout" hidden>
+          <div id="rest-proj-detected-title" class="proj-callout-title">Project-Only Workbook Detected</div>
+          <p id="rest-proj-detected-desc" class="proj-callout-desc" style="margin-bottom:0"></p>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Step 1 &middot; Work on a copy (recommended)</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:8px">
+            Keep your original converted file untouched. Excel opens the copy in a new window—open BOM Tools there to restore it, or restore directly in Step 2.
+          </p>
+          <button id="rest-copy" style="width:100%">Open a copy in a new Excel window</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title"><span>Step 2 &middot; Choose Sheets &amp; Restore</span></div>
+          <p class="note" style="margin-top:0;margin-bottom:6px">
+            Rebuilds each selected sheet back into a full automated BOM with live dropdowns, formulas, and Stock &amp; PO inputs preserved.
+          </p>
+          <div id="rest-sheets" class="sheet-pick" hidden></div>
+          <div class="rest-mat-group">
+            <div class="rest-mat-label">Materials list to restore with</div>
+            <label class="opt opt-compact">
+              <input type="radio" name="rest-mat-src" id="rest-src-global" value="global" checked>
+              <b>Global Master list</b>
+              <span>Load your main Global Master materials saved on this computer.</span>
+            </label>
+            <label class="opt opt-compact">
+              <input type="radio" name="rest-mat-src" id="rest-src-saved" value="saved-project">
+              <b>Saved Project-Only list on this PC</b>
+              <span>Pick any Project-Only materials list saved in this add-in (isolated from Global Master).</span>
+            </label>
+            <div id="rest-saved-proj-box" class="rest-subbox" hidden>
+              <div class="btnrow" style="align-items:center">
+                <select id="rest-proj-saved-select" style="flex:1"></select>
+                <button type="button" id="rest-proj-refresh-btn" title="Refresh saved project lists">Refresh</button>
+              </div>
+              <div id="rest-saved-proj-note" class="note" style="margin-top:4px"></div>
+            </div>
+            <label class="opt opt-compact">
+              <input type="radio" name="rest-mat-src" id="rest-src-file" value="project-file">
+              <b>Project Materials <code style="font-family:Consolas,monospace">.json</code> file</b>
+              <span>Load an exported project materials file from your computer or another PC.</span>
+            </label>
+            <div id="rest-proj-box" class="rest-subbox" hidden>
+              <div class="btnrow">
+                <button type="button" id="rest-proj-pick-btn">Choose Project .json...</button>
+                <button type="button" id="rest-proj-clear-btn" hidden>Clear</button>
+              </div>
+              <input type="file" id="rest-proj-input" accept=".json,application/json" hidden>
+              <div id="rest-proj-status" class="note">No project materials file chosen yet.</div>
+            </div>
+          </div>
+          <label class="chk">
+            <input type="checkbox" id="rest-drop-compiled">
+            <span>Remove "Compiled Purchase List" sheet (if present)</span>
+          </label>
+          <div id="rest-req-hint" class="req-hint" hidden></div>
+          <button id="restore-btn" class="primary" disabled>Restore Selected Sheets</button>
+          <div id="rest-log" class="log"></div>
+        </div>
+
+        <details class="drawer subtle" id="rest-repair-names-drawer" hidden>
+          <summary>
+            <span class="sum-left"><span>Upgrade / Repair Purchase-List Names</span></span>
+            <span class="sum-meta">Excel 365</span>
+            <span class="sum-caret" aria-hidden="true">&#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <p class="note" style="margin-top:6px;margin-bottom:8px">
+              Upgrades already-converted Auto-growing sheets (selected above) to the Excel 365 <code style="font-family:Consolas,monospace">SORT(UNIQUE(FILTER(...)))</code> purchase list so any custom material shows up automatically — without touching your BOM rows or Stock/PO inputs.
+            </p>
+            <button type="button" id="rest-repair-names-btn" style="width:100%" disabled>Upgrade purchase-list names on selected sheets</button>
+            <div id="rest-repair-names-log" class="log"></div>
+          </div>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <script src="convert.js?v=22"></script>
+  <script src="tools.js?v=22"></script>
+  <script src="template-data.js?v=22"></script>
+  <script src="sync.js?v=22"></script>
+  <script src="taskpane.js?v=22"></script>
 </body>
 </html>
