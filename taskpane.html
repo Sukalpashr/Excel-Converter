@@ -1,145 +1,857 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BOM Tools</title>
-<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
-<style>
-  :root { --g:#217346; --g2:#1a5c38; --bd:#d9d9d9; --mut:#605e5c; --bg:#faf9f8; }
-  * { box-sizing: border-box; }
-  [hidden] { display:none !important; }
-  body { margin:0; padding:14px; font:13px/1.45 "Segoe UI", system-ui, sans-serif; color:#201f1e; background:#fff; }
-  h1 { font-size:16px; margin:0 0 10px; }
-  .tabs { display:flex; gap:2px; border-bottom:1px solid var(--bd); margin-bottom:12px; }
-  .tabs button { flex:1; border:0; border-bottom:3px solid transparent; border-radius:0; background:none; padding:8px 4px; color:var(--mut); font-weight:600; }
-  .tabs button[aria-selected="true"] { color:var(--g); border-bottom-color:var(--g); }
-  .sub { color:var(--mut); margin:0 0 12px; }
-  .card { border:1px solid var(--bd); border-radius:6px; padding:10px 12px; margin-bottom:10px; background:var(--bg); }
-  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); margin:0 0 6px; }
-  .status { font-size:12px; }
-  .ok { color:#107c10; } .warn { color:#a4262c; }
-  button { font:inherit; cursor:pointer; border-radius:4px; padding:7px 12px; border:1px solid var(--bd); background:#fff; }
-  button.primary { background:var(--g); border-color:var(--g); color:#fff; font-weight:600; width:100%; padding:9px; }
-  button.primary:hover:not(:disabled) { background:var(--g2); }
-  button:disabled { opacity:.5; cursor:default; }
-  label.opt { display:block; border:1px solid var(--bd); border-radius:6px; padding:8px 10px; margin-bottom:8px; background:#fff; cursor:pointer; }
-  label.opt:has(input:checked) { border-color:var(--g); box-shadow:0 0 0 1px var(--g); }
-  label.opt b { display:block; }
-  label.opt span { color:var(--mut); font-size:12px; }
-  .chk { display:flex; gap:8px; align-items:flex-start; margin:8px 0 10px; font-size:12px; }
-  .log { white-space:pre-wrap; font:11.5px/1.5 Consolas, monospace; color:#323130; max-height:160px; overflow:auto; margin-top:10px; }
-  .log:empty { display:none; }
-  .note { font-size:11.5px; color:var(--mut); }
-  .field { display:block; margin-bottom:8px; }
-  .field > span { display:block; font-size:12px; color:var(--mut); margin-bottom:2px; }
-  input[type=text], input[type=search], select { width:100%; font:inherit; padding:6px 8px; border:1px solid var(--bd); border-radius:4px; background:#fff; }
-  input[readonly] { background:#f3f2f1; color:var(--mut); }
-  .row2 { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  #mat-list { border:1px solid var(--bd); border-radius:4px; background:#fff; max-height:170px; overflow:auto; margin-top:6px; }
-  #mat-list div { padding:5px 8px; border-bottom:1px solid #edebe9; cursor:pointer; display:flex; justify-content:space-between; gap:8px; }
-  #mat-list div:hover { background:#f3f2f1; }
-  #mat-list div.sel { background:#dff6dd; }
-  #mat-list small { color:var(--mut); white-space:nowrap; }
-  .btnrow { display:flex; gap:8px; }
-  .btnrow .primary { flex:1; width:auto; }
-</style>
-</head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BOM Tools</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6f5;
+      --surface: #ffffff;
+      --subtle: #f8faf9;
+      --border: #dfe5e1;
+      --border-strong: #c8d2cc;
+      --ink: #18201b;
+      --muted: #5a6760;
+      --accent: #1d6f42;
+      --accent-hover: #165934;
+      --accent-soft: #ecf6f0;
+      --accent-border: #b7dec6;
+      --amber: #b45309;
+      --amber-soft: #fffbeb;
+      --amber-border: #fcd34d;
+      --blue: #1d4ed8;
+      --blue-soft: #eff6ff;
+      --danger: #b91c1c;
+      --danger-soft: #fef2f2;
+      --radius: 8px;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--ink);
+      font: 12.5px/1.42 var(--font);
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    .hidden { display: none !important; }
+
+    /* Sticky header */
+    header {
+      position: sticky; top: 0; z-index: 20;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px 6px;
+      gap: 8px;
+    }
+    .brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .brand-mark {
+      width: 22px; height: 22px; border-radius: 5px;
+      background: var(--accent); color: #fff;
+      display: grid; place-items: center; font-weight: 700; font-size: 11px; flex-shrink: 0;
+    }
+    .brand-title { font-size: 13.5px; font-weight: 700; letter-spacing: -0.01em; }
+    .ver-tag {
+      font-size: 10.5px; font-weight: 600; color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: 1px 5px; border: 1px solid var(--border); border-radius: 4px;
+      background: var(--subtle);
+    }
+    .ver-tag.offline { color: var(--accent); border-color: var(--accent-border); background: var(--accent-soft); }
+    .link-btn {
+      background: none; border: none; padding: 3px 6px; border-radius: 5px;
+      color: var(--accent); font-weight: 600; font-size: 11.5px; cursor: pointer;
+    }
+    .link-btn:hover { background: var(--accent-soft); }
+    .link-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .tabs { display: flex; padding: 0 8px; gap: 2px; }
+    .tab {
+      flex: 1; background: none; border: none; border-bottom: 2px solid transparent;
+      padding: 7px 4px; font-size: 11.5px; font-weight: 600; color: var(--muted);
+      cursor: pointer; white-space: nowrap;
+    }
+    .tab:hover { color: var(--ink); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    main { padding: 11px; display: flex; flex-direction: column; gap: 10px; }
+
+    /* Cards & Controls */
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 11px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .card-kicker {
+      font-size: 10.5px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--muted);
+      display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    }
+    .status-line { font-size: 12px; font-weight: 600; color: var(--accent); }
+    .status-line.warn { color: var(--amber); }
+    .status-line.muted { color: var(--muted); font-weight: 500; }
+    .sub { font-size: 11.5px; color: var(--muted); margin: 0; }
+
+    /* Quick action list on Home */
+    .action-tile {
+      width: 100%; text-align: left; cursor: pointer;
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 10px; border-radius: var(--radius);
+      background: var(--surface); border: 1px solid var(--border);
+      transition: border-color 0.12s, background 0.12s;
+    }
+    .action-tile:hover { border-color: var(--accent); background: var(--subtle); }
+    .action-tile.primary-tile { background: var(--accent-soft); border-color: var(--accent-border); }
+    .tile-ico {
+      width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+      display: grid; place-items: center; font-weight: 700; font-size: 13px;
+      background: var(--accent-soft); color: var(--accent);
+    }
+    .primary-tile .tile-ico { background: var(--accent); color: #fff; }
+    .tile-body { flex: 1; min-width: 0; }
+    .tile-title { display: block; font-weight: 600; font-size: 12.5px; color: var(--ink); }
+    .tile-desc { display: block; font-size: 11px; color: var(--muted); }
+    .tile-arrow { color: var(--muted); font-size: 13px; }
+
+    /* Form elements */
+    label.field { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+    input[type="text"], input[type="number"], input[type="password"], select {
+      width: 100%; padding: 7px 9px; border: 1px solid var(--border-strong);
+      border-radius: 6px; background: #fff; color: var(--ink); font-size: 12.5px;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px rgba(29,111,66,0.14); }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .row-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+    .row-btns > * { flex: 1; min-width: 0; }
+
+    .btn {
+      width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid transparent;
+      font-weight: 600; font-size: 12px; cursor: pointer; text-align: center;
+      transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+    .btn-secondary { background: #fff; border-color: var(--border-strong); color: var(--ink); }
+    .btn-secondary:hover:not(:disabled) { background: var(--subtle); border-color: var(--accent); }
+    .btn-amber { background: var(--amber-soft); border-color: var(--amber-border); color: var(--amber); }
+    .btn-amber:hover:not(:disabled) { background: #fef3c7; }
+    .btn-danger { background: var(--danger-soft); border-color: #fecaca; color: var(--danger); }
+    .btn-danger:hover:not(:disabled) { background: #fee2e2; }
+    .btn:disabled { opacity: 0.48; cursor: not-allowed; }
+    .btn-sm { padding: 5px 8px; font-size: 11px; width: auto; }
+
+    .check-row {
+      display: flex; align-items: flex-start; gap: 7px; font-size: 12px; color: var(--ink); cursor: pointer;
+    }
+    .check-row input { margin-top: 2px; accent-color: var(--accent); }
+
+    /* Calm inline hints */
+    .hint {
+      padding: 6px 8px; border-radius: 6px; font-size: 11px; line-height: 1.35;
+      background: #f4f7f5; border: 1px solid var(--border); color: #47554d;
+    }
+    .hint.warn { background: var(--amber-soft); border-color: var(--amber-border); color: #92400e; }
+    .hint.ok { background: var(--accent-soft); border-color: var(--accent-border); color: var(--accent); }
+    .hint.err { background: var(--danger-soft); border-color: #fecaca; color: var(--danger); }
+
+    /* Banners */
+    .project-banner {
+      background: var(--amber-soft); border: 1px solid var(--amber-border);
+      border-radius: var(--radius); padding: 9px 10px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .project-banner-title { font-weight: 700; font-size: 12px; color: var(--amber); }
+
+    /* Change toast + collapsible Session changes button */
+    .toast-card {
+      position: relative; overflow: hidden;
+      background: #fff; border: 1px solid #bfdbfe;
+      border-radius: var(--radius); padding: 9px 10px 11px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .toast-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .toast-title { font-weight: 700; font-size: 12px; color: var(--ink); }
+    .toast-sub { font-size: 10.5px; color: var(--muted); }
+    .toast-items { display: flex; flex-direction: column; gap: 4px; }
+    .toast-item {
+      background: var(--subtle); border: 1px solid var(--border);
+      border-radius: 6px; padding: 5px 7px; font-size: 11.5px; cursor: pointer;
+    }
+    .toast-item:hover { border-color: var(--accent); }
+    .toast-bar {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #e5ece8;
+    }
+    .toast-bar > i {
+      display: block; height: 100%; width: 100%; background: var(--accent);
+      transform-origin: left; transition: transform linear;
+    }
+    .session-toggle {
+      width: 100%; display: flex; align-items: center; gap: 7px;
+      padding: 7px 9px; background: #fff; border: 1px solid var(--border-strong);
+      border-radius: 7px; cursor: pointer; text-align: left; font-size: 11.5px;
+    }
+    .session-toggle:hover { border-color: var(--accent); }
+    .session-count {
+      font-weight: 700; font-size: 10.5px; padding: 0 5px; border-radius: 4px;
+      background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border);
+    }
+    .session-log {
+      background: #fff; border: 1px solid var(--border); border-radius: 7px;
+      max-height: 150px; overflow-y: auto; divide-y: 1px solid var(--border);
+    }
+    .session-row {
+      padding: 6px 9px; border-bottom: 1px solid #eef2ef; font-size: 11px;
+      display: flex; justify-content: space-between; gap: 6px;
+    }
+    .session-row:last-child { border-bottom: none; }
+
+    /* Disclosures (collapsed drawers) */
+    details.drawer {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    details.drawer.soft { background: var(--subtle); }
+    details.drawer > summary {
+      list-style: none; cursor: pointer; padding: 8px 10px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      font-weight: 600; font-size: 12px; color: var(--ink); user-select: none;
+    }
+    details.drawer > summary::-webkit-details-marker { display: none; }
+    details.drawer > summary .sum-meta { font-size: 11px; font-weight: 500; color: var(--muted); }
+    details.drawer[open] > summary { border-bottom: 1px solid var(--border); }
+    .drawer-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+    /* Materials list */
+    .mat-list {
+      border: 1px solid var(--border); border-radius: 6px; background: #fff;
+      max-height: 210px; overflow-y: auto;
+    }
+    .mat-row {
+      width: 100%; border: none; border-bottom: 1px solid #eef2ef; background: #fff;
+      padding: 6px 8px; display: flex; align-items: center; justify-content: space-between; gap: 6px;
+      text-align: left; cursor: pointer; font-size: 12px;
+    }
+    .mat-row:last-child { border-bottom: none; }
+    .mat-row:hover { background: var(--subtle); }
+    .mat-row.selected { background: var(--accent-soft); font-weight: 600; }
+    .mat-row.recent { background: #f3faf6; }
+    .mat-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .mat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mat-state {
+      width: 15px; height: 15px; border-radius: 4px; flex-shrink: 0;
+      display: grid; place-items: center; font-size: 10px; font-weight: 700;
+    }
+    .mat-state.ok { background: var(--accent-soft); color: var(--accent); }
+    .mat-state.bad { background: var(--amber-soft); color: var(--amber); }
+    .mat-right { font-size: 11px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .tag-recent { font-size: 10px; font-weight: 700; color: var(--blue); }
+
+    /* Checklists (sheets & pick-materials) */
+    .checklist-box {
+      border: 1px solid var(--border); border-radius: 6px; background: var(--subtle);
+      padding: 7px 8px; display: flex; flex-direction: column; gap: 5px;
+    }
+    .checklist-head {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 11px; font-weight: 600; color: var(--muted);
+    }
+    .checklist-items { max-height: 135px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+
+    /* Segmented toggle & radio cards */
+    .seg {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 3px;
+      padding: 3px; background: #e6ece8; border-radius: 8px;
+    }
+    .seg button {
+      border: none; background: transparent; padding: 6px 8px; border-radius: 6px;
+      font-size: 11.5px; font-weight: 600; color: var(--muted); cursor: pointer;
+    }
+    .seg button.active { background: #fff; color: var(--accent); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+
+    .radio-card {
+      display: flex; align-items: flex-start; gap: 8px;
+      padding: 8px; border: 1px solid var(--border); border-radius: 7px;
+      background: #fff; cursor: pointer;
+    }
+    .radio-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+    .radio-card input { margin-top: 2px; accent-color: var(--accent); }
+    .radio-title { font-size: 12px; font-weight: 600; color: var(--ink); display: block; }
+    .radio-desc { font-size: 11px; color: var(--muted); display: block; }
+
+    /* Saved projects list */
+    .proj-item {
+      border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px;
+      background: #fff; display: flex; flex-direction: column; gap: 5px;
+    }
+    .proj-top { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+    .proj-name { font-weight: 600; font-size: 12px; }
+    .proj-meta { font-size: 10.5px; color: var(--muted); }
+
+    /* Log console */
+    .log-box {
+      background: #141c17; color: #dbe6df; border-radius: 6px;
+      padding: 7px 9px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      max-height: 120px; overflow-y: auto; white-space: pre-wrap;
+    }
+  </style>
+<script src="/_aistudio-iframe.js?v=29045eb3"></script></head>
 <body>
-  <h1>BOM Tools</h1>
-  <div class="tabs" role="tablist">
-    <button id="tab-sheet" role="tab" aria-selected="false">Add sheet</button>
-    <button id="tab-mat" role="tab" aria-selected="false">Materials</button>
-    <button id="tab-convert" role="tab" aria-selected="true">Convert</button>
-  </div>
-
-  <!-- ===================== ADD SHEET ===================== -->
-  <section id="page-sheet" hidden>
-    <p class="sub">Add a new take-off (BOM) sheet with its purchase list, formulas and dropdowns already in place.</p>
-    <div class="card">
-      <h2>Workbook</h2>
-      <div id="sh-status" class="status">Checking...</div>
-    </div>
-    <div class="card">
-      <h2>New sheet</h2>
-      <label class="field"><span>Sheet name (e.g. D3-a)</span><input type="text" id="sh-name" maxlength="31" autocomplete="off"></label>
-      <label class="field"><span>Project name (shown in the title)</span><input type="text" id="sh-project" autocomplete="off"></label>
-      <label class="field"><span>Copy from</span><select id="sh-source"></select></label>
-      <label class="chk"><input type="checkbox" id="sh-clear"> <span>Clear entered data (tick this when copying a sheet that already has items)</span></label>
-      <button id="sh-add" class="primary" disabled>Add sheet</button>
-      <div id="sh-log" class="log"></div>
-    </div>
-    <p class="note">Tip: keep one empty sheet named <b>BOM Blank</b> (hidden is fine) in the template and always copy from it.</p>
-  </section>
-
-  <!-- ===================== MATERIALS ===================== -->
-  <section id="page-mat" hidden>
-    <p class="sub">Add a material to the master list or change an existing one. Every take-off sheet in this workbook updates straight away.</p>
-    <div class="card">
-      <h2>Master list</h2>
-      <div id="mat-status" class="status">Checking...</div>
-      <input type="search" id="mat-search" placeholder="Search materials..." style="margin-top:6px" autocomplete="off">
-      <div id="mat-list"></div>
-    </div>
-    <div class="card">
-      <h2 id="mat-mode">New material</h2>
-      <label class="field"><span id="mat-name-label">Material name</span><input type="text" id="m-name" autocomplete="off"></label>
-      <label class="field"><span>Category</span><input type="text" id="m-cat" list="m-cats" autocomplete="off"><datalist id="m-cats"></datalist></label>
-      <label class="field"><span>Primary unit</span>
-        <select id="m-unit"><option value="">Choose...</option><option>kg/m</option><option>kg/m²</option><option>kg/each</option></select></label>
-      <label class="field f-lin" hidden><span>Linear weight (kg/m)</span><input type="text" id="m-lin" inputmode="decimal" autocomplete="off"></label>
-      <label class="field f-area" hidden><span>Area weight (kg/m²)</span><input type="text" id="m-area" inputmode="decimal" autocomplete="off"></label>
-      <div class="row2 f-area" hidden>
-        <label class="field"><span>Sheet length (mm)</span><input type="text" id="m-sl" inputmode="decimal" autocomplete="off"></label>
-        <label class="field"><span>Sheet width (mm)</span><input type="text" id="m-sw" inputmode="decimal" autocomplete="off"></label>
+  <header>
+    <div class="topbar">
+      <div class="brand">
+        <span class="brand-mark">B</span>
+        <span class="brand-title">BOM Tools</span>
+        <span id="verTag" class="ver-tag">3.0v patch2</span>
       </div>
-      <label class="field f-piece" hidden><span>Piece weight (kg/each)</span><input type="text" id="m-piece" inputmode="decimal" autocomplete="off"></label>
-      <label class="field"><span>Remarks</span><input type="text" id="m-rem" autocomplete="off"></label>
-      <div class="btnrow">
-        <button id="m-save" class="primary">Add material</button>
-        <button id="m-new">New</button>
+      <button id="btnRefresh" class="link-btn" type="button">Refresh</button>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="home" type="button">Home</button>
+      <button class="tab" data-tab="sheet" type="button">Add Sheet</button>
+      <button class="tab" data-tab="mat" type="button">Materials</button>
+      <button class="tab" data-tab="convert" type="button">Convert</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Global feedback toast -->
+    <div id="globalMsg" class="hint hidden"></div>
+
+    <!-- ===================== HOME TAB ===================== -->
+    <section id="tab-home" class="panel" style="display:flex;flex-direction:column;gap:10px;">
+      <div class="card">
+        <div class="card-kicker">
+          <span>This Workbook</span>
+          <span id="homeModeBadge" class="hidden" style="color:var(--amber);font-weight:700;">PROJECT-ONLY</span>
+        </div>
+        <div id="homeWbStatus" class="status-line muted">Checking workbook...</div>
+        <p id="homeStoreStatus" class="sub">Checking local material storage...</p>
+        <button id="btnQuickImport" class="btn btn-primary hidden" type="button">Import Lightweight BOM Template</button>
       </div>
-      <div id="mat-log" class="log"></div>
-    </div>
-    <p class="note">A material's name is locked while editing, because renaming it would break take-off rows that already use it. If your project files read the master list from a shared master workbook, add and edit materials in that master workbook only.</p>
-  </section>
 
-  <!-- ===================== CONVERT ===================== -->
-  <section id="page-convert">
-    <p class="sub">Turn the automated BOM workbook into a plain, easy-to-edit one.</p>
+      <div style="display:flex;flex-direction:column;gap:7px;">
+        <button class="action-tile primary-tile" data-jump="sheet" type="button">
+          <span class="tile-ico">+</span>
+          <span class="tile-body">
+            <span class="tile-title">Add a BOM Sheet</span>
+            <span class="tile-desc">Create a fast 60-row take-off sheet with live dropdowns.</span>
+          </span>
+          <span class="tile-arrow">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Workbook</h2>
-      <div id="status" class="status">Checking...</div>
-      <button id="refresh" style="margin-top:6px">Re-check</button>
-    </div>
+        <button class="action-tile" data-jump="mat" type="button">
+          <span class="tile-ico">&#9776;</span>
+          <span class="tile-body">
+            <span class="tile-title">Manage Materials</span>
+            <span class="tile-desc">Edit Global Master or isolate a Project-Only list.</span>
+          </span>
+          <span class="tile-arrow">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Step 1 &middot; Work on a copy</h2>
-      <p class="note" style="margin-top:0">Conversion deletes the Master, Formulas and README sheets, so never run it on your original.</p>
-      <button id="copy" class="primary">Open a copy of this workbook</button>
-      <p class="note" style="margin-bottom:0">A copy opens in a new Excel window. Open BOM Tools there and continue with step 2.</p>
-    </div>
+        <button class="action-tile" data-jump="convert:flatten" type="button">
+          <span class="tile-ico">&#8615;</span>
+          <span class="tile-body">
+            <span class="tile-title">Convert to Plain Excel</span>
+            <span class="tile-desc">Flatten selected BOM sheets for sharing or printing.</span>
+          </span>
+          <span class="tile-arrow">&#8250;</span>
+        </button>
 
-    <div class="card">
-      <h2>Step 2 &middot; Convert</h2>
-      <label class="opt"><input type="radio" name="mode" value="growing" checked>
-        <b>Auto-growing purchase list</b>
-        <span>Purchase list is formula-driven: it fills, grows and shrinks by itself when the BOM changes.</span></label>
-      <label class="opt"><input type="radio" name="mode" value="fixed">
-        <b>Fixed purchase list</b>
-        <span>Purchase list is written once with fixed rows and simple SUMIF / ROUNDUP formulas.</span></label>
-      <label class="opt"><input type="checkbox" id="compiled">
-        <b>Extra: compiled purchase list sheet</b>
-        <span>Adds a "Compiled Purchase List" sheet: all sheets combined on the left, each sheet's own list to the right with a gap, space on top for company details. With the auto-growing option it is formula-driven and grows with the BOM; with the fixed option it is values only.</span></label>
-      <label class="chk"><input type="checkbox" id="iscopy"> <span>This workbook is a copy, not my original file.</span></label>
-      <button id="convert" class="primary" disabled>Convert</button>
-      <div id="log" class="log"></div>
-    </div>
-  </section>
+        <button class="action-tile" data-jump="convert:restore" type="button">
+          <span class="tile-ico">&#8634;</span>
+          <span class="tile-body">
+            <span class="tile-title">Restore Automated BOM</span>
+            <span class="tile-desc">Turn plain sheets back into automated BOMs or fix names.</span>
+          </span>
+          <span class="tile-arrow">&#8250;</span>
+        </button>
+      </div>
 
-  <script src="convert.js?v=4"></script>
-  <script src="tools.js?v=4"></script>
-  <script src="taskpane.js?v=4"></script>
+      <details class="drawer soft" id="homeRepairDrawer">
+        <summary>
+          <span>Troubleshooting &amp; Repair</span>
+          <span class="sum-meta">Optimize &amp; fix &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <p class="sub">Strips legacy print pagination, repairs named ranges &amp; dropdowns, and upgrades formulas to lightweight Excel 365.</p>
+          <div class="checklist-box">
+            <div class="checklist-head">
+              <span id="homeRepairCount">BOM sheets (0)</span>
+              <span>
+                <button type="button" class="link-btn" data-checkall="homeRepairList" data-val="1">All</button>
+                <button type="button" class="link-btn" data-checkall="homeRepairList" data-val="0">None</button>
+              </span>
+            </div>
+            <div id="homeRepairList" class="checklist-items"></div>
+          </div>
+          <button id="btnHomeRepair" class="btn btn-secondary" type="button">Repair &amp; Optimize Selected Sheets</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== ADD SHEET TAB ===================== -->
+    <section id="tab-sheet" class="panel hidden" style="display:flex;flex-direction:column;gap:10px;">
+      <div class="card">
+        <div id="sheetWbStatus" class="status-line muted">Checking workbook...</div>
+        <label class="field">
+          <span>Sheet name</span>
+          <input id="inpSheetName" type="text" maxlength="31" placeholder="e.g. D3-c, Mezzanine, Area-2" autocomplete="off" />
+        </label>
+        <div id="sheetHint" class="hint hidden"></div>
+        <button id="btnAddSheet" class="btn btn-primary" type="button" disabled>Add BOM Sheet</button>
+      </div>
+
+      <details class="drawer">
+        <summary>
+          <span>More options</span>
+          <span class="sum-meta">Project, copy, sync &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <label class="field">
+            <span>Project title (cell A1)</span>
+            <input id="inpProjectTitle" type="text" placeholder="Optional project title" />
+          </label>
+          <label class="field">
+            <span>Copy layout from</span>
+            <select id="selCopySource"></select>
+          </label>
+          <label class="check-row">
+            <input id="chkClearInputs" type="checkbox" checked />
+            <span>Clear entered BOM &amp; PO items on the new sheet</span>
+          </label>
+          <label class="check-row">
+            <input id="chkSyncBeforeAdd" type="checkbox" />
+            <span>Sync saved materials into workbook first</span>
+          </label>
+        </div>
+      </details>
+
+      <details class="drawer soft">
+        <summary>
+          <span>Troubleshooting &amp; Repair</span>
+          <span class="sum-meta">Optimize &amp; fix &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <div class="checklist-box">
+            <div class="checklist-head">
+              <span id="sheetRepairCount">BOM sheets (0)</span>
+              <span>
+                <button type="button" class="link-btn" data-checkall="sheetRepairList" data-val="1">All</button>
+                <button type="button" class="link-btn" data-checkall="sheetRepairList" data-val="0">None</button>
+              </span>
+            </div>
+            <div id="sheetRepairList" class="checklist-items"></div>
+          </div>
+          <button id="btnSheetRepair" class="btn btn-secondary" type="button">Repair &amp; Optimize Selected Sheets</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== MATERIALS TAB ===================== -->
+    <section id="tab-mat" class="panel hidden" style="display:flex;flex-direction:column;gap:10px;">
+      <!-- Auto-collapsing change toast -->
+      <div id="changeToast" class="toast-card hidden">
+        <div class="toast-head">
+          <div>
+            <div id="toastTitle" class="toast-title">Material Updated</div>
+            <div id="toastSub" class="toast-sub">Saved to workbook &amp; this computer</div>
+          </div>
+          <button id="btnCloseToast" class="link-btn" type="button" title="Collapse">&#215;</button>
+        </div>
+        <div id="toastItems" class="toast-items"></div>
+        <div class="toast-bar"><i id="toastBarFill"></i></div>
+      </div>
+
+      <!-- Compact Session Changes expandable button -->
+      <div id="sessionWrap" class="hidden" style="display:flex;flex-direction:column;gap:5px;">
+        <button id="btnSessionToggle" class="session-toggle" type="button">
+          <span style="font-weight:600;">Session changes</span>
+          <span id="sessionCount" class="session-count">0</span>
+          <span id="sessionPreview" class="sub" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+          <span id="sessionCaret" style="color:var(--muted);">&#9656;</span>
+        </button>
+        <div id="sessionLog" class="session-log hidden"></div>
+      </div>
+
+      <!-- Active Project-Only Banner -->
+      <div id="projectBanner" class="project-banner hidden">
+        <div class="project-banner-title" id="projectBannerTitle">Project-Only List Active</div>
+        <p class="sub" style="color:#92400e;">Auto-saves to this project's own slot only — your Global Master stays untouched.</p>
+        <div class="row-btns">
+          <button id="btnBannerAddSaved" class="btn btn-primary btn-sm" type="button">+ Add Saved</button>
+          <button id="btnBannerExportProj" class="btn btn-amber btn-sm" type="button">Export JSON</button>
+          <button id="btnBannerSwitchGlobal" class="btn btn-secondary btn-sm" type="button">Switch to Global</button>
+        </div>
+      </div>
+
+      <!-- Master Materials Search & List -->
+      <div class="card">
+        <div class="card-kicker">
+          <span id="matListHeading">Master Materials</span>
+          <span id="matListMeta" style="font-weight:500;text-transform:none;letter-spacing:0;">0 items</span>
+        </div>
+        <input id="inpMatSearch" type="text" placeholder="Search materials..." autocomplete="off" />
+        <div id="matList" class="mat-list"></div>
+      </div>
+
+      <!-- Add / Edit Material Form -->
+      <div class="card">
+        <div class="card-kicker">
+          <span id="matFormTitle">Add Material</span>
+          <button id="btnMatNew" class="link-btn hidden" type="button">+ New</button>
+        </div>
+        <label class="field">
+          <span>Material name</span>
+          <input id="inpMatName" type="text" placeholder="e.g. ISMB 200 or 10 mm MS plate" autocomplete="off" />
+        </label>
+        <label class="field">
+          <span>Primary unit</span>
+          <select id="selMatUnit">
+            <option value="">Select unit...</option>
+            <option value="kg/m">kg/m (beams, pipes, angles)</option>
+            <option value="kg/m²">kg/m² (plates &amp; sheets)</option>
+            <option value="kg/each">kg/each (fittings &amp; hardware)</option>
+          </select>
+        </label>
+
+        <div id="grpLin" class="hidden">
+          <label class="field">
+            <span>Linear weight (kg/m)</span>
+            <input id="inpMatLin" type="number" step="any" min="0" placeholder="e.g. 24.2" />
+          </label>
+        </div>
+        <div id="grpArea" class="hidden" style="display:flex;flex-direction:column;gap:8px;">
+          <label class="field">
+            <span>Area weight (kg/m²)</span>
+            <input id="inpMatArea" type="number" step="any" min="0" placeholder="e.g. 78.5" />
+          </label>
+          <div class="row2">
+            <label class="field">
+              <span>Sheet length (mm)</span>
+              <input id="inpMatSl" type="number" step="any" min="0" placeholder="2500" />
+            </label>
+            <label class="field">
+              <span>Sheet width (mm)</span>
+              <input id="inpMatSw" type="number" step="any" min="0" placeholder="1250" />
+            </label>
+          </div>
+        </div>
+        <div id="grpPiece" class="hidden">
+          <label class="field">
+            <span>Piece weight (kg/each)</span>
+            <input id="inpMatPiece" type="number" step="any" min="0" placeholder="e.g. 3.5" />
+          </label>
+        </div>
+
+        <details class="drawer soft">
+          <summary>
+            <span>More options</span>
+            <span class="sum-meta">Category, remarks &#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <label class="field">
+              <span>Category (optional)</span>
+              <input id="inpMatCat" type="text" list="catSuggestions" placeholder="e.g. Structural Beams" />
+              <datalist id="catSuggestions"></datalist>
+            </label>
+            <label class="field">
+              <span>Remarks (optional)</span>
+              <input id="inpMatRem" type="text" placeholder="Notes or grade" />
+            </label>
+          </div>
+        </details>
+
+        <div id="matHint" class="hint hidden"></div>
+
+        <div class="row-btns">
+          <button id="btnMatSave" class="btn btn-primary" type="button" disabled>Add Material</button>
+          <button id="btnMatDelete" class="btn btn-danger hidden" type="button">Remove</button>
+        </div>
+      </div>
+
+      <!-- Project-Only Material Lists Drawer -->
+      <details class="drawer" id="projectDrawer">
+        <summary>
+          <span>Project-Only Material List</span>
+          <span id="projDrawerMeta" class="sum-meta">Isolate workbook &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <div id="projActiveBox" class="hidden" style="display:flex;flex-direction:column;gap:8px;">
+            <div id="projActiveDesc" class="status-line warn">Project-Only list active.</div>
+
+            <!-- Pull / add previously saved materials (Global Master + other saved projects) into active Project-Only list -->
+            <details class="drawer soft" id="projAddSavedDrawer">
+              <summary>
+                <span>Add Previously Saved Materials</span>
+                <span id="projAddSavedMeta" class="sum-meta">0 available &#9656;</span>
+              </summary>
+              <div class="drawer-body">
+                <p class="sub">Copy materials you previously created (Global Master or other saved projects) into this project list without touching Global Master.</p>
+                <div class="checklist-box">
+                  <div class="checklist-head">
+                    <span id="projAddSavedCount">Selected (0)</span>
+                    <span>
+                      <button type="button" class="link-btn" data-checkall="projAddSavedList" data-val="1">All</button>
+                      <button type="button" class="link-btn" data-checkall="projAddSavedList" data-val="0">None</button>
+                    </span>
+                  </div>
+                  <input id="inpProjAddSearch" type="text" placeholder="Search saved Global &amp; project materials..." style="padding:5px 7px;font-size:11.5px;" autocomplete="off" />
+                  <div id="projAddSavedList" class="checklist-items"></div>
+                </div>
+                <button id="btnAddSavedToProj" class="btn btn-primary btn-sm" type="button" disabled>Add Selected to Project</button>
+              </div>
+            </details>
+
+            <div class="row-btns">
+              <button id="btnDrawerExportProj" class="btn btn-amber btn-sm" type="button">Save Project .json File</button>
+              <button id="btnDrawerSwitchGlobal" class="btn btn-secondary btn-sm" type="button">Switch to Global Master</button>
+            </div>
+          </div>
+
+          <div id="projCreateBox" style="display:flex;flex-direction:column;gap:8px;">
+            <p class="sub">Keep custom materials isolated to a single project without touching your Global Master list. You can pull in any previously saved materials anytime.</p>
+            <label class="field">
+              <span>New project list name</span>
+              <input id="inpNewProjName" type="text" placeholder="e.g. Plant-B Expansion" />
+            </label>
+            <label class="field">
+              <span>Start with</span>
+              <select id="selProjStartMode">
+                <option value="copy">Copy saved Global Master</option>
+                <option value="pick">Pick from all saved materials</option>
+                <option value="used">Only materials used in this workbook</option>
+                <option value="blank">Start blank</option>
+              </select>
+            </label>
+
+            <!-- Pick specific materials sub-panel (pulls from Global Master + Workbook + Saved Projects) -->
+            <div id="projPickBox" class="checklist-box hidden">
+              <div class="checklist-head">
+                <span id="projPickCount">Selected (0)</span>
+                <span>
+                  <button type="button" class="link-btn" data-checkall="projPickList" data-val="1">All</button>
+                  <button type="button" class="link-btn" data-checkall="projPickList" data-val="0">None</button>
+                </span>
+              </div>
+              <input id="inpProjPickSearch" type="text" placeholder="Filter Global &amp; saved project materials..." style="padding:5px 7px;font-size:11.5px;" autocomplete="off" />
+              <div id="projPickList" class="checklist-items"></div>
+            </div>
+
+            <div id="projHint" class="hint hidden"></div>
+            <button id="btnCreateProj" class="btn btn-primary" type="button" disabled>Start Project-Only List</button>
+          </div>
+
+          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:6px;">
+            <div class="card-kicker"><span>Load Project JSON File</span></div>
+            <p class="sub">Works in both automated and converted plain workbooks.</p>
+            <input id="fileLoadProj" type="file" accept=".json,application/json" class="hidden" />
+            <button id="btnLoadProjFile" class="btn btn-secondary" type="button">Load Project .json File</button>
+          </div>
+
+          <div style="border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:6px;">
+            <div class="card-kicker">
+              <span>Saved Project Lists on this PC</span>
+              <span id="savedProjCount">0</span>
+            </div>
+            <div id="savedProjList" style="display:flex;flex-direction:column;gap:6px;"></div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Backup & Transfer (JSON) Drawer -->
+      <details class="drawer soft" id="backupDrawer">
+        <summary>
+          <span>Backup &amp; Transfer (JSON)</span>
+          <span id="backupMeta" class="sum-meta">Auto-saved &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <div id="backupProjectGuard" class="hint warn hidden">Global Master reload &amp; save actions are paused while a Project-Only list is active so project materials never overwrite Global Master.</div>
+          <div id="backupStatusLine" class="status-line">Global Master auto-saves on this computer.</div>
+          <p class="sub">Global Master auto-saves in built-in add-in storage on this computer (zero reconnects). Export or import JSON to share between PCs.</p>
+          <div class="row-btns">
+            <button id="btnExportGlobal" class="btn btn-secondary" type="button">Export Master JSON</button>
+            <button id="btnImportGlobal" class="btn btn-secondary" type="button">Import Master JSON</button>
+          </div>
+          <input id="fileImportGlobal" type="file" accept=".json,application/json" class="hidden" />
+          <div class="row-btns">
+            <button id="btnPullSaved" class="btn btn-secondary btn-sm" type="button">Reload Saved into Workbook</button>
+            <button id="btnPushSaved" class="btn btn-secondary btn-sm" type="button">Save Workbook to PC</button>
+          </div>
+        </div>
+      </details>
+
+      <!-- Advanced: GitHub Sync Drawer -->
+      <details class="drawer soft" id="ghDrawer">
+        <summary>
+          <span>Advanced: GitHub Sync</span>
+          <span class="sum-meta">Optional &#9656;</span>
+        </summary>
+        <div class="drawer-body">
+          <div id="ghProjectGuard" class="hint warn hidden">GitHub Sync is paused while a Project-Only list is active so project materials never overwrite your team's Global Master.</div>
+          <label class="field">
+            <span>GitHub Personal Access Token</span>
+            <input id="inpGhToken" type="password" placeholder="ghp_..." autocomplete="off" />
+          </label>
+          <div class="row-btns">
+            <button id="btnGhSaveTok" class="btn btn-secondary btn-sm" type="button">Save Token</button>
+            <button id="btnGhClearTok" class="btn btn-secondary btn-sm" type="button">Clear</button>
+          </div>
+          <div class="row-btns">
+            <button id="btnGhPull" class="btn btn-secondary" type="button">Pull from GitHub</button>
+            <button id="btnGhPush" class="btn btn-primary" type="button">Publish to GitHub</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== CONVERT TAB ===================== -->
+    <section id="tab-convert" class="panel hidden" style="display:flex;flex-direction:column;gap:10px;">
+      <div class="seg">
+        <button id="segFlatten" class="active" type="button">Flatten for Sharing</button>
+        <button id="segRestore" type="button">Restore Automated</button>
+      </div>
+
+      <!-- FLATTEN SUB-VIEW -->
+      <div id="viewFlatten" style="display:flex;flex-direction:column;gap:10px;">
+        <div class="card">
+          <div class="card-kicker"><span>Step 1 · Work on a copy</span></div>
+          <p class="sub">Save a copy before flattening so you keep your editable master workbook safe.</p>
+          <button id="btnOpenCopy1" class="btn btn-secondary" type="button">Open a copy in a new Excel window</button>
+        </div>
+
+        <div class="card">
+          <div id="flatWbStatus" class="status-line muted">Checking workbook...</div>
+          <div class="checklist-box">
+            <div class="checklist-head">
+              <span id="flatSheetCount">Sheets to flatten (0)</span>
+              <span>
+                <button type="button" class="link-btn" data-checkall="flatSheetList" data-val="1">All</button>
+                <button type="button" class="link-btn" data-checkall="flatSheetList" data-val="0">None</button>
+              </span>
+            </div>
+            <div id="flatSheetList" class="checklist-items"></div>
+          </div>
+          <div id="partialFlattenNote" class="hint hidden">Partial flatten: Master Unique Materials, hidden BOM Blank &amp; named ranges will be kept for your remaining automated sheets.</div>
+
+          <div class="card-kicker" style="margin-top:2px;"><span>Purchase List Style</span></div>
+          <div id="modeGroup" style="display:flex;flex-direction:column;gap:6px;">
+            <label class="radio-card selected">
+              <input type="radio" name="flatMode" value="dynamic365" checked />
+              <span>
+                <span class="radio-title">Auto-growing · Excel 365 (Recommended)</span>
+                <span class="radio-desc">Lightweight LET + XLOOKUP + dynamic spill list (40+ rows, zero helper col M).</span>
+              </span>
+            </label>
+            <label class="radio-card">
+              <input type="radio" name="flatMode" value="fixed" />
+              <span>
+                <span class="radio-title">Fixed · Print-Ready</span>
+                <span class="radio-desc">Compact print-ready purchase list using simple SUMIF formulas.</span>
+              </span>
+            </label>
+          </div>
+
+          <label class="check-row">
+            <input id="chkCompiled" type="checkbox" checked />
+            <span>Also create Compiled Purchase List across selected sheets</span>
+          </label>
+          <label id="wrapAutoSaveProj" class="check-row hidden">
+            <input id="chkAutoSaveProj" type="checkbox" checked />
+            <span>Auto-save project materials (.json) before converting</span>
+          </label>
+          <label class="check-row">
+            <input id="chkCopyConfirmed" type="checkbox" />
+            <span>I am working on a copy (or have a backup)</span>
+          </label>
+
+          <div id="flatHint" class="hint hidden"></div>
+          <button id="btnFlatten" class="btn btn-primary" type="button" disabled>Convert Selected Sheets</button>
+        </div>
+      </div>
+
+      <!-- RESTORE SUB-VIEW -->
+      <div id="viewRestore" class="hidden" style="display:flex;flex-direction:column;gap:10px;">
+        <div class="card">
+          <div class="card-kicker"><span>Step 1 · Work on a copy</span></div>
+          <button id="btnOpenCopy2" class="btn btn-secondary" type="button">Open a copy in a new Excel window</button>
+        </div>
+
+        <div class="card">
+          <div id="restWbStatus" class="status-line muted">Checking workbook...</div>
+          <div class="checklist-box">
+            <div class="checklist-head">
+              <span id="restSheetCount">Converted sheets (0)</span>
+              <span>
+                <button type="button" class="link-btn" data-checkall="restSheetList" data-val="1">All</button>
+                <button type="button" class="link-btn" data-checkall="restSheetList" data-val="0">None</button>
+              </span>
+            </div>
+            <div id="restSheetList" class="checklist-items"></div>
+          </div>
+
+          <div class="card-kicker" style="margin-top:2px;"><span>Materials List to Restore With</span></div>
+          <div id="restProjBanner" class="hint hidden"></div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            <label class="radio-card selected" data-rsrc="global">
+              <input type="radio" name="restMatSrc" value="global" checked />
+              <span>
+                <span class="radio-title">Global Master</span>
+                <span id="restGlobalDesc" class="radio-desc">Use auto-saved Global Master on this PC.</span>
+              </span>
+            </label>
+            <label class="radio-card" data-rsrc="project-saved">
+              <input type="radio" name="restMatSrc" value="project-saved" />
+              <span style="flex:1;">
+                <span class="radio-title">Saved Project-Only List</span>
+                <select id="selRestProj" style="margin-top:4px;padding:4px 6px;font-size:11.5px;"></select>
+              </span>
+            </label>
+            <label class="radio-card" data-rsrc="project-file">
+              <input type="radio" name="restMatSrc" value="project-file" />
+              <span style="flex:1;">
+                <span class="radio-title">Project .json File</span>
+                <span id="restFileDesc" class="radio-desc">Pick a saved project materials .json file.</span>
+                <button id="btnPickRestProj" class="btn btn-secondary btn-sm" style="margin-top:4px;" type="button">Choose .json file</button>
+                <input id="fileRestProj" type="file" accept=".json,application/json" class="hidden" />
+              </span>
+            </label>
+          </div>
+
+          <label class="check-row">
+            <input id="chkRemoveCompiled" type="checkbox" checked />
+            <span>Remove Compiled Purchase List after restoring</span>
+          </label>
+
+          <div id="restHint" class="hint hidden"></div>
+          <button id="btnRestore" class="btn btn-primary" type="button" disabled>Restore Selected Sheets</button>
+        </div>
+
+        <!-- Upgrade / Repair Purchase-List Names on already-flattened plain sheets (Excel 365) -->
+        <details class="drawer soft">
+          <summary>
+            <span>Upgrade / Repair Purchase-List Names</span>
+            <span class="sum-meta">Fix plain sheets &#9656;</span>
+          </summary>
+          <div class="drawer-body">
+            <p class="sub">Repairs empty or broken Purchase-List material names on already-flattened sheets using native Excel 365 dynamic spill formulas without touching BOM rows, Stock, or PO values.</p>
+            <button id="btnRepairPlain" class="btn btn-secondary" type="button">Repair Selected Plain Sheets</button>
+          </div>
+        </details>
+      </div>
+
+      <div id="convLog" class="log-box hidden"></div>
+    </section>
+  </main>
+
+  <script src="template-data.js?v=32"></script>
+  <script src="storage.js?v=32"></script>
+  <script src="sheets.js?v=32"></script>
+  <script src="convert.js?v=32"></script>
+  <script src="app.js?v=32"></script>
 </body>
 </html>

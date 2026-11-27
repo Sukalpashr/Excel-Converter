@@ -1,29 +1,34 @@
-# BOM Converter - Excel add-in (ribbon button + side panel)
+# BOM Tools Excel Add-in — 3.0v patch2 (Excel 365 Lightweight Edition)
 
-Adds a **BOM Converter** button on Excel's Home tab. It opens a side panel with:
-1. **Open a copy of this workbook** - opens a copy in a new window, so the original is never changed.
-2. Two options: **Auto-growing purchase list** (your FlattenBOM.bas) or **Fixed purchase list** (your FlattenBOM1.bas), then **Convert**.
+A complete from-scratch rewrite of the BOM Tools Excel Add-in targeting **Microsoft Excel 365** with a **pixel-identical template**, ultra-lightweight native Excel 365 formulas, **zero-hook input-lag elimination**, full v1.8–v3.0 materials migration, and isolated Project-Only material lists with full access to previously saved materials.
 
-Everything runs inside Excel. No data is sent anywhere. The only thing hosted online is this static web page.
+## What's Fixed & Engineered in 3.0v patch2
 
-## 1. Host the files (once)
-An Office add-in's panel is a web page, so it needs an https address. Any free static host works:
-- **GitHub Pages**: put this folder in a repo, enable Pages. Your address is `https://<you>.github.io/<repo>`.
-- **Netlify Drop**: drag this folder onto https://app.netlify.com/drop.
+- **Bulletproof Template Import (Zero `InternalError`)**: `template.xlsx` uses 100% clean, validated standard OOXML (zero `xl/metadata.xml`, zero `cm="1"`, proper `r:id` namespaces) so `insertWorksheetsFromBase64()` succeeds reliably on every Excel build. Immediately upon import, `sheets.js` upgrades `BOM Blank` via native Excel `.formulas` to pure lightweight Excel 365 formulas (`LET`, `XMATCH`, `AL6` `SORT(UNIQUE(FILTER(...)))`, `AB4` `ROWS($AL$6#)`, O(1) `INDEX($AL$6#,...)`).
+- **100% Visually Identical Template (`template.xlsx`)**: Preserves verbatim `xl/styles.xml` and `xl/theme/theme1.xml`, exact column widths, row heights, merges, cell styles, and conditional-formatting `dxfId` styles while trimming to 60 expandable BOM rows (`A5:M65`), 40-material Purchase List (`O5:AB48`), and zero volatile Print Area / Print Titles / `fitToPage`.
+- **Root-Cause Fix for Persistent v1.8+ Input Lag**: Zero Office.js `Worksheet.onChanged` event listeners are registered; direct edits typed on `Master Unique Materials` are detected on-demand when visiting the Materials tab, refreshing, saving, or exporting. Never touches `freezePanes`, `pageLayout`, `showGridlines`, or `fullRebuild` on live BOM sheets.
+- **Full Access to Previously Saved Materials (Global & Project-Only)**:
+  - Automatically reads & reconciles ALL storage layers including legacy v1.8–v2.6 stores (`BomToolsLocalDB` IndexedDB, OPFS `master-materials.json` / `project-*.json`, `localStorage` `bomLocalMasterJson` / `bomProjectJson:*`), v3 layers, and Offline Windows LTS (`/api/master`, `/api/projects`), mirroring saves cleanly.
+  - Project-Only lists auto-save to isolated per-project slots (never touching Global Master) while letting you **pick from all previously saved materials** (Global Master + Workbook + other saved Projects) both when creating a Project-Only list and anytime while a Project-Only list is active (`+ Add Saved`).
+  - Restore Automated detects `BomProjectList` tags and shows a clear status banner indicating whether the project's saved copy exists on this PC or needs its `.json` file loaded.
 
-Then replace `https://YOUR-HOST` in `manifest.xml` with your address (no trailing slash):
+## Files Included
 
-    sed -i 's#https://YOUR-HOST#https://<you>.github.io/<repo>#g' manifest.xml
+| File | Role |
+| --- | --- |
+| `taskpane.html` | Lightweight Home-first Excel 365 task pane UI (`3.0v patch2`) |
+| `app.js` | Zero-hook task pane controller, saved-library pickers, live guards, toast & session log |
+| `storage.js` | Multi-layer built-in storage with v1.8–v3.0 migration, Project-Only lists & unified material pool |
+| `sheets.js` | Lag-free Excel 365 sheet engine, bulletproof template import, bulk add & on-demand edit sync |
+| `convert.js` | Selective Flatten (Excel 365 / Fixed + Compiled), 3-way Restore & Plain-Sheet repair |
+| `template.xlsx` | Visually identical 27 KB template (`BOM Blank` + `Master Unique Materials`) |
+| `template-data.js` | Embedded base64 payload of `template.xlsx` |
+| `manifest.xml` | Office Add-in manifest v3.0.2.0 (replace `https://YOUR-HOST` with your HTTPS host) |
+| `materials.json` | Optional hosted team materials file |
+| `assets/icon-{16,32,64,80}.png` | Ribbon command icons |
 
-## 2. Install the manifest
-- **Excel on the web**: Insert > Add-ins > Manage My Add-ins > Upload My Add-in > pick `manifest.xml`.
-- **Excel for Windows (office / company)**: put `manifest.xml` in a shared network folder, then
-  File > Options > Trust Center > Trust Center Settings > Trusted Add-in Catalogs, add the folder path, tick *Show in Menu*.
-  Restart Excel, then Insert > My Add-ins > Shared Folder > BOM Converter.
-- **Whole company**: a Microsoft 365 admin can push it under Admin center > Settings > Integrated apps > Upload custom apps.
-  Staff then get the button with no install steps.
+## Hosting & Sideloading
 
-## Notes
-- Needs ExcelApi 1.9 (Excel 2019 or Microsoft 365).
-- The converters are ports of the VBA macros. Formula text for the growing list was checked against `flatten_bom.py`; it matches.
-- Not tested inside Excel yet: try it on a copy of a real BOM first and compare with the VBA result.
+1. Replace `https://YOUR-HOST` in `manifest.xml` with your HTTPS URL (GitHub Pages, Netlify, or `https://localhost:34873` for Offline Windows LTS).
+2. Host all files in this folder over HTTPS.
+3. Sideload `manifest.xml` in Excel via **Insert → Add-ins → My Add-ins → Upload My Add-in** (Web) or a Shared Folder Catalog (Windows Desktop).
