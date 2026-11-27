@@ -75,19 +75,6 @@
     margin: 0;
     color: var(--text);
   }
-  .brand-ver {
-    font-size: 10.5px;
-    font-weight: 600;
-    color: var(--muted);
-    background: #EFF3F1;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 1px 6px;
-    line-height: 1.45;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: 0.01em;
-    white-space: nowrap;
-  }
   .tabs {
     display: flex;
     padding: 0 10px;
@@ -983,58 +970,6 @@
   .proj-pick-item .pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
   .proj-pick-item small { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
 
-  /* ---- Saved Project Lists Drawer & Restore Source Picker ---- */
-  details.saved-proj-drawer {
-    margin-top: 9px;
-    padding-top: 8px;
-    border-top: 1px solid #E7ECE9;
-  }
-  .scope-card.is-project details.saved-proj-drawer {
-    border-top-color: #D9E0FE;
-  }
-  details.saved-proj-drawer > summary {
-    list-style: none;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: #3730A3;
-    user-select: none;
-    padding: 2px 0;
-  }
-  details.saved-proj-drawer > summary::-webkit-details-marker { display: none; }
-  details.saved-proj-drawer[open] > summary .sum-caret { transform: rotate(90deg); }
-  .saved-proj-body {
-    margin-top: 7px;
-  }
-  .rest-mat-group {
-    margin: 10px 0 8px;
-  }
-  .rest-mat-label {
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--muted);
-    margin: 0 0 6px;
-  }
-  label.opt.opt-compact {
-    padding: 7px 9px;
-    margin-bottom: 6px;
-  }
-  label.opt.opt-compact b { font-size: 12px; }
-  label.opt.opt-compact span { font-size: 11px; margin-top: 2px; }
-  .rest-subbox {
-    margin: -2px 0 8px 18px;
-    padding: 7px 9px;
-    background: #F6F7FF;
-    border: 1px solid #D9E0FE;
-    border-radius: var(--radius-sm);
-  }
-
   /* ---- Log Output ---- */
   .log {
     white-space: pre-wrap;
@@ -1059,7 +994,6 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>
         </span>
         <h1>BOM Tools</h1>
-        <span id="hdr-version" class="brand-ver" title="BOM Tools Add-in Version">v2.6</span>
       </div>
       <button id="hdr-refresh" class="link-btn" title="Re-check this workbook">Refresh</button>
     </div>
@@ -1318,27 +1252,6 @@
             <button type="button" id="proj-exit-btn" style="flex:1">Switch back to Global Master</button>
           </div>
         </div>
-
-        <!-- Saved Project-Only Material Lists stored on this PC (switch, restore, export, or delete) -->
-        <details id="proj-saved-drawer" class="saved-proj-drawer" hidden>
-          <summary>
-            <span class="sum-left"><span>Saved Project Lists on this PC</span></span>
-            <span style="display:inline-flex;align-items:center;gap:6px">
-              <span id="proj-saved-count" class="sum-meta">0 saved</span>
-              <span class="sum-caret" aria-hidden="true">&#9656;</span>
-            </span>
-          </summary>
-          <div class="saved-proj-body">
-            <select id="proj-saved-select" style="margin-bottom:7px"></select>
-            <div class="btnrow">
-              <button type="button" id="proj-saved-load-btn" class="indigo" style="flex:1">Load into workbook</button>
-              <button type="button" id="proj-saved-export-btn">Export .json</button>
-              <button type="button" id="proj-saved-delete-btn" class="danger">Delete</button>
-            </div>
-            <div id="proj-saved-note" class="note" style="margin-top:5px"></div>
-          </div>
-        </details>
-
         <input type="file" id="proj-import-input" accept=".json,application/json" hidden>
         <div id="proj-log" class="log"></div>
       </div>
@@ -1566,38 +1479,21 @@
             Rebuilds each selected sheet back into a full automated BOM with live dropdowns, formulas, and Stock &amp; PO inputs preserved.
           </p>
           <div id="rest-sheets" class="sheet-pick" hidden></div>
-          <div class="rest-mat-group">
-            <div class="rest-mat-label">Materials list to restore with</div>
-            <label class="opt opt-compact">
-              <input type="radio" name="rest-mat-src" id="rest-src-global" value="global" checked>
-              <b>Global Master list</b>
-              <span>Load your main Global Master materials saved on this computer.</span>
-            </label>
-            <label class="opt opt-compact">
-              <input type="radio" name="rest-mat-src" id="rest-src-saved" value="saved-project">
-              <b>Saved Project-Only list on this PC</b>
-              <span>Pick any Project-Only materials list saved in this add-in (isolated from Global Master).</span>
-            </label>
-            <div id="rest-saved-proj-box" class="rest-subbox" hidden>
-              <div class="btnrow" style="align-items:center">
-                <select id="rest-proj-saved-select" style="flex:1"></select>
-                <button type="button" id="rest-proj-refresh-btn" title="Refresh saved project lists">Refresh</button>
-              </div>
-              <div id="rest-saved-proj-note" class="note" style="margin-top:4px"></div>
+          <label class="chk">
+            <input type="checkbox" id="rest-sync" checked>
+            <span>Load my Global Master list from this computer</span>
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="rest-use-proj">
+            <span>Instead, restore with a saved Project Materials <code style="font-family:Consolas,monospace">.json</code> file (isolated)</span>
+          </label>
+          <div id="rest-proj-box" style="margin:4px 0 8px 22px" hidden>
+            <div class="btnrow">
+              <button type="button" id="rest-proj-pick-btn">Choose Project .json...</button>
+              <button type="button" id="rest-proj-clear-btn" hidden>Clear</button>
             </div>
-            <label class="opt opt-compact">
-              <input type="radio" name="rest-mat-src" id="rest-src-file" value="project-file">
-              <b>Project Materials <code style="font-family:Consolas,monospace">.json</code> file</b>
-              <span>Load an exported project materials file from your computer or another PC.</span>
-            </label>
-            <div id="rest-proj-box" class="rest-subbox" hidden>
-              <div class="btnrow">
-                <button type="button" id="rest-proj-pick-btn">Choose Project .json...</button>
-                <button type="button" id="rest-proj-clear-btn" hidden>Clear</button>
-              </div>
-              <input type="file" id="rest-proj-input" accept=".json,application/json" hidden>
-              <div id="rest-proj-status" class="note">No project materials file chosen yet.</div>
-            </div>
+            <input type="file" id="rest-proj-input" accept=".json,application/json" hidden>
+            <div id="rest-proj-status" class="note">No project materials file chosen yet.</div>
           </div>
           <label class="chk">
             <input type="checkbox" id="rest-drop-compiled">
@@ -1626,10 +1522,10 @@
     </section>
   </main>
 
-  <script src="convert.js?v=22"></script>
-  <script src="tools.js?v=22"></script>
-  <script src="template-data.js?v=22"></script>
-  <script src="sync.js?v=22"></script>
-  <script src="taskpane.js?v=22"></script>
+  <script src="convert.js?v=17"></script>
+  <script src="tools.js?v=17"></script>
+  <script src="template-data.js?v=17"></script>
+  <script src="sync.js?v=17"></script>
+  <script src="taskpane.js?v=17"></script>
 </body>
 </html>

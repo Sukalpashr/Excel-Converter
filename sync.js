@@ -25,8 +25,6 @@
   var IDB_STORE = "kv";
   var IDB_HANDLE_KEY = "localMasterHandle";
   var IDB_JSON_KEY = "localMasterJson";
-  var PROJECTS_INDEX_KEY = "bomProjectsIndex";
-  var IDB_PROJECTS_INDEX_KEY = "projectsIndex";
   var OPFS_FILE = "master-materials.json";
   var projectState = { loaded: false, name: "" };
 
@@ -85,16 +83,6 @@
   var AUDIT_KEYS = ["lastAction", "lastModified"];
 
   function noop() {}
-  function runExcel(fn) {
-    if (root.BomTools && typeof root.BomTools.runExcel === "function") return root.BomTools.runExcel(fn);
-    try {
-      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
-          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
-        return Excel.run({ delayForCellEdit: true }, fn);
-      }
-    } catch (e) { /* fall through */ }
-    return Excel.run(fn);
-  }
   function lc(s) { return String(s).trim().toLowerCase(); }
   function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
   function isNil(v) { return v === null || v === undefined || (typeof v === "number" && isNaN(v)); }
@@ -263,34 +251,6 @@
     } catch (e) { return null; }
   }
 
-  async function opfsDeleteFile(file) {
-    if (!supportsOpfs() || !file) return false;
-    try {
-      var dir = await navigator.storage.getDirectory();
-      if (typeof dir.removeEntry === "function") {
-        await dir.removeEntry(file);
-        return true;
-      }
-    } catch (e) { /* ignore */ }
-    return false;
-  }
-
-  async function opfsListProjectSlugs() {
-    var out = [];
-    if (!supportsOpfs()) return out;
-    try {
-      var dir = await navigator.storage.getDirectory();
-      if (typeof dir.entries === "function") {
-        for await (var pair of dir.entries()) {
-          var fname = pair && pair[0];
-          var m = fname && /^project-([a-z0-9-]+)\.json$/i.exec(fname);
-          if (m) out.push(m[1].toLowerCase());
-        }
-      }
-    } catch (e) { /* ignore */ }
-    return out;
-  }
-
   function openLocalDb() {
     return new Promise(function (resolve) {
       if (typeof indexedDB === "undefined") return resolve(null);
@@ -345,30 +305,6 @@
     });
   }
 
-  async function idbGetAllKeys() {
-    var db = await openLocalDb();
-    if (!db) return [];
-    return new Promise(function (resolve) {
-      try {
-        var tx = db.transaction(IDB_STORE, "readonly");
-        var store = tx.objectStore(IDB_STORE);
-        if (typeof store.getAllKeys === "function") {
-          var req = store.getAllKeys();
-          req.onsuccess = function () { resolve(Array.isArray(req.result) ? req.result : []); };
-          req.onerror = function () { resolve([]); };
-          return;
-        }
-        var keys = [];
-        var cur = store.openCursor();
-        cur.onsuccess = function (ev) {
-          var c = ev.target.result;
-          if (c) { keys.push(c.key); c.continue(); } else resolve(keys);
-        };
-        cur.onerror = function () { resolve(keys); };
-      } catch (e) { resolve([]); }
-    });
-  }
-
   function getCachedMeta(t) {
     t = t || globalTarget();
     try {
@@ -404,93 +340,6 @@
     } catch (e) { return false; }
   }
 
-  async function offlineServerDeleteProject(t) {
-    if (!isOfflineLts() || typeof fetch !== "function" || !t || !t.project || !t.offlineEndpoint) return false;
-    try {
-      var res = await fetch(t.offlineEndpoint, { method: "DELETE" });
-      return !!res.ok;
-    } catch (e) { return false; }
-  }
-
-  async function offlineServerListProjects() {
-    if (!isOfflineLts() || typeof fetch !== "function") return [];
-    try {
-      var res = await fetch("./local-projects.json?t=" + Date.now(), { cache: "no-store" });
-      if (!res.ok) return [];
-      var j = await res.json();
-      return (j && Array.isArray(j.projects)) ? j.projects : [];
-    } catch (e) { return []; }
-  }
-
-  async function readProjectIndex() {
-    var map = {};
-    try {
-      var lsRaw = localStorage.getItem(PROJECTS_INDEX_KEY);
-      if (lsRaw) {
-        var parsedLs = JSON.parse(lsRaw);
-        if (parsedLs && typeof parsedLs === "object") {
-          Object.keys(parsedLs).forEach(function (k) { map[k] = parsedLs[k]; });
-        }
-      }
-    } catch (e) { /* ignore */ }
-    try {
-      var idbRaw = await idbGet(IDB_PROJECTS_INDEX_KEY);
-      var parsedIdb = typeof idbRaw === "string" ? JSON.parse(idbRaw) : idbRaw;
-      if (parsedIdb && typeof parsedIdb === "object") {
-        Object.keys(parsedIdb).forEach(function (k) {
-          var prev = map[k];
-          var cur = parsedIdb[k];
-          if (!prev || String((cur && cur.updated) || "") > String((prev && prev.updated) || "")) {
-            map[k] = cur;
-          }
-        });
-      }
-    } catch (e) { /* ignore */ }
-    return map;
-  }
-
-  async function writeProjectIndex(map) {
-    var json = JSON.stringify(map || {});
-    try { localStorage.setItem(PROJECTS_INDEX_KEY, json); } catch (e) { /* ignore */ }
-    try { await idbSet(IDB_PROJECTS_INDEX_KEY, json); } catch (e) { /* ignore */ }
-  }
-
-  async function upsertProjectIndex(t, count, updated, lastChange) {
-    if (!t || !t.project || !t.slug) return;
-    var map = await readProjectIndex();
-    map[t.slug] = {
-      slug: t.slug,
-      name: t.name || t.slug,
-      count: count || 0,
-      updated: updated || new Date().toISOString(),
-      lastChange: lastChange || null
-    };
-    await writeProjectIndex(map);
-  }
-
-  async function removeFromProjectIndex(slugKey) {
-    if (!slugKey) return;
-    var map = await readProjectIndex();
-    if (map[slugKey]) {
-      delete map[slugKey];
-      await writeProjectIndex(map);
-    }
-  }
-
-  function targetBySlug(slugStr, displayName) {
-    var k = slug(slugStr || displayName || "");
-    return {
-      project: true,
-      name: String(displayName || slugStr || k).trim() || k,
-      slug: k,
-      cache: "bomProjectJson:" + k,
-      meta: "bomProjectMeta:" + k,
-      idb: "projectJson:" + k,
-      opfs: "project-" + k + ".json",
-      offlineEndpoint: "./local-project-" + k + ".json"
-    };
-  }
-
   async function saveLocalCache(list, lastChange, t) {
     t = t || globalTarget();
     requestPersistentStorage();
@@ -500,8 +349,6 @@
       ? serializeProjectList(list, t.name, lcMeta)
       : serialize(list, lcMeta);
     var meta = {
-      name: t.name || "",
-      slug: t.slug || "",
       count: list.length,
       updated: new Date().toISOString(),
       lastChange: lcMeta
@@ -513,8 +360,7 @@
     await Promise.all([
       idbSet(t.idb, json),
       opfsWriteJson(json, t.opfs),
-      offlineServerWriteJson(json, t),
-      t.project ? upsertProjectIndex(t, list.length, meta.updated, lcMeta) : Promise.resolve()
+      offlineServerWriteJson(json, t)
     ]);
     // Clean up any legacy external file handle from earlier versions so Excel never asks to reconnect
     if (!t.project) {
@@ -535,14 +381,7 @@
     if (!json) return null;
     try {
       var parsed = parsePayload(json);
-      return {
-        list: parsed.list,
-        projectName: parsed.projectName || t.name || "",
-        slug: t.slug || "",
-        updated: parsed.updated,
-        lastChange: parsed.lastChange,
-        meta: getCachedMeta(t)
-      };
+      return { list: parsed.list, updated: parsed.updated, lastChange: parsed.lastChange, meta: getCachedMeta(t) };
     } catch (e) { return null; }
   }
 
@@ -550,182 +389,19 @@
     var cleanName = String(projectName || "").trim();
     if (!cleanName) throw new Error("Project list name is required.");
     var normalized = (list || []).map(function (m) { return root.BomTools.normalizeMaterial(m); }).filter(function (m) { return m.material; });
-    var t = targetFor(cleanName);
-    var saved = await saveLocalCache(normalized, lastChange || null, t);
+    var saved = await saveLocalCache(normalized, lastChange || null, targetFor(cleanName));
     projectState = { loaded: true, name: cleanName };
-    return { savedToProjectSlot: true, projectName: cleanName, slug: t.slug, count: normalized.length, json: saved.json };
-  }
-
-  async function readProjectSlotBySlug(slugOrName) {
-    var raw = String(slugOrName || "").trim();
-    if (!raw) return { name: "", slug: "", list: [], lastChange: null, updated: "", source: "none" };
-    var t = targetBySlug(raw, raw);
-    var c = await readLocalCache(t);
-    if (c && c.list && c.list.length) {
-      var resolvedName = c.projectName || (c.meta && c.meta.name) || raw;
-      return {
-        name: resolvedName,
-        projectName: resolvedName,
-        slug: t.slug,
-        list: c.list,
-        lastChange: c.lastChange || null,
-        updated: c.updated || (c.meta && c.meta.updated) || "",
-        source: "project"
-      };
-    }
-    return { name: raw, projectName: raw, slug: t.slug, list: [], lastChange: null, updated: "", source: "none" };
+    return { savedToProjectSlot: true, projectName: cleanName, count: normalized.length, json: saved.json };
   }
 
   async function readProjectSlot(projectName) {
-    return readProjectSlotBySlug(projectName);
-  }
-
-  /* Discovers and returns every Project-Only material list saved on this PC (across Offline LTS disk, OPFS, IDB, localStorage & index), newest first. */
-  async function listProjectSlots() {
-    var bySlug = {};
-    var mergeEntry = function (sKey, entry) {
-      if (!sKey) return;
-      var cur = bySlug[sKey];
-      var nextUpdated = String((entry && entry.updated) || "");
-      var curUpdated = String((cur && cur.updated) || "");
-      if (!cur) {
-        bySlug[sKey] = {
-          slug: sKey,
-          name: (entry && entry.name) || "",
-          count: (entry && typeof entry.count === "number") ? entry.count : -1,
-          updated: nextUpdated,
-          lastChange: (entry && entry.lastChange) || null
-        };
-      } else {
-        if (nextUpdated && (!curUpdated || nextUpdated > curUpdated)) {
-          cur.updated = nextUpdated;
-          if (entry.name) cur.name = entry.name;
-          if (typeof entry.count === "number" && entry.count >= 0) cur.count = entry.count;
-          if (entry.lastChange) cur.lastChange = entry.lastChange;
-        } else {
-          if (!cur.name && entry && entry.name) cur.name = entry.name;
-          if (cur.count < 0 && entry && typeof entry.count === "number") cur.count = entry.count;
-        }
-      }
-    };
-
-    // 1. Offline LTS disk folder (C:\ProgramData\BOMTools\data\projects\)
-    var diskItems = await offlineServerListProjects();
-    diskItems.forEach(function (it) {
-      if (it && it.slug) mergeEntry(String(it.slug).toLowerCase(), it);
-    });
-
-    // 2. Stored index
-    var idxMap = await readProjectIndex();
-    Object.keys(idxMap).forEach(function (k) { mergeEntry(k, idxMap[k]); });
-
-    // 3. Scan localStorage keys (discovers any project saved before v2.2!)
-    try {
-      for (var i = 0; i < localStorage.length; i++) {
-        var lk = localStorage.key(i);
-        if (lk && lk.indexOf("bomProjectJson:") === 0) {
-          var s1 = lk.slice("bomProjectJson:".length);
-          if (s1) mergeEntry(s1, { slug: s1 });
-        }
-      }
-    } catch (e) { /* ignore */ }
-
-    // 4. Scan IndexedDB keys
-    var idbKeys = await idbGetAllKeys();
-    idbKeys.forEach(function (k) {
-      if (typeof k === "string" && k.indexOf("projectJson:") === 0) {
-        var s2 = k.slice("projectJson:".length);
-        if (s2) mergeEntry(s2, { slug: s2 });
-      }
-    });
-
-    // 5. Scan OPFS directory
-    var opfsSlugs = await opfsListProjectSlugs();
-    opfsSlugs.forEach(function (s3) { mergeEntry(s3, { slug: s3 }); });
-
-    // Hydrate any entries missing name/count (and verify data actually exists)
-    var slugs = Object.keys(bySlug);
-    var results = [];
-    for (var j = 0; j < slugs.length; j++) {
-      var sk = slugs[j];
-      var ent = bySlug[sk];
-      if (!ent.name || ent.count < 0) {
-        var slot = await readProjectSlotBySlug(sk);
-        if (slot && slot.list && slot.list.length) {
-          ent.name = slot.name || sk;
-          ent.count = slot.list.length;
-          if (!ent.updated && slot.updated) ent.updated = slot.updated;
-          if (!ent.lastChange && slot.lastChange) ent.lastChange = slot.lastChange;
-        }
-      }
-      if (ent.count > 0) {
-        results.push({
-          slug: ent.slug,
-          name: ent.name || ent.slug,
-          count: ent.count,
-          updated: ent.updated || "",
-          lastChange: ent.lastChange || null
-        });
-      }
+    var cleanName = String(projectName || "").trim();
+    if (!cleanName) return { list: [], lastChange: null, source: "none" };
+    var c = await readLocalCache(targetFor(cleanName));
+    if (c && c.list && c.list.length) {
+      return { list: c.list, lastChange: c.lastChange || null, updated: c.updated || "", source: "project" };
     }
-
-    results.sort(function (a, b) {
-      var cmp = String(b.updated || "").localeCompare(String(a.updated || ""));
-      return cmp !== 0 ? cmp : String(a.name || "").localeCompare(String(b.name || ""));
-    });
-    return results;
-  }
-
-  async function deleteProjectSlot(slugOrName) {
-    var raw = String(slugOrName || "").trim();
-    if (!raw) return false;
-    var t = targetBySlug(raw, raw);
-    try { localStorage.removeItem(t.cache); } catch (e) { /* ignore */ }
-    try { localStorage.removeItem(t.meta); } catch (e) { /* ignore */ }
-    await Promise.all([
-      idbDel(t.idb),
-      opfsDeleteFile(t.opfs),
-      offlineServerDeleteProject(t),
-      removeFromProjectIndex(t.slug)
-    ]);
-    return true;
-  }
-
-  /* Loads a saved Project-Only list from this PC into the current workbook (or links it ready for Restore on converted workbooks). */
-  async function applySavedProjectSlot(slugOrName, log) {
-    log = log || noop;
-    var slot = await readProjectSlotBySlug(slugOrName);
-    if (!slot || !slot.list || !slot.list.length) {
-      throw new Error("That saved project list could not be found or is empty.");
-    }
-    var pName = slot.name || String(slugOrName);
-    suppressWatch(6000);
-    var applied = true;
-    var r = { added: 0, updated: 0, removed: 0, skipped: [] };
-    try {
-      r = await applyList(slot.list, log, { syncRemovals: true, lastChange: slot.lastChange });
-    } catch (e) {
-      if (!/not found/i.test(String(e && e.message))) throw e;
-      applied = false;
-    }
-    if (root.BomTools && root.BomTools.setProjectMaterialMode) {
-      await root.BomTools.setProjectMaterialMode(pName);
-    }
-    projectState = { loaded: true, name: pName };
-    if (applied) {
-      try {
-        var curList = await workbookList();
-        updateWatchSnap(curList);
-      } catch (e2) { /* ignore */ }
-      log("Loaded saved Project-Only list \"" + pName + "\" (" + slot.list.length + " materials) into this workbook. Global Master was not changed.");
-    } else {
-      log("Selected saved Project-Only list \"" + pName + "\" (" + slot.list.length + " materials) for this converted workbook. Open Convert > Restore Automated to rebuild sheets with it.");
-    }
-    r.projectName = pName;
-    r.slug = slot.slug;
-    r.count = slot.list.length;
-    r.applied = applied;
-    return r;
+    return { list: [], lastChange: null, updated: "", source: "none" };
   }
 
   async function getLocalFileStatus() {
@@ -1086,7 +762,7 @@
     var syncRemovals = !!opts.syncRemovals;
     var T = root.BomTools, res = { added: 0, updated: 0, removed: 0, skipped: [] };
     suppressWatch(3500);
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var m = await T._openMaster(context);
       var hasAuditMeta = list.some(function (r) { return r.lastAction || r.lastModified; });
@@ -1246,7 +922,7 @@
       b64 = bufToB64(await res.arrayBuffer());
     }
 
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
@@ -1259,14 +935,6 @@
 
       var added = [];
       try {
-        var prevActiveName = "";
-        try {
-          var prevAct = wb.worksheets.getActiveWorksheet();
-          prevAct.load("name");
-          await context.sync();
-          prevActiveName = prevAct.name || "";
-        } catch (eAct) { prevActiveName = ""; }
-
         wb.worksheets.load("items/name");
         await context.sync();
         var before = wb.worksheets.items.map(function (w) { return w.name; });
@@ -1312,10 +980,8 @@
         log("Setting up named ranges and dropdowns ...");
         var matInfo = await T._ensureMasterNames(context, wb, log);
 
-        // Activate BOM Blank briefly while visible so Excel initializes its native view/freeze panes cleanly
-        blank.activate();
-        await context.sync();
-        await T._repairBomSheet(context, wb, blank, matInfo, { isActive: true, restoreActive: false }, log);
+        // Repair BOM Blank formulas, dropdown (C6:C2000), hidden row 5 / cols M & AB, freeze panes, and print setup
+        await T._repairBomSheet(context, wb, blank, matInfo, {}, log);
 
         // Verify no broken external links or #REF! remain on BOM Blank
         var rng = blank.getRange("A1:AB35").load("formulas");
@@ -1327,14 +993,6 @@
           await undo("The imported blank sheet has broken formulas (#REF! or an external link). The import was undone.");
         }
 
-        // Switch away from BOM Blank before hiding it so Excel keeps an active visible sheet
-        if (prevActiveName) {
-          try {
-            var prevWs = wb.worksheets.getItemOrNullObject(prevActiveName);
-            await context.sync();
-            if (!prevWs.isNullObject) { prevWs.activate(); await context.sync(); }
-          } catch (ePrev) { /* ignore */ }
-        }
         blank.visibility = Excel.SheetVisibility.hidden;
         await context.sync();
         await T._openMaster(context);
@@ -1366,15 +1024,13 @@
     if (watcher.on) return;
     var T = root.BomTools;
     try {
-      await runExcel(async function (context) {
+      await Excel.run(async function (context) {
         var ws = context.workbook.worksheets.getItemOrNullObject(T.MASTER);
         await context.sync();
         if (ws.isNullObject) return;
         watcher.snap = await workbookList();
-        ws.onChanged.add(function (ev) {
+        ws.onChanged.add(function () {
           if (Date.now() < watcher.ignoreUntil) return;
-          if (ev && ev.source && String(ev.source) !== "Local") return;
-          if (ev && ev.changeType && ev.changeType !== "RangeEdited" && ev.changeType !== "RowInserted" && ev.changeType !== "RowDeleted") return;
           clearTimeout(watcher.timer);
           watcher.timer = setTimeout(async function () {
             if (watcher.busy || Date.now() < watcher.ignoreUntil) return;
@@ -1446,7 +1102,7 @@
               }
             } catch (e) { log("Auto-save failed: " + (e.message || e)); }
             watcher.busy = false;
-          }, 1800);
+          }, 1400);
         });
         await context.sync();
         watcher.on = true;
@@ -1475,12 +1131,7 @@
     loadProjectState: loadProjectState,
     saveProjectSlot: saveProjectSlot,
     readProjectSlot: readProjectSlot,
-    readProjectSlotBySlug: readProjectSlotBySlug,
-    listProjectSlots: listProjectSlots,
-    deleteProjectSlot: deleteProjectSlot,
-    applySavedProjectSlot: applySavedProjectSlot,
     targetFor: targetFor,
-    slug: slug,
     // GitHub optional API
     hasToken: hasToken, getToken: getToken, setToken: setToken,
     compare: compare, pull: pull, push: push, importTemplate: importTemplate, repoInfo: repoInfo,

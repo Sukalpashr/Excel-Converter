@@ -27,16 +27,6 @@
   }
   function isBlank(v) { return v === "" || v === null || v === undefined; }
   function isFormula(f) { return typeof f === "string" && f.charAt(0) === "="; }
-  function runExcel(fn) {
-    if (root.BomTools && typeof root.BomTools.runExcel === "function") return root.BomTools.runExcel(fn);
-    try {
-      if (typeof Office !== "undefined" && Office.context && Office.context.requirements &&
-          Office.context.requirements.isSetSupported("ExcelApi", "1.9")) {
-        return Excel.run({ delayForCellEdit: true }, fn);
-      }
-    } catch (e) { /* fall through */ }
-    return Excel.run(fn);
-  }
 
   /* ---------- Excel calculation & screen-update suspension helpers ---------- */
   function canSuspendScreen() {
@@ -64,18 +54,9 @@
   async function restoreCalcAndRecalc(context, wb, prevCalcMode) {
     try {
       if (prevCalcMode !== null) wb.application.calculationMode = prevCalcMode;
-      if (Excel.CalculationType && Excel.CalculationType.fullRebuild) {
-        wb.application.calculate(Excel.CalculationType.fullRebuild);
-      } else {
-        wb.application.calculate(Excel.CalculationType.full);
-      }
+      wb.application.calculate(Excel.CalculationType.full);
       await context.sync();
-    } catch (e) {
-      try {
-        wb.application.calculate(Excel.CalculationType.full);
-        await context.sync();
-      } catch (e2) { /* ignore */ }
-    }
+    } catch (e) { /* ignore */ }
   }
 
   /* Write Excel 365 dynamic array formulas (SORT/UNIQUE/FILTER/# spill refs).
@@ -417,11 +398,6 @@
     addGrowCf(ws, 15, 5, PL_LAST, "$AE$2", 4);
 
     ws.pageLayout.setPrintArea("A1:AA" + Math.max(tot, PL_LAST));
-    try {
-      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
-      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-      ws.pageLayout.setPrintTitleRows("3:4");
-    } catch (ePl) { /* ignore on older hosts */ }
     ws.freezePanes.unfreeze();
     ws.freezePanes.freezeRows(4);
     return missing;
@@ -525,11 +501,6 @@
     ["P", "S", "U", "W", "Z"].forEach(function (L) { ws.getRange(L + gt).format.font.bold = true; });
 
     ws.pageLayout.setPrintArea("A1:AA" + Math.max(tot, rq));
-    try {
-      ws.pageLayout.orientation = Excel.PageOrientation.landscape;
-      ws.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
-      ws.pageLayout.setPrintTitleRows("3:4");
-    } catch (ePl) { /* ignore on older hosts */ }
     ws.freezePanes.unfreeze();
     ws.freezePanes.freezeRows(4);
     return missing;
@@ -953,7 +924,7 @@
 
     // 1. Inspect and batch-read all selected converted BOM sheets in ONE sync
     var hasMaster = false, hasBlank = false;
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -989,7 +960,7 @@
       if (hasMaster && !hasBlank) {
         var existingMaster = [];
         try { existingMaster = await S.workbookList(); } catch (e) { existingMaster = []; }
-        await runExcel(async function (context) {
+        await Excel.run(async function (context) {
           var mWs = context.workbook.worksheets.getItemOrNullObject(MASTER);
           await context.sync();
           if (!mWs.isNullObject) { mWs.delete(); await context.sync(); }
@@ -1003,7 +974,7 @@
       }
     }
 
-    // 3. Apply either an explicitly chosen Project-Only list (from PC slot or .json), explicit Global Master, or auto-detected BomProjectList
+    // 3. Apply either an explicitly chosen Project-Only JSON, an auto-detected BomProjectList slot, OR Global Master
     var detectedProj = { active: false, name: "" };
     try {
       if (S.loadProjectState) detectedProj = await S.loadProjectState();
@@ -1012,7 +983,7 @@
     if (opts.projectMaterials && Array.isArray(opts.projectMaterials.list) && opts.projectMaterials.list.length) {
       var pm = opts.projectMaterials;
       var projTitle = pm.projectName || "Project Custom Materials";
-      log("Applying Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
+      log("Applying saved Project-Only materials (\"" + projTitle + "\", " + pm.list.length + " items) ...");
       if (S.saveProjectSlot) {
         await S.saveProjectSlot(projTitle, pm.list, pm.lastChange || null);
       }
@@ -1021,18 +992,6 @@
         await T.setProjectMaterialMode(projTitle);
       }
       log("Workbook set to Project-Only Materials mode (Global Master list untouched).");
-    } else if (opts.materialSource === "global") {
-      if (detectedProj.active && T.exitProjectMaterialMode) {
-        await T.exitProjectMaterialMode();
-        log("Switched workbook from Project-Only (\"" + detectedProj.name + "\") to Global Master list.");
-      }
-      if (opts.syncLocal !== false) {
-        try {
-          await S.pullLocal(log, { forceGlobal: true, allowPrompt: true, syncRemovals: true });
-        } catch (eG) {
-          log("Note: skipped local master file sync (" + (eG.message || eG) + ").");
-        }
-      }
     } else if (detectedProj.active) {
       log("Detected Project-Only list \"" + detectedProj.name + "\" from workbook properties ...");
       try {
@@ -1041,7 +1000,7 @@
           await T.setProjectMaterialMode(detectedProj.name);
         }
         if (pulledProj && pulledProj.empty) {
-          warnings.push("No saved copy of project list \"" + detectedProj.name + "\" was found on this computer. Pick a saved project list or load its .json file in Restore so custom materials get their weights.");
+          warnings.push("No saved copy of project list \"" + detectedProj.name + "\" was found on this computer. Load its saved .json file in Restore > Project Materials .json and restore again so custom materials get their weights.");
         }
       } catch (eP) {
         log("Note: could not load project list \"" + detectedProj.name + "\" (" + (eP.message || eP) + ").");
@@ -1055,7 +1014,7 @@
     }
 
     // 4. Rebuild ALL selected converted sheets in batched syncs under Manual calculation mode
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
       try {
@@ -1077,7 +1036,6 @@
         var masterLookup = await readMaster(context, wb);
 
         var blankWs = wb.worksheets.getItem(BLANK);
-        blankWs.load("visibility");
         blankWs.tables.load("items/name");
         wb.worksheets.load("items/name");
         wb.tables.load("items/name");
@@ -1090,50 +1048,27 @@
         var existingNames = wb.worksheets.items.map(function (w) { return w.name; });
         var takenTables = wb.tables.items.map(function (t) { return t.name; });
 
-        // Batch A: Temporarily unhide BOM Blank before copying (copying a hidden sheet corrupts Excel's in-cell editor view)
+        // Batch A: Rename all original sheets to temp names & copy BOM Blank for each
         log("Rebuilding " + extracted.length + " sheet(s) from template ...");
-        var blankOrigVis = blankWs.visibility;
-        var blankWasHidden = blankOrigVis !== "Visible";
-        var jobs = [];
-        try {
-          if (blankWasHidden) {
-            blankWs.visibility = Excel.SheetVisibility.visible;
-            await context.sync();
-            blankWs.activate();
-            await context.sync();
-          }
-          pauseExcel(context);
-          jobs = extracted.map(function (data, idx) {
-            data.usedMaterials.forEach(function (matName) {
-              if (!masterLookup[matName] && !masterLookup[matName.trim()]) {
-                warnings.push(data.name + ": \"" + matName + "\" is not in Master Unique Materials (add it in the Materials tab so weights calculate).");
-              }
-            });
-            var oldWs = wb.worksheets.getItem(data.name);
-            var tmpName = T.uniqueName("__tmp_" + idx, existingNames).slice(0, 31);
-            existingNames.push(tmpName);
-            oldWs.name = tmpName;
-
-            var restored = blankWs.copy(Excel.WorksheetPositionType.after, oldWs);
-            return { data: data, oldWs: oldWs, restored: restored };
+        pauseExcel(context);
+        var jobs = extracted.map(function (data, idx) {
+          data.usedMaterials.forEach(function (matName) {
+            if (!masterLookup[matName] && !masterLookup[matName.trim()]) {
+              warnings.push(data.name + ": \"" + matName + "\" is not in Master Unique Materials (add it in the Materials tab so weights calculate).");
+            }
           });
-          await context.sync();
+          var oldWs = wb.worksheets.getItem(data.name);
+          var tmpName = T.uniqueName("__tmp_" + idx, existingNames).slice(0, 31);
+          existingNames.push(tmpName);
+          oldWs.name = tmpName;
 
-          jobs.forEach(function (job) {
-            job.restored.name = job.data.name;
-            job.restored.visibility = Excel.SheetVisibility.visible;
-            job.restored.tables.load("items/name");
-          });
-          if (jobs.length) jobs[0].restored.activate();
-          await context.sync();
-        } finally {
-          if (blankWasHidden) {
-            try {
-              blankWs.visibility = blankOrigVis === "VeryHidden" ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
-              await context.sync();
-            } catch (eVis) { /* ignore */ }
-          }
-        }
+          var restored = blankWs.copy(Excel.WorksheetPositionType.after, oldWs);
+          restored.name = data.name;
+          restored.visibility = Excel.SheetVisibility.visible;
+          restored.tables.load("items/name");
+          return { data: data, oldWs: oldWs, restored: restored };
+        });
+        await context.sync();
 
         // Batch B: Rename tables, set titles/AE1, and load bomBody rowCount for all sheets
         pauseExcel(context);
@@ -1248,23 +1183,21 @@
           ws.getRange("5:5").rowHidden = true;
           ws.getRange("M:M").columnHidden = true;
           ws.getRange("AB:AB").columnHidden = true;
+          ws.showGridlines = false;
+          ws.freezePanes.unfreeze();
+          ws.freezePanes.freezeRows(5);
 
           job.oldWs.delete();
         });
         if (compWs && !compWs.isNullObject) compWs.delete();
         await context.sync();
 
-        // Batch E2: Apply Materials dropdown tightly across BOM rows on all restored sheets in 1 sync (with fallback per sheet)
+        // Batch E2: Apply Materials dropdown across all restored sheets in 1 sync (with fallback per sheet)
         var dvFallbackJobs = [];
         try {
           pauseExcel(context);
           jobs.forEach(function (job) {
-            var endRow = 5 + Math.max(300, (job.data && job.data.bomRows ? job.data.bomRows.length : 300));
-            var target = null;
-            if (job.bomT) {
-              try { target = job.bomT.columns.getItem("Materials").getDataBodyRange(); } catch (eCol) { target = null; }
-            }
-            if (!target) target = job.restored.getRange("C6:C" + endRow);
+            var target = job.restored.getRange("C6:C2000");
             target.dataValidation.clear();
             target.dataValidation.rule = { list: { inCellDropDown: true, source: "=Materials" } };
             target.dataValidation.ignoreBlanks = true;
@@ -1282,15 +1215,17 @@
         }
         if (dvFallbackJobs.length) {
           for (var df = 0; df < dvFallbackJobs.length; df++) {
-            await T._applyBomDataValidation(context, dvFallbackJobs[df].restored, matInfo, log, 305, dvFallbackJobs[df].bomT);
+            await T._applyBomDataValidation(context, dvFallbackJobs[df].restored, matInfo, log);
           }
         }
 
-        // Batch F: Keep live restored sheets lightweight (landscape only — no fitToPages zoom or print title rows during editing)
+        // Batch F: Print setup for all restored sheets (non-fatal)
         try {
           pauseExcel(context);
           jobs.forEach(function (job) {
             job.restored.pageLayout.orientation = Excel.PageOrientation.landscape;
+            job.restored.pageLayout.zoom = { horizontalFitToPages: 1, verticalFitToPages: 0 };
+            job.restored.pageLayout.setPrintTitleRows("3:4");
           });
           await context.sync();
         } catch (e) { /* non-fatal on hosts without full pageLayout support */ }
@@ -1325,37 +1260,14 @@
           if (wrotePo) await context.sync();
         }
 
-        // Apply window-view properties (showGridlines & freezePanes) & resync live table formulas while each restored sheet is active
-        for (var vj = jobs.length - 1; vj >= 0; vj--) {
-          try {
-            var rws = jobs[vj].restored;
-            rws.activate();
-            await context.sync();
-            if (T && T._resyncBomFormulas) await T._resyncBomFormulas(context, rws);
-            rws.showGridlines = false;
-            rws.freezePanes.unfreeze();
-            await context.sync();
-            rws.freezePanes.freezeRows(4);
-            await context.sync();
-          } catch (eView) { /* non-fatal */ }
-        }
-        if (jobs.length) {
-          jobs[0].restored.activate();
-          await context.sync();
-          jobs[0].restored.getRange("B6").select();
-          await context.sync();
-        }
+        if (jobs.length) jobs[0].restored.activate();
       } finally {
         await restoreCalcAndRecalc(context, wb, prevCalcMode);
       }
     });
 
     log("Restored " + extracted.length + " sheet(s) back to automated BOM format.");
-    return {
-      restoredCount: extracted.length,
-      firstSheetName: extracted.length ? extracted[0].name : "",
-      warnings: warnings
-    };
+    return { restoredCount: extracted.length, warnings: warnings };
   }
 
   async function inspectWorkbook() {
@@ -1366,7 +1278,7 @@
       growingConvertedSheets: [],
       masterMode: { isProject: false, active: false, projectName: "", name: "" }
     };
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -1423,7 +1335,7 @@
       opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
     }
     var fixed = [], skipped = [];
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       wb.worksheets.load("items/name,items/visibility,items/position");
       await context.sync();
@@ -1548,20 +1460,15 @@
       opts.sheets.forEach(function (n) { selectedSet[String(n).trim().toLowerCase()] = true; });
     }
 
-    // Auto-snapshot active Project-Only list to this PC's per-project storage slot & re-stamp BomProjectList before converting
-    var activeProjectName = "";
+    // Auto-snapshot active Project-Only list to this PC's per-project storage slot before converting
     try {
       if (root.BomSync && root.BomSync.loadProjectState && root.BomSync.saveProjectSlot) {
         var projInfo = await root.BomSync.loadProjectState();
         if (projInfo && projInfo.active) {
-          activeProjectName = projInfo.name;
           var projList = await root.BomSync.workbookList();
           if (projList.length) {
             await root.BomSync.saveProjectSlot(projInfo.name, projList, null);
             log("Backed up Project-Only list \"" + projInfo.name + "\" (" + projList.length + " items) to this computer's project storage.");
-          }
-          if (root.BomTools && root.BomTools.setProjectMaterialMode) {
-            await root.BomTools.setProjectMaterialMode(projInfo.name);
           }
         }
       }
@@ -1570,7 +1477,7 @@
     var keepMaster = false;
     var convertedCount = 0;
 
-    await runExcel(async function (context) {
+    await Excel.run(async function (context) {
       var wb = context.workbook;
       var prevCalcMode = null;
 
