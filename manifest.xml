@@ -4,16 +4,16 @@
            xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
            xsi:type="TaskPaneApp">
   <Id>edc7b986-b6ff-4f0f-8f36-09b111577d00</Id>
-  <Version>1.0.0.0</Version>
+  <Version>1.1.0.0</Version>
   <ProviderName>BOM Tools</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
-  <DisplayName DefaultValue="BOM Converter"/>
-  <Description DefaultValue="Converts the automated BOM workbook into a simplified, plain-formula workbook."/>
-  <IconUrl DefaultValue="https://YOUR-HOST/assets/icon-32.png"/>
-  <HighResolutionIconUrl DefaultValue="https://YOUR-HOST/assets/icon-64.png"/>
-  <SupportUrl DefaultValue="https://YOUR-HOST/"/>
+  <DisplayName DefaultValue="BOM Tools"/>
+  <Description DefaultValue="Creates automated BOM take-off sheets, manages the Master Unique Materials list, and converts BOM workbooks into plain-formula files."/>
+  <IconUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/"/>
   <AppDomains>
-    <AppDomain>https://YOUR-HOST</AppDomain>
+    <AppDomain>https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin</AppDomain>
   </AppDomains>
   <Hosts>
     <Host Name="Workbook"/>
@@ -24,7 +24,7 @@
     </Sets>
   </Requirements>
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://YOUR-HOST/taskpane.html"/>
+    <SourceLocation DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/taskpane.html"/>
   </DefaultSettings>
   <Permissions>ReadWriteDocument</Permissions>
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
@@ -64,19 +64,19 @@
     </Hosts>
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16" DefaultValue="https://YOUR-HOST/assets/icon-16.png"/>
-        <bt:Image id="Icon.32" DefaultValue="https://YOUR-HOST/assets/icon-32.png"/>
-        <bt:Image id="Icon.80" DefaultValue="https://YOUR-HOST/assets/icon-80.png"/>
+        <bt:Image id="Icon.16" DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Taskpane.Url" DefaultValue="https://YOUR-HOST/taskpane.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://ais-dev-vsr2dhfaqi2miupv6pfrq4-1006991043212.asia-southeast1.run.app/addin/taskpane.html"/>
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="Group.Label" DefaultValue="BOM Tools"/>
-        <bt:String id="Button.Label" DefaultValue="BOM Converter"/>
+        <bt:String id="Button.Label" DefaultValue="BOM Tools"/>
       </bt:ShortStrings>
       <bt:LongStrings>
-        <bt:String id="Button.Tip" DefaultValue="Open the side panel to convert the BOM workbook into a simplified file."/>
+        <bt:String id="Button.Tip" DefaultValue="Open the BOM Tools panel to add take-off sheets, manage materials, or convert the workbook."/>
       </bt:LongStrings>
     </Resources>
   </VersionOverrides>
